@@ -1,0 +1,19 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="160" y1="120" x2="864" y2="904" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6E7BF2"/>
+      <stop offset="1" stop-color="#8B5CF6"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="160" y1="120" x2="512" y2="560" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <!-- macOS squircle-ish app tile (content inset within the 1024 canvas) -->
+  <rect x="128" y="128" width="768" height="768" rx="180" fill="url(#bg)"/>
+  <rect x="128" y="128" width="768" height="768" rx="180" fill="url(#sheen)"/>
+  <!-- App initial -->
+  <text x="512" y="512" font-family="-apple-system, SF Pro Display, Helvetica, Arial, sans-serif"
+        font-size="440" font-weight="700" fill="#ffffff"
+        text-anchor="middle" dominant-baseline="central">D</text>
+</svg>

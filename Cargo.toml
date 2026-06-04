@@ -1,0 +1,62 @@
+[package]
+name = "deck"
+version = "0.1.0"
+edition = "2021"
+description = "An omakase native desktop app starter (macOS + Linux) on GPUI + gpui-component. Fork it, rename it, ship it."
+license = "MIT"
+default-run = "deck"
+
+[[bin]]
+name = "deck"
+path = "src/main.rs"
+
+[dependencies]
+# The matched, pure-crates.io GPUI stack (Metal renderer on macOS — no git deps, no vendoring).
+# `gpui` 0.2.x is the longbridge/blade fork that `gpui-component` 0.5.x is built against.
+gpui = "0.2"
+gpui-component = "0.5"
+# Prebuilt asset source: all gpui-component icon SVGs + bundled fonts.
+# Register it with `.with_assets(...)` so `IconName::*` renders.
+gpui-component-assets = "0.5"
+
+# Preferences: serialize a Settings struct to the platform config dir.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+directories = "5"
+
+# --- Optional: menu-bar / tray apps (`--features tray`) — cross-platform ---
+# tray-icon draws a native status item on every OS: NSStatusItem (macOS),
+# libappindicator / StatusNotifierItem (Linux), Shell_NotifyIcon (Windows).
+# There is no second renderer — your windows stay GPUI everywhere.
+tray-icon = { version = "0.24", optional = true }
+
+[features]
+default = []
+tray = ["dep:tray-icon", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation"]
+
+# objc2 is only used to hide the macOS dock icon — pull it on macOS only, so a
+# Linux/Windows `--features tray` build never tries to compile Apple crates.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6", optional = true }
+objc2-app-kit = { version = "0.3", optional = true }
+objc2-foundation = { version = "0.3", optional = true }
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
+
+# ---------------------------------------------------------------------------
+# `cargo bundle` config (batteries included). On macOS → Deck.app; cargo
+# bundle can also emit `deb` on Linux. Run `just bundle`.
+#   cargo install cargo-bundle
+# Drop your own 1024x1024 PNG at assets/icon.png and re-bundle to rebrand.
+# ---------------------------------------------------------------------------
+[package.metadata.bundle]
+name = "Deck"
+identifier = "com.example.deck"
+icon = ["assets/icon.png"]
+category = "public.app-category.productivity"
+short_description = "A small, snappy native desktop app starter built on GPUI."
+long_description = "Deck is a tiny, opinionated GPUI starter you can fork to build your own fast, native desktop app on macOS and Linux (and wire your own AI agent into it)."
+osx_minimum_system_version = "11.0"

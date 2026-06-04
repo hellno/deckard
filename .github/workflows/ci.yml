@@ -1,0 +1,60 @@
+name: CI
+
+# Builds the Deck on macOS *and* Linux so cross-platform stays honest.
+# (GPUI renders with Metal on macOS and Vulkan via blade on Linux.)
+#
+# COST: free. Standard GitHub-hosted runners (macos-latest, ubuntu-latest) are
+# free + unlimited on PUBLIC repos — the macOS 10x multiplier only burns quota
+# on PRIVATE repos. If you ever make this repo private, gate the `macos` job to
+# tags to avoid eating your minutes, e.g. add to that job:
+#     if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v')
+# (Don't switch to "*-large" runners — those are billed even on public repos.)
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build
+      - run: cargo build --features tray
+      - run: cargo clippy --all-targets --features tray -- -D warnings
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # System libraries GPUI needs on Linux (X11 + Wayland + Vulkan + fonts),
+      # plus GTK/appindicator for the optional tray feature.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libxkbcommon-dev \
+            libvulkan-dev \
+            libfontconfig1-dev libfreetype6-dev \
+            libssl-dev \
+            libgtk-3-dev libayatana-appindicator3-dev
+      - run: cargo build
+      - run: cargo build --features tray
+      - run: cargo clippy --all-targets --features tray -- -D warnings

@@ -1,0 +1,32 @@
+Deck — third-party attributions
+====================================
+
+This project is MIT licensed (see LICENSE). It bundles or depends on the
+following third-party work, each under its own permissive license.
+
+Lucide icons
+------------
+The icon set exposed via gpui-component's `IconName` (and bundled as SVGs by
+`gpui-component-assets`) is Lucide. Lucide is licensed under the ISC License.
+
+    Copyright (c) for portions of Lucide are held by Cole Bemis 2013-2022 as
+    part of Feather (MIT). All other copyright (c) for Lucide are held by the
+    Lucide Contributors 2022.
+
+    Permission to use, copy, modify, and/or distribute this software for any
+    purpose with or without fee is hereby granted, provided that the above
+    copyright notice and this permission notice appear in all copies.
+
+ISC is a permissive, MIT-equivalent license — free for personal and commercial
+use. Keep this notice if you redistribute the bundled icons. https://lucide.dev
+
+GPUI and gpui-component
+-----------------------
+- gpui (`gpui` 0.2.x on crates.io) — derived from Zed's GPUI. Apache-2.0 / GPL
+  (see the upstream Zed repository for details).
+- gpui-component (`gpui-component` 0.5.x) — Apache-2.0, © Longbridge.
+
+tray-icon (optional, `--features tray`)
+---------------------------------------
+- tray-icon, muda, objc2, objc2-app-kit — MIT/Apache-2.0 (Tauri / objc2
+  contributors).
