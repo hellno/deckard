@@ -2,17 +2,11 @@
 
 # Deck
 
-**An omakase desktop-app starter (macOS + Linux) on [GPUI](https://www.gpui.rs/) + [gpui-component](https://github.com/longbridge/gpui-component).**
+**A native desktop-app starter for macOS + Linux, built on [GPUI](https://www.gpui.rs/) + [gpui-component](https://github.com/longbridge/gpui-component).**
 
-Fork it, rename it, ship it. A tiny, **fast, snappy, native** desktop app — real title bar,
-system menu bar, keyboard shortcuts, a refined theme with a live accent picker, persisted
-settings, and an optional menu-bar (tray) mode — so you can delete the welcome screen and start
-building (or wire in your own AI agent).
-
-Built for people who want a *snappy native GUI without the Electron tax* and would rather
-**vibe-code** features on top than fight a framework. You don't need to be a Rust expert — the
-app is a few small, commented files; copy a page, change some text, run it. (Rustaceans get all
-the low-level control too.)
+Fork it, rename it, ship it. You get a real title bar, the system menu bar, keyboard shortcuts,
+a dark/light theme with a live accent picker, persisted settings, and an optional menu-bar (tray)
+mode. Then delete the welcome screen and build your app — or wire in your own AI agent.
 
 <img src="docs/screenshot.png" width="720" alt="Deck welcome window">
 
@@ -22,16 +16,12 @@ the low-level control too.)
 
 ## Why this exists
 
-[Zed](https://github.com/zed-industries/zed) proved you can build a buttery, GPU-accelerated
-native app in Rust with their own UI framework, **GPUI**. [gpui-component](https://github.com/longbridge/gpui-component)
-turns GPUI into a batteries-included, shadcn-style component kit. Together they're a fantastic
-foundation — but every new project re-solves the same boilerplate: a window that *looks* native,
-a menu bar, ⌘-shortcuts, a theme that isn't harsh, somewhere to save preferences, an app icon,
-and a `.app` you can hand to a friend.
-
-**Deck is that boilerplate, solved once, opinionated, and kept small.** It's "omakase"
-(chef's choice): sensible defaults baked in, not a maze of options. ~700 lines of app code across
-a handful of focused files, pure crates.io dependencies — no git submodules, no vendoring, no `node`.
+[Zed](https://github.com/zed-industries/zed)'s **GPUI** is a fast, GPU-accelerated Rust UI
+framework; [gpui-component](https://github.com/longbridge/gpui-component) adds a shadcn-style
+component kit on top. Deck is the boilerplate you'd otherwise rewrite for every project — native
+window, menu bar, shortcuts, a non-harsh theme, saved settings, an app icon, a shippable bundle —
+done once, opinionated, and kept small: ~700 lines across a few files, pure crates.io deps, no
+submodules, no vendoring, no `node`.
 
 ## Quick start
 
@@ -40,13 +30,13 @@ git clone <your-fork> my-app && cd my-app
 cargo run
 ```
 
-That's it. First build compiles GPUI from source (a few minutes, once); after that it's instant.
-You'll get the window above. You need a stable **Rust** toolchain (`rustup`) and:
+The first build compiles GPUI from source (a few minutes, once); after that, rebuilds are fast.
+You need a stable **Rust** toolchain (`rustup`) and:
 
 - **macOS 11+** — **Xcode Command Line Tools** (`xcode-select --install`). Apple Silicon + Intel.
-  GPUI renders with **Metal**.
-- **Linux** — a GPU with **Vulkan**, plus the dev libraries below. GPUI renders with **Vulkan**
-  (via `blade`); X11 and Wayland both work.
+  Renders with **Metal**.
+- **Linux** — a GPU with **Vulkan** plus the dev libraries below. Renders with **Vulkan** (via
+  `blade`); X11 and Wayland both work.
 
   ```bash
   sudo apt install build-essential pkg-config libxcb1-dev libxkbcommon-dev \
@@ -54,42 +44,38 @@ You'll get the window above. You need a stable **Rust** toolchain (`rustup`) and
     libfreetype6-dev libssl-dev          # + libgtk-3-dev libayatana-appindicator3-dev for --features tray
   ```
 
-> Same code, both platforms — see [Platforms](#platforms) for what's verified. CI builds macOS
-> **and** Linux on every push (`.github/workflows/ci.yml`).
+> Same code on both. CI builds macOS **and** Linux on every push — see [Platforms](#platforms).
 
 ## What you get
 
 |  | Feature | Where |
 |---|---|---|
 | 🪟 | Native window + custom transparent title bar (traffic lights on macOS, window controls on Linux) | `main.rs`, `shell.rs` |
-| 🎨 | **Refined dark/light theme** + a live **accent picker** (6 colors) | `theme.rs` |
-| ⚙️ | **Settings page** with persisted preferences (JSON in the OS config dir) | `settings.rs`, `settings_view.rs` |
+| 🎨 | Dark/light theme + a live **accent picker** (6 colors) | `theme.rs` |
+| ⚙️ | **Settings page** with preferences saved as JSON in the OS config dir | `settings.rs`, `settings_view.rs` |
 | ⌨️ | **Keyboard shortcuts** → actions → menu items | `main.rs`, `shell.rs` |
 | 📋 | Native **menu bar** (App / File / Edit / View) | `main.rs` |
-| 🟣 | Optional **menu-bar / tray mode** (no dock icon) — `--features tray` | `tray.rs` |
+| 🟣 | Optional **menu-bar / tray mode**, no dock icon — `--features tray` | `tray.rs` |
 | 🔣 | **Lucide** icon set (ISC licensed, bundled) | `gpui-component` |
 | 🖼️ | **App icon** pipeline (svg → png → icns) + `cargo bundle` config | `assets/`, `Cargo.toml` |
 
-The deep dive — and the answers to "can I have a menu-bar icon / dock icon / how do app icons
-work / how should I store preferences / how nice can the theme get?" — is in
-**[docs/LEARNINGS.md](docs/LEARNINGS.md)**.
+The how and why behind each is in **[docs/LEARNINGS.md](docs/LEARNINGS.md)**.
 
 ## Settings & theming
 
 <img src="docs/screenshot-settings.png" width="640" alt="Deck settings page">
 
-Open with **⌘,** or the gear in the title bar. Everything here writes straight back to a JSON file
-in the OS config dir and applies live:
+Open with **⌘,** or the gear in the title bar. Every control writes to a JSON file in the OS config
+dir and applies live:
 
 - **Theme** — dark / light, toggle anytime with **⌘⇧D** or the sun/moon button.
 - **Accent** — six brand colors; picking one re-themes the whole app instantly (logo, buttons,
   focus rings, the tray icon).
-- **Display name** — a stateful text field that greets you on the home screen.
+- **Display name** — a text field that greets you on the home screen.
 
-Preferences live at `~/Library/Application Support/<bundle-id>/settings.json`. The whole storage
-layer is ~40 lines of `serde` + the `directories` crate — see
-[LEARNINGS §3](docs/LEARNINGS.md#settings) for why this beats a database, and how it compares to
-`confy` and to Zed's settings system.
+Preferences live at `~/Library/Application Support/<bundle-id>/settings.json`. The storage layer is
+~40 lines of `serde` + the `directories` crate — see [LEARNINGS §3](docs/LEARNINGS.md#settings) for
+how it compares to `confy` and Zed's settings system.
 
 ## Menu-bar / tray-first apps (`--features tray`)
 
@@ -97,13 +83,11 @@ layer is ~40 lines of `serde` + the `directories` crate — see
 cargo run --features tray
 ```
 
-
-This turns Deck into a **menu-bar app with no dock icon**. The tray icon is a *native* status
-item (an image + a native menu — there is **no second rendering system**; your windows stay 100%
-GPUI), and it recolors to match your accent. Clicking the menu's items is bridged back into GPUI on
-its own executor. `tray-icon` is cross-platform (`NSStatusItem` on macOS, `libappindicator` on
-Linux); the dock-hiding is macOS-only and cfg-gated. See
-[LEARNINGS §8](docs/LEARNINGS.md#tray) for the full architecture.
+This turns Deck into a menu-bar app with no dock icon. The tray icon is a *native* status item — an
+image plus a native menu, so there's **no second rendering system** and your windows stay GPUI — and
+it recolors to match your accent. Menu clicks are bridged back into GPUI on its own executor.
+`tray-icon` is cross-platform (`NSStatusItem` on macOS, `libappindicator` on Linux); the dock-hiding
+is macOS-only and cfg-gated. Architecture in [LEARNINGS §8](docs/LEARNINGS.md#tray).
 
 ## Platforms
 
@@ -115,8 +99,8 @@ Linux); the dock-hiding is macOS-only and cfg-gated. See
 | Tray (`--features tray`) | ✅ verified | ⚠️ builds (libappindicator); may need a GTK loop¹ |
 
 ¹ The author develops on macOS; Linux is kept honest by CI (`.github/workflows/ci.yml` builds both
-on every push) but isn't daily-driven yet. If you run it on Linux, issues/PRs very welcome.
-² macOS-only `.icns` generation is in `just icon`; the PNG it starts from is cross-platform.
+on every push) but isn't daily-driven yet. Linux issues/PRs welcome.
+² macOS-only `.icns` generation lives in `just icon`; the PNG it starts from is cross-platform.
 
 ## Make it yours (fork checklist)
 
@@ -136,16 +120,16 @@ just bundle                  # → target/release/bundle/osx/<App>.app
 
 ## Wire in your agent
 
-This is meant as the *shell* for an AI-agent desktop app. `Shell` is a normal GPUI view that owns
-state and reacts to actions — that's where your agent loop lives:
+`Shell` is a normal GPUI view that owns state and reacts to actions — that's where your agent loop
+lives:
 
 - **Background work** — GPUI ships an async executor. From a view: `cx.spawn(async move |this, cx| { /* call your model / tools */ this.update(cx, |this, cx| cx.notify())?; })`.
 - **Streaming** — push tokens into view state and call `cx.notify()` to re-render; GPUI diffs efficiently.
 - **Tools / processes** — spawn subprocesses or HTTP from the executor; keep the UI thread free.
 - **Persistence** — extend `Settings`, or drop in `rusqlite` for richer history.
 
-Point it at the Anthropic API (Claude), a local model, or your own runtime — the Deck doesn't
-care. The `NewItem` handler in `shell.rs` is the seam: replace "create an item" with "start a run."
+Point it at the Anthropic API (Claude), a local model, or your own runtime — Deck doesn't care. The
+`NewItem` handler in `shell.rs` is the seam: replace "create an item" with "start a run."
 
 ## Keyboard shortcuts
 
@@ -157,7 +141,8 @@ care. The `NewItem` handler in `shell.rs` is the seam: replace "create an item" 
 | `⌘⇧D` | Toggle light / dark theme |
 | `⌘Q` | Quit |
 
-Add your own in two lines: declare it in the `actions!` macro and add a `KeyBinding::new(...)`.
+`⌘` on macOS, `Ctrl` on Linux/Windows. Add your own in two lines: declare it in the `actions!` macro
+and add a `KeyBinding::new(...)`.
 
 ## Project layout
 
@@ -193,13 +178,13 @@ objc2 / objc2-app-kit         # macOS-only, dock hiding (target-gated to cfg(mac
 ```
 
 The GPUI pieces are **pure crates.io** — the matched, published pair, no git dependencies and no
-vendoring. (Zed's own `gpui` is only on git; gpui-component publishes against the `gpui` 0.2 fork,
-which is what makes a clean `cargo run` fork possible.) See
-[LEARNINGS §2](docs/LEARNINGS.md#dependencies) for the full rationale.
+vendoring. (Zed's own `gpui` is git-only; gpui-component publishes against the `gpui` 0.2 fork,
+which is what makes a clean `cargo run` fork possible.) Full rationale in
+[LEARNINGS §2](docs/LEARNINGS.md#dependencies).
 
 ## Credits & license
 
-Standing on the shoulders of [Zed Industries](https://github.com/zed-industries/zed) (GPUI) and
-[Longbridge](https://github.com/longbridge/gpui-component) (gpui-component). Icons are
-[Lucide](https://lucide.dev) (ISC). Deck itself is 0BSD licensed (zero-attribution, do whatever you want). See
-[NOTICE](NOTICE) for third-party attributions.
+Built on [Zed](https://github.com/zed-industries/zed) (GPUI) and
+[Longbridge](https://github.com/longbridge/gpui-component) (gpui-component); icons are
+[Lucide](https://lucide.dev) (ISC). Deck itself is 0BSD — zero-attribution, do whatever you want.
+See [NOTICE](NOTICE) for third-party attributions.
