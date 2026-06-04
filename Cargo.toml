@@ -3,7 +3,7 @@ name = "deck"
 version = "0.1.0"
 edition = "2021"
 description = "An omakase native desktop app starter (macOS + Linux) on GPUI + gpui-component. Fork it, rename it, ship it."
-license = "MIT"
+license = "0BSD"
 default-run = "deck"
 
 [[bin]]

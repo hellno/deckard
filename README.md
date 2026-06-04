@@ -201,5 +201,5 @@ which is what makes a clean `cargo run` fork possible.) See
 
 Standing on the shoulders of [Zed Industries](https://github.com/zed-industries/zed) (GPUI) and
 [Longbridge](https://github.com/longbridge/gpui-component) (gpui-component). Icons are
-[Lucide](https://lucide.dev) (ISC). This Deck is MIT licensed — do whatever you want. See
+[Lucide](https://lucide.dev) (ISC). Deck itself is 0BSD licensed (zero-attribution, do whatever you want). See
 [NOTICE](NOTICE) for third-party attributions.
