@@ -67,10 +67,10 @@ pub fn install(cx: &mut App, accent: Accent) {
                 .await;
             while let Ok(event) = rx.try_recv() {
                 if event.id == quit_id {
-                    let _ = cx.update(|cx| cx.quit());
+                    cx.update(|cx| cx.quit());
                 } else if event.id == show_id {
                     // Bring the (still-GPUI) window back to the foreground.
-                    let _ = cx.update(|cx| cx.activate(true));
+                    cx.update(|cx| cx.activate(true));
                 }
             }
         }

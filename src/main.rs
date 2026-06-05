@@ -20,8 +20,8 @@ mod wallet;
 mod welcome;
 
 use gpui::{
-    px, size, App, AppContext, Application, Bounds, KeyBinding, Menu, MenuItem, OsAction,
-    WindowBounds, WindowOptions,
+    px, size, App, AppContext, Bounds, KeyBinding, Menu, MenuItem, OsAction, WindowBounds,
+    WindowOptions,
 };
 use gpui_component::{Root, TitleBar};
 
@@ -41,7 +41,9 @@ gpui::actions!(
 fn main() {
     // `with_assets` registers gpui-component's bundled icon SVGs + fonts so
     // `IconName::*` renders. This is the whole asset story for the UI kit.
-    Application::new()
+    // `application()` lives in `gpui_platform` after Zed split gpui into core +
+    // platform crates; it returns the same `gpui::Application` builder.
+    gpui_platform::application()
         .with_assets(gpui_component_assets::Assets)
         .run(|cx: &mut App| {
             // 1. Bring up gpui-component (themes, fonts, icon assets, input system).
@@ -76,6 +78,7 @@ fn main() {
             cx.set_menus(vec![
                 Menu {
                     name: APP_NAME.into(),
+                    disabled: false,
                     items: vec![
                         MenuItem::action(format!("About {APP_NAME}"), About),
                         MenuItem::separator(),
@@ -86,10 +89,12 @@ fn main() {
                 },
                 Menu {
                     name: "File".into(),
+                    disabled: false,
                     items: vec![MenuItem::action("New", NewItem)],
                 },
                 Menu {
                     name: "Edit".into(),
+                    disabled: false,
                     items: vec![
                         MenuItem::os_action("Undo", NewItem, OsAction::Undo),
                         MenuItem::separator(),
@@ -101,6 +106,7 @@ fn main() {
                 },
                 Menu {
                     name: "View".into(),
+                    disabled: false,
                     items: vec![MenuItem::action("Toggle Light / Dark", ToggleTheme)],
                 },
             ]);

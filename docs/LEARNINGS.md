@@ -21,7 +21,7 @@ source tree for context. File/line refs point into those.
 │                      TitleBar, Root, icons   │
 ├─────────────────────────────────────────────┤
 │ gpui 0.2   windows, elements, flexbox,       │  Zed's UI framework
-│            Metal renderer, actions, menus    │  (longbridge fork)
+│            Metal renderer, actions, menus    │  (Zed's own crate)
 └─────────────────────────────────────────────┘
 ```
 
@@ -38,27 +38,49 @@ shortcuts, a theme that isn't harsh, a place to store preferences, an icon, and 
 
 ## 2. The dependency decision {#dependencies}
 
-There are **three** different GPUI lineages, and mixing them does not compile. Picking the right one
-is what makes a clean `cargo run` fork possible.
+The confusion isn't "Zed gpui vs. a longbridge fork" — that's a myth. crates.io `gpui` **is Zed's own
+official crate** (owners: Max Brunsfeld, Mikayla Maki, the `zed-industries` team; repo
+`zed-industries/zed`; homepage `gpui.rs`). The real distinction is **two release channels of the same
+Zed gpui**, plus a third-party mirror:
 
-| Crate | Source | Renderer | Use it when |
+| Channel | What it actually is | Renderer | Use it when |
 |---|---|---|---|
-| `gpui` (git) | `github.com/zed-industries/zed` | Metal/Vulkan | You vendor Zed; heavy first build, no crates.io |
-| **`gpui` 0.2.x** | **crates.io (longbridge fork)** | **Metal (macOS) + Vulkan (Linux)** | **Deck — matches gpui-component** |
-| `gpui-unofficial` 0.231 | crates.io (Zed wgpu fork) | wgpu | Only for headless servers / SwiftShader fallback; needs vendored gpui-component |
+| **crates.io pair** — `gpui` 0.2.x + `gpui-component` 0.5.x | Zed's gpui *published as a periodic snapshot* (0.2.0–0.2.2 all shipped Oct 2025; none since) + Longbridge's kit pinned to it | **Metal (macOS) + Blade/Vulkan (Linux)** | **Fallback** — plain-stable, zero git deps, but freezes gpui at the Oct-2025 snapshot |
+| **git pair** — `gpui` + `gpui_platform` + `gpui-component` (`main`) | Zed HEAD + Longbridge HEAD, how gpui-component is actually developed | **Metal (macOS) + wgpu (Linux)** since [PR #46758](https://github.com/zed-industries/zed/pull/46758) (merged 2026-02-13) | **Deckard's default** — fresh gpui; reproducible via committed `Cargo.lock`; bump ~monthly (pre-1.0 churn) |
+| `gpui-unofficial` (Nate Butler) | an automated *tag-for-tag mirror* of Zed releases on crates.io (now 1.x) — **not** a "wgpu fork"; it renders with whatever the mirrored tag uses | inherits upstream | a crates.io path closer to HEAD — but **not** what gpui-component pins, so never mix it with gpui-component |
 
-The trap: **`gpui-component 0.5.1` on crates.io is built against `gpui` 0.2.x**, *not*
-`gpui-unofficial`. If you mix `gpui-unofficial` with crates.io `gpui-component`, both halves compile
-but your `Render` view satisfies one crate's `Render` trait while `open_window`/`Root::new` want the
-other's — `E0277` trait-mismatch errors at *your* call sites (the dep crates compile fine, which is
-what makes it confusing).
+Two non-obvious facts behind this table:
 
-**Decision: pure crates.io, matched pair** — `gpui = "0.2"` + `gpui-component = "0.5"` +
-`gpui-component-assets = "0.5"`. No git deps, no submodules, no vendoring. This same pair is
-**cross-platform**: `gpui` 0.2 ships a `platform/linux/` backend and the `blade` renderer, so it
-renders with **Metal on macOS** and **Vulkan on Linux** (X11 + Wayland are both default features). The
-`gpui-unofficial` + wgpu fork is a *different* lineage you only need for the narrow headless-server /
-SwiftShader case (a GPU-less box where Vulkan can't init) — not for normal desktop Linux.
+- **Zed publishes `gpui` to crates.io only occasionally.** The whole 0.2.x line shipped in October 2025
+  (`0.2.0` Oct 9 → `0.2.2` Oct 22), then it went quiet. So the *latest stable* `gpui` is still that
+  Oct-2025 snapshot; Zed's `main` calls itself 0.2.2 but is many months ahead, and has since split gpui
+  into `gpui` + `gpui_platform` + `gpui_web` + `gpui_macros` (none of the split crates are on crates.io
+  yet). Tracking latest-stable gpui therefore advances only when Zed cuts a new release.
+- **gpui-component lives on the git channel and snapshots to crates.io.** Its `main` depends on Zed
+  *git* gpui (`gpui = { git = ".../zed" }`), and its README tells you to as well — but each *published*
+  release pins the registry (`gpui-component 0.5.1` → `gpui = "^0.2.2"`), which is what lets the
+  crates.io pair `cargo run` cleanly. It ships roughly monthly, so latest-stable gpui-component *does*
+  move regularly.
+
+The trap to avoid: **a published `gpui-component` is built against one specific `gpui`.** Mix in a
+*different* gpui (e.g. `gpui-unofficial`, or a mismatched git rev) and both halves still compile, but
+your `Render` view satisfies one crate's `Render` trait while `open_window` / `Root::new` want the
+other's — `E0277` trait-mismatch errors at *your* call sites (the dependency crates compile fine, which
+is what makes it baffling). Keep the pair matched.
+
+**Decision: the matched git pair, bumped on a cadence** — `gpui` + `gpui_platform` from
+`zed-industries/zed` and `gpui-component` (+ `-assets`) from `longbridge/gpui-component`, all via git.
+This is the *only* way to pair fresh gpui with the component kit, and it's how gpui-component is itself
+developed (and how Longbridge ships its own app). Reproducibility comes from the committed `Cargo.lock`
+(exact commit pins); you bump ~monthly with `just bump-gpui`. Two costs, both small: the git channel
+needs a **recent Rust stable** (pinned in `rust-toolchain.toml` to match Zed — gpui HEAD uses
+just-stabilized `std` APIs like `cold_path`), and you absorb occasional pre-1.0 API drift on bumps (the
+Oct-2025 → mid-2026 jump took *four* one-line edits: `Application::new()` → `gpui_platform::application()`,
+a new `Menu.disabled` field, a `cx` arg on `window.focus()`, and dropping `let _ =` on the now-infallible
+`cx.update()`). In return you get current gpui — including the wgpu Linux renderer and the
+`gpui_platform` / `gpui_web` crate split. The **crates.io pair** (`gpui = "0.2"` + `gpui-component =
+"0.5"`) stays documented as a plain-stable, zero-git **fallback** — simpler, but frozen on the Oct-2025
+gpui snapshot. Full bump procedure + the fallback swap: [UPGRADING.md](UPGRADING.md).
 
 What Deck does to stay portable: the only macOS-only code is the tray's dock-hiding
 (`setActivationPolicy`), which is `#[cfg(target_os = "macos")]` and whose `objc2` deps are
@@ -412,8 +434,10 @@ text, tooltip, tree`. Sharp edges that bite forkers:
 
 ## 15. Decisions (chosen → rejected)
 
-- **Pure crates.io `gpui` 0.2 + `gpui-component` 0.5** → rejected git-vendoring Zed and the
-  gpui-unofficial/wgpu fork (heavier, Linux-only upside).
+- **The matched git pair** — `gpui` + `gpui_platform` (Zed git) + `gpui-component` (Longbridge git),
+  pinned via the committed `Cargo.lock`, bumped ~monthly → rejected freezing on the crates.io snapshot
+  (now ~8 months stale; kept as a plain-stable, zero-git fallback) and the `gpui-unofficial` tag-mirror
+  (not gpui-component-compatible).
 - **Soft near-black palette + one live accent** → rejected the harsh stock theme, and rejected a full
   user-editable theme-file system (available via `watch_dir` when you want it).
 - **`directories` + `serde_json` for settings** → rejected `confy` (less visible) and a Zed-style

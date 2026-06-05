@@ -1,7 +1,7 @@
 name: CI
 
 # Builds the Deck on macOS *and* Linux so cross-platform stays honest.
-# (GPUI renders with Metal on macOS and Vulkan via blade on Linux.)
+# (GPUI renders with Metal on macOS and Vulkan via wgpu on Linux.)
 #
 # COST: free. Standard GitHub-hosted runners (macos-latest, ubuntu-latest) are
 # free + unlimited on PUBLIC repos — the macOS 10x multiplier only burns quota
@@ -26,9 +26,9 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
+      # No toolchain version here on purpose: rust-toolchain.toml is the single
+      # source of truth. rustup (preinstalled on GitHub runners) auto-installs the
+      # pinned version and its clippy/rustfmt components on the first cargo call.
       - uses: Swatinem/rust-cache@v2
       - run: cargo build
       - run: cargo build --features tray
@@ -38,9 +38,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
+      # No toolchain version here on purpose: rust-toolchain.toml is the single
+      # source of truth. rustup (preinstalled on GitHub runners) auto-installs the
+      # pinned version and its clippy/rustfmt components on the first cargo call.
       - uses: Swatinem/rust-cache@v2
       # System libraries GPUI needs on Linux (X11 + Wayland + Vulkan + fonts),
       # plus GTK/appindicator for the optional tray feature.
