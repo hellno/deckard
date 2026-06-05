@@ -101,6 +101,8 @@ impl Shell {
             .into_any_element();
 
         let name_control = Input::new(&self.name_input).w(px(220.0)).into_any_element();
+        let rpc_control = Input::new(&self.rpc_input).w(px(260.0)).into_any_element();
+        let watch_control = Input::new(&self.watch_input).w(px(260.0)).into_any_element();
 
         let launch_control = Switch::new("launch-min")
             .checked(self.settings.launch_minimized)
@@ -121,6 +123,21 @@ impl Shell {
                         .child(row("Theme", "Light or dark interface", theme_control))
                         .child(divider(border))
                         .child(row("Accent", "Brand color across the app", accent_control)),
+                )
+                .child(section_label("Network", muted))
+                .child(
+                    card()
+                        .child(row(
+                            "Custom RPC",
+                            "Bring your own Ethereum RPC — blank uses the bundled default",
+                            rpc_control,
+                        ))
+                        .child(divider(border))
+                        .child(row(
+                            "Watch address",
+                            "View any address or ENS read-only — blank shows your wallet",
+                            watch_control,
+                        )),
                 )
                 .child(section_label("Profile", muted))
                 .child(
