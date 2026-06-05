@@ -1,0 +1,35 @@
+[package]
+name = "deckard-core"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+description = "Deckard's headless engine: Ethereum provider, balances, HD keys, and the encrypted keystore — no GPUI dependency, fully unit-testable."
+
+[dependencies]
+# The full alloy surface Deckard needs across chunks. Front-loaded so the heavy
+# alloy/reqwest compile happens once: provider+http (reads), contract+sol-types
+# (Multicall3 / ERC-20), ens (name resolution). signer-local stays standalone
+# below to keep the `mnemonic` feature explicit.
+alloy = { version = "1", features = ["provider-http", "contract", "sol-types", "ens"] }
+alloy-signer-local = { version = "2.0.5", features = ["mnemonic"] }
+alloy-primitives = "1.6.0"
+
+# A single background tokio runtime owns all network; the GUI thread never makes
+# a network call. `rt` (current-thread) only — no multi-thread worker pool needed.
+tokio = { version = "1", features = ["rt", "macros", "sync"] }
+# Runtime-agnostic channel: its `recv_async()` future resolves on GPUI's own
+# executor, so results bridge to the UI thread without blocking.
+flume = "0.11"
+anyhow = "1"
+
+# --- Encrypted keystore (Chunk 3) — audited RustCrypto primitives only ---
+# Argon2id KEK (memory-hard, PHC winner) + XChaCha20-Poly1305 AEAD (NCC-audited);
+# bip39 owns entropy<->mnemonic with a zeroize feature; alloy derives the signer.
+argon2 = "0.5"
+chacha20poly1305 = "0.10"
+bip39 = { version = "2.2", features = ["zeroize"] }
+zeroize = "1"
+rand = "0.8"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "sync", "rt-multi-thread"] }
