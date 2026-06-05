@@ -18,13 +18,19 @@ path = "src/main.rs"
 # The headless engine: Ethereum provider, balances, HD keys, keystore. No GPUI.
 deckard-core = { path = "crates/deckard-core" }
 
-# The matched, pure-crates.io GPUI stack (Metal renderer on macOS — no git deps, no vendoring).
-# `gpui` 0.2.x is the longbridge/blade fork that `gpui-component` 0.5.x is built against.
-gpui = "0.2"
-gpui-component = "0.5"
+# Fresh GPUI, straight from Zed's git — the DEFAULT channel (Metal on macOS, wgpu on
+# Linux). `gpui-component` is developed against Zed's gpui HEAD, so the only way to pair
+# fresh gpui with the component kit is this matched git pair. Reproducibility comes from
+# the committed Cargo.lock (it pins exact commits); bump on a cadence with `just bump-gpui`.
+# Prefer the simpler-but-stale pure-crates.io pair instead? See docs/UPGRADING.md.
+gpui = { git = "https://github.com/zed-industries/zed" }
+# After Zed split gpui into multiple crates, the windowing + renderer backend (and the
+# `Application` bootstrap) live in `gpui_platform`.
+gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit"] }
+gpui-component = { git = "https://github.com/longbridge/gpui-component" }
 # Prebuilt asset source: all gpui-component icon SVGs + bundled fonts.
 # Register it with `.with_assets(...)` so `IconName::*` renders.
-gpui-component-assets = "0.5"
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
 
 # Preferences: serialize a Settings struct to the platform config dir.
 serde = { version = "1", features = ["derive"] }
