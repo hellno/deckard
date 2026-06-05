@@ -119,7 +119,7 @@ pub struct Shell {
 impl Shell {
     pub fn new(settings: Settings, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
-        window.focus(&focus_handle);
+        window.focus(&focus_handle, cx);
 
         let name_input = cx.new(|cx| {
             InputState::new(window, cx)

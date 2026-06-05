@@ -1,3 +1,8 @@
+# Pinned to match Zed's toolchain. Zed's gpui (git channel) tracks a recent stable —
+# e.g. it uses `std::hint::cold_path`, stabilized in 1.95.0 — so building gpui from git
+# needs at least this version. Bump in lockstep with Zed's rust-toolchain.toml when you
+# bump the gpui revs (see docs/UPGRADING.md). The pure-crates.io channel builds on plain
+# stable; this pin is only required by the default git channel.
 [toolchain]
-channel = "stable"
+channel = "1.95.0"
 components = ["rustfmt", "clippy"]
