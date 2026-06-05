@@ -1,6 +1,6 @@
 name: CI
 
-# Builds the Deck on macOS *and* Linux so cross-platform stays honest.
+# Builds + tests the Deckard workspace on macOS *and* Linux so cross-platform stays honest.
 # (GPUI renders with Metal on macOS and Vulkan via wgpu on Linux.)
 #
 # COST: free. Standard GitHub-hosted runners (macos-latest, ubuntu-latest) are
@@ -30,9 +30,11 @@ jobs:
       # source of truth. rustup (preinstalled on GitHub runners) auto-installs the
       # pinned version and its clippy/rustfmt components on the first cargo call.
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build
-      - run: cargo build --features tray
-      - run: cargo clippy --all-targets --features tray -- -D warnings
+      - run: cargo build --workspace
+      - run: cargo build -p deckard-app --features tray
+      - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy -p deckard-app --all-targets --features tray -- -D warnings
 
   linux:
     runs-on: ubuntu-latest
@@ -56,6 +58,8 @@ jobs:
             libfontconfig1-dev libfreetype6-dev \
             libssl-dev \
             libgtk-3-dev libayatana-appindicator3-dev libxdo-dev
-      - run: cargo build
-      - run: cargo build --features tray
-      - run: cargo clippy --all-targets --features tray -- -D warnings
+      - run: cargo build --workspace
+      - run: cargo build -p deckard-app --features tray
+      - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy -p deckard-app --all-targets --features tray -- -D warnings

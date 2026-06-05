@@ -1,0 +1,80 @@
+[package]
+name = "deckard-app"
+version = "0.1.0"
+edition = "2021"
+description = "Deckard — a native, self-custodial Ethereum wallet for onchain operators (GPUI + Rust). The GUI app crate; the binary is `deckard`."
+license = "AGPL-3.0-or-later"
+default-run = "deckard"
+
+# The binary name stays `deckard` even though the package is `deckard-app`, so
+# `cargo run` / the bundle / `claude mcp` registrations are unchanged.
+[[bin]]
+name = "deckard"
+path = "src/main.rs"
+
+[dependencies]
+# The headless engine: Ethereum provider, balances, HD keys, keystore. No GPUI.
+deckard-core = { path = "../deckard-core" }
+# The frozen wire contract (Intent / Decision / Policy / RPC + Signer + MockSigner).
+# The app builds the native approval card against these types; carries zero key material.
+deckard-contract = { path = "../deckard-contract" }
+
+# Fresh GPUI, straight from Zed's git — the DEFAULT channel (Metal on macOS, wgpu on
+# Linux). `gpui-component` is developed against Zed's gpui HEAD, so the only way to pair
+# fresh gpui with the component kit is this matched git pair. Reproducibility comes from
+# the committed Cargo.lock (it pins exact commits); bump on a cadence with `just bump-gpui`.
+# Prefer the simpler-but-stale pure-crates.io pair instead? See docs/UPGRADING.md.
+gpui = { git = "https://github.com/zed-industries/zed" }
+# After Zed split gpui into multiple crates, the windowing + renderer backend (and the
+# `Application` bootstrap) live in `gpui_platform`.
+gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit"] }
+gpui-component = { git = "https://github.com/longbridge/gpui-component" }
+# Prebuilt asset source: all gpui-component icon SVGs + bundled fonts.
+# Register it with `.with_assets(...)` so `IconName::*` renders.
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
+
+# Preferences: serialize a Settings struct to the platform config dir.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+directories = "5"
+qrcode = "0.14"
+# Scrub the pending recovery phrase from memory after onboarding.
+zeroize = "1"
+
+# --- Optional: menu-bar / tray apps (`--features tray`) — cross-platform ---
+# tray-icon draws a native status item on every OS: NSStatusItem (macOS),
+# libappindicator / StatusNotifierItem (Linux), Shell_NotifyIcon (Windows).
+# There is no second renderer — your windows stay GPUI everywhere.
+tray-icon = { version = "0.24", optional = true }
+alloy-signer-local = { version = "2.0.5", features = ["mnemonic"] }
+alloy-primitives = "1.6.0"
+
+[features]
+default = []
+tray = ["dep:tray-icon", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation"]
+
+# objc2 is only used to hide the macOS dock icon — pull it on macOS only, so a
+# Linux/Windows `--features tray` build never tries to compile Apple crates.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6", optional = true }
+objc2-app-kit = { version = "0.3", optional = true }
+objc2-foundation = { version = "0.3", optional = true }
+
+# ---------------------------------------------------------------------------
+# `cargo bundle` config. On macOS → Deckard.app. Run `just bundle`, which cd's
+# into this crate first so cargo-bundle resolves the relative icon path against
+# crates/deckard-app/ — it resolves icons against the CWD, not the manifest dir.
+#   cargo install cargo-bundle
+# We point at the prebuilt assets/icon.icns directly: cargo-bundle 0.11's PNG→icns
+# converter rejects the 1024px icon.png ("No matching IconType"), but copies a
+# ready .icns straight through. To rebrand: edit assets/icon.svg, run `just icon`
+# (regenerates icon.png + icon.icns), then `just bundle`.
+# ---------------------------------------------------------------------------
+[package.metadata.bundle]
+name = "Deckard"
+identifier = "com.deckard.app"
+icon = ["assets/icon.icns"]
+category = "public.app-category.finance"
+short_description = "A native, self-custodial Ethereum wallet for onchain operators."
+long_description = "Deckard is a fast, keyboard-first, self-custodial Ethereum wallet for people who live onchain. Native (macOS + Linux), trustless by construction, open source (AGPL-3.0)."
+osx_minimum_system_version = "11.0"
