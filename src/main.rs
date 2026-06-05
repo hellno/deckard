@@ -13,6 +13,7 @@ mod shell;
 mod theme;
 #[cfg(feature = "tray")]
 mod tray;
+mod onboarding;
 mod palette;
 mod receive;
 mod wallet;
