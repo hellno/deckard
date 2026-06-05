@@ -1,8 +1,9 @@
-Deck — third-party attributions
+Deckard — third-party attributions
 ====================================
 
-This project is 0BSD licensed (see LICENSE) — you may use it with no attribution required. It bundles or depends on the
-following third-party work, each under its own permissive license.
+Deckard is licensed under AGPL-3.0-or-later (see LICENSE). It was forked from the `deck` GPUI starter (originally 0BSD;
+0BSD permits relicensing). It bundles or depends on the following third-party work, each under its own license
+(GPUI's Apache-2.0 / GPL lineage and gpui-component's Apache-2.0 are compatible with AGPL-3.0).
 
 Lucide icons
 ------------
