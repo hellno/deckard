@@ -102,7 +102,9 @@ helios ethereum --network kurtosis \
   --checkpoint <first beacon block hash of an epoch from the local CL>
 # Helios serves a verified local JSON-RPC on http://127.0.0.1:8545
 ```
-⚠ **unverified:** that the chosen Kurtosis CL client serves the **light-client beaconchain API** out of the box — Lighthouse gates this behind `--light-client-server` (and the EL needs the light-client execution API). The harness's `kurtosis.rs` must set the CL/EL flags to enable both, and assert Helios reaches `synced` before proceeding. Spike this on day one of the Helios lane; if a client won't serve it, fall back to Lane C (Sepolia) for the walkaway integration.
+> **Update (cross-doc, from `20-helios-sidecar.md`):** two things below are now stale. (1) **LC support is resolved** — Lighthouse/Nimbus/Lodestar serve the light-client API **on by default** and ethereum-package runs all forks from genesis (no `--light-client-server` needed on current Lighthouse; it's disable-only now). (2) **Kurtosis is DEFERRED off the v1 critical path** — the mainnet spike proved the walkaway without it, so Lane B is a post-demo hermetic-CI nice-to-have, not a gate; v1 runs on mainnet + Sepolia (Lane C). The original text below is kept for when the Kurtosis lane is picked up.
+
+⚠ ~~**unverified:** that the chosen Kurtosis CL client serves the **light-client beaconchain API** out of the box~~ (resolved — see note above) — Lighthouse gates this behind `--light-client-server` (and the EL needs the light-client execution API). The harness's `kurtosis.rs` must set the CL/EL flags to enable both, and assert Helios reaches `synced` before proceeding. Spike this on day one of the Helios lane; if a client won't serve it, fall back to Lane C (Sepolia) for the walkaway integration.
 
 ### Lane C — Sepolia
 

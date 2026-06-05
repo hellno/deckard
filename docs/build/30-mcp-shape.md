@@ -136,6 +136,8 @@ Read tools (no approval, key-less, safe to call freely — the "observe" half, 0
 | `simulate` | local eth_call/fork against Helios state | `{ asset_changes[], gas, warnings[] }` (Tenderly-style preview, 05 [13]) | none |
 | `policy_get` | `SignerRequest::PolicyGet` | `Policy` snapshot | none |
 
+> ⚠ **Cross-doc need (from `20-helios-sidecar.md` "Integration into the app"):** the `wallet_balance` and `simulate` responses must carry a `read_status` field (`ReadStatus { Verified | Degraded | Unsynced }`), and `ReadStatus` should be defined in `deckard-contract` (here) since it rides the wire. Without it the "never silently serve an untrusted read" rule isn't enforceable at the contract level. `20` owns the semantics/transitions; `30` owns the final type + field placement.
+
 Write tools (route through `propose` → `Decision`; "execute validated intents, not raw LLM suggestions", 05 [10]):
 
 | Tool | Builds | Approval |
