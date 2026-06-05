@@ -51,10 +51,14 @@ against this; the harness's `FakeModel` exercises it before any LLM is in the lo
 
 - **`deckard-contract` crate** — the types above. (30 owns; 00/10/20 reference.)
 - **`fixtures/addresses.mainnet.json`** — Railgun + USDC + whale addresses. (00 hosts; 10 fills Railgun set.)
-- **EIP-1193 provider** — Helios plugs into `RailgunBuilder::new(chain, impl IntoEip1193Provider)`; the same
-  in-process Helios client serves the receive-watcher's verified `eth_getLogs`. (20 provides; 10 + T-Core consume.)
+- **EIP-1193 provider** — Helios plugs into `RailgunBuilder::new(chain, impl IntoEip1193Provider)`. Note (per `20`
+  "Integration into the app"): `EthereumClient` is *not* EIP-1193 natively, so v1 = Helios's localhost JSON-RPC
+  server on the primary client (no supervisor failover for Railgun's reads), prod = a `HeliosEip1193` adapter over
+  the supervisor. The daemon's own `wallet_balance`/`simulate` reads use the typed supervisor (with failover).
+  (20 provides; 10 + T-Core consume.)
 - **`ReadStatus { Verified | Degraded | Unsynced }`** — attached to every read; the UI/agent must see it;
-  **never silently fall back to untrusted RPC.** (20 owns.)
+  **never silently fall back to untrusted RPC.** (20 owns the semantics; the type belongs in `deckard-contract` and
+  the `read_status` field on `wallet_balance`/`simulate` is **proposed, not yet frozen** in `30`.)
 
 ## The two hero-beat spikes
 
@@ -76,7 +80,7 @@ still-verified`) that an AI coding agent runs to self-verify. Green on Lane A/C 
 
 ## Tracked cross-doc open questions
 
-- ~~Does the Kurtosis CL serve the light-client beacon API out of the box, or need flags?~~ **Resolved in `20`:** yes, OOTB — Lighthouse/Nimbus/Lodestar serve LC by default and ethereum-package runs all forks from genesis (use `cl_type: lighthouse`; Teku needs a flag, avoid Grandine). Remaining `00` task: build the devnet `Config` (the `Network` enum hardcodes mainnet CL; testnets are `None`). — `00`
+- ~~Does the Kurtosis CL serve the light-client beacon API out of the box, or need flags?~~ **Resolved + DEFERRED in `20`:** yes, OOTB (Lighthouse/Nimbus/Lodestar serve LC by default; use `cl_type: lighthouse`). But the mainnet spike proved R2 **without** Kurtosis, so the Kurtosis lane is **deferred off the v1 critical path** (post-demo hermetic-CI nice-to-have). v1 tests on mainnet + Sepolia public endpoints. — `20`/`00`
 - Does Helios's EIP-1193 provider serve the log ranges Railgun UTXO sync needs, or does Subsquid carry history? — `10`/`20`
 - `simulate` in the MCP binary (key-less, calls Helios) vs in the daemon (agent + approval card see identical numbers)? — `30`/`20`
 - `railgun` crate license inheritance vs Deckard's 0BSD posture. — `10`
