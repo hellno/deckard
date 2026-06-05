@@ -6,3 +6,6 @@
 
 # Session scratch: research transcripts, screenshot scripts
 .research/
+
+# gstack local reports
+.gstack/
