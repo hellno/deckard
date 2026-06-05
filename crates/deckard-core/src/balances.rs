@@ -4,7 +4,7 @@
 //! Per-token calls tolerate failure (a quirky token can't break the whole refresh).
 
 use alloy::primitives::{address, Address, U256};
-use alloy::providers::DynProvider;
+use alloy::providers::{DynProvider, Provider};
 use alloy::sol;
 use alloy::sol_types::SolCall;
 
@@ -67,8 +67,15 @@ pub async fn fetch_portfolio(provider: &DynProvider, address: Address) -> anyhow
         });
     }
 
-    let results = mc.aggregate3(calls).call().await?;
-    anyhow::ensure!(!results.is_empty(), "multicall returned no results");
+    // If Multicall3 isn't deployed (e.g. a custom RPC pointed at a fork/L2 without it),
+    // degrade gracefully to the native balance rather than failing the whole portfolio.
+    let results = match mc.aggregate3(calls).call().await {
+        Ok(r) if !r.is_empty() => r,
+        _ => {
+            let native_wei = provider.get_balance(address).await?;
+            return Ok(Portfolio { address, native_wei, tokens: Vec::new() });
+        }
+    };
 
     let native_wei = IMulticall3::getEthBalanceCall::abi_decode_returns(&results[0].returnData)?;
 

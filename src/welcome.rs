@@ -6,7 +6,7 @@
 use gpui::{div, px, Context, FontWeight, IntoElement, ParentElement, Styled};
 use gpui_component::{
     button::{Button, ButtonVariants},
-    h_flex, v_flex, ActiveTheme, IconName,
+    h_flex, v_flex, ActiveTheme, Disableable, IconName,
 };
 
 use deckard_core::format_amount;
@@ -165,16 +165,23 @@ impl Shell {
                             )
                             .child(div().text_sm().text_color(status_color).child(status_line)),
                     )
-                    // Primary actions.
+                    // Primary actions. Send + Swap are gated to the next release (Chunk 4,
+                    // testnet-first), so they're shown disabled rather than inert-but-active.
                     .child(
                         h_flex()
                             .w_full()
                             .gap_2()
-                            .child(Button::new("send").primary().label("Send"))
+                            .child(Button::new("send").primary().label("Send").disabled(true))
                             .child(Button::new("receive").ghost().label("Receive").on_click(
                                 cx.listener(|this, _, _, cx| this.navigate(Route::Receive, cx)),
                             ))
-                            .child(Button::new("swap").ghost().label("Swap")),
+                            .child(Button::new("swap").ghost().label("Swap").disabled(true)),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child("Send & Swap arrive in the next release."),
                     )
                     // Holdings, or a state.
                     .child(self.render_holdings(first_sync, has_tokens, holdings, cx))

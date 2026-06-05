@@ -108,6 +108,12 @@ pub struct Shell {
     pub portfolio_error: Option<String>,
     /// Latest block height — a liveness/sync indicator for the status line.
     pub synced_block: Option<u64>,
+    /// Bumped on every `retarget`; a slow ENS resolution checks it before applying so a
+    /// stale reply for a since-changed target can't clobber the current view.
+    view_epoch: u64,
+    /// The RPC URL the current worker was spawned with — so we don't tear it down on a
+    /// no-op blur of the RPC field.
+    current_rpc: String,
 }
 
 impl Shell {
@@ -222,7 +228,8 @@ impl Shell {
 
         // The network worker is always live (it serves the watch-only path too), but the
         // wallet portfolio isn't fetched until the vault is unlocked.
-        let eth = EthProvider::spawn(settings.effective_rpc());
+        let current_rpc = settings.effective_rpc();
+        let eth = EthProvider::spawn(current_rpc.clone());
 
         Self {
             focus_handle,
@@ -257,6 +264,8 @@ impl Shell {
             portfolio_loading: false,
             portfolio_error: None,
             synced_block: None,
+            view_epoch: 0,
+            current_rpc,
         }
     }
 
@@ -449,10 +458,17 @@ impl Shell {
         let pass = Zeroizing::new(pass);
         let task = cx.background_spawn(async move {
             let trimmed = secret.trim();
-            let vault = if trimmed.split_whitespace().count() >= 12 {
-                Vault::import_mnemonic(trimmed, pass.as_str(), KdfParams::PRODUCTION)?
-            } else {
+            // Route by shape, not word count: a pure-hex string (optional 0x) is a raw key;
+            // anything with spaces/words is a mnemonic, so a short/long phrase gets a real
+            // BIP-39 error rather than a misleading "must be 32 bytes".
+            let h = trimmed.strip_prefix("0x").unwrap_or(trimmed);
+            let looks_like_hex_key = !trimmed.contains(char::is_whitespace)
+                && !h.is_empty()
+                && h.chars().all(|c| c.is_ascii_hexdigit());
+            let vault = if looks_like_hex_key {
                 Vault::import_raw_key(trimmed, pass.as_str(), KdfParams::PRODUCTION)?
+            } else {
+                Vault::import_mnemonic(trimmed, pass.as_str(), KdfParams::PRODUCTION)?
             };
             vault.write_atomic(&path)?;
             vault.unlock(pass.as_str())
@@ -605,7 +621,12 @@ impl Shell {
             AuthStep::Choose | AuthStep::Ready => None,
         };
         if let Some(input) = target {
-            input.update(cx, |input, cx| input.focus(window, cx));
+            // Clear any stale text (e.g. a passphrase left after lock) before focusing, so
+            // secrets don't linger in the field across an auth-step change.
+            input.update(cx, |input, cx| {
+                input.set_value("", window, cx);
+                input.focus(window, cx);
+            });
         }
     }
 
@@ -664,6 +685,9 @@ impl Shell {
 
     /// Point the portfolio at the wallet, a raw address, or an ENS name (per settings).
     pub fn retarget(&mut self, cx: &mut Context<Self>) {
+        // Each retarget supersedes the last; a slow ENS resolve checks this before applying.
+        self.view_epoch += 1;
+        let epoch = self.view_epoch;
         let target = self.settings.watch_address.trim().to_string();
         if target.is_empty() {
             self.display_address = self.wallet_address.unwrap_or(Address::ZERO);
@@ -685,7 +709,12 @@ impl Shell {
             let rx = self.eth.resolve_name(target);
             cx.spawn(async move |this, cx| {
                 let res = rx.recv_async().await;
-                this.update(cx, |this, cx| match res {
+                this.update(cx, |this, cx| {
+                    // A newer retarget happened while we were resolving — drop this reply.
+                    if this.view_epoch != epoch {
+                        return;
+                    }
+                    match res {
                     Ok(Ok(addr)) => {
                         this.display_address = addr;
                         this.refresh_portfolio(cx);
@@ -700,6 +729,7 @@ impl Shell {
                         this.portfolio_error = Some("network worker stopped".into());
                         cx.notify();
                     }
+                    }
                 })
                 .ok();
             })
@@ -707,9 +737,15 @@ impl Shell {
         }
     }
 
-    /// Re-spawn the network worker against the (possibly changed) RPC URL, then refresh.
+    /// Re-spawn the network worker against the RPC URL, but only if it actually changed —
+    /// so a no-op blur of the RPC field doesn't tear down the live worker and refetch.
     pub fn respawn_provider(&mut self, cx: &mut Context<Self>) {
-        self.eth = EthProvider::spawn(self.settings.effective_rpc());
+        let url = self.settings.effective_rpc();
+        if url == self.current_rpc {
+            return;
+        }
+        self.current_rpc = url.clone();
+        self.eth = EthProvider::spawn(url);
         self.retarget(cx);
     }
 
