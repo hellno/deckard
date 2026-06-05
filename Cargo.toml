@@ -1,13 +1,13 @@
 [package]
-name = "deck"
+name = "deckard"
 version = "0.1.0"
 edition = "2021"
-description = "An omakase native desktop app starter (macOS + Linux) on GPUI + gpui-component. Fork it, rename it, ship it."
+description = "Deckard — a native, self-custodial Ethereum wallet for onchain operators (GPUI + Rust). Forked from the deck starter; now its own project."
 license = "AGPL-3.0-or-later"
-default-run = "deck"
+default-run = "deckard"
 
 [[bin]]
-name = "deck"
+name = "deckard"
 path = "src/main.rs"
 
 [dependencies]
@@ -56,10 +56,10 @@ codegen-units = 1
 # Drop your own 1024x1024 PNG at assets/icon.png and re-bundle to rebrand.
 # ---------------------------------------------------------------------------
 [package.metadata.bundle]
-name = "Deck"
-identifier = "com.example.deck"
+name = "Deckard"
+identifier = "com.deckard.app"
 icon = ["assets/icon.png"]
-category = "public.app-category.productivity"
-short_description = "A small, snappy native desktop app starter built on GPUI."
-long_description = "Deck is a tiny, opinionated GPUI starter you can fork to build your own fast, native desktop app on macOS and Linux (and wire your own AI agent into it)."
+category = "public.app-category.finance"
+short_description = "A native, self-custodial Ethereum wallet for onchain operators."
+long_description = "Deckard is a fast, keyboard-first, self-custodial Ethereum wallet for people who live onchain. Native (macOS + Linux), trustless by construction, open source (AGPL-3.0)."
 osx_minimum_system_version = "11.0"
