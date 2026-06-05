@@ -24,15 +24,15 @@ check:
     cargo clippy --all-targets -- -D warnings
     cargo clippy --all-targets --features tray -- -D warnings
 
-# Build a distributable Deck.app (needs: cargo install cargo-bundle).
-# Output: target/release/bundle/osx/Deck.app
+# Build a distributable Deckard.app (needs: cargo install cargo-bundle).
+# Output: target/release/bundle/osx/Deckard.app
 bundle:
     cargo bundle --release
-    @echo "→ target/release/bundle/osx/Deck.app"
+    @echo "→ target/release/bundle/osx/Deckard.app"
 
 # Open the bundled app.
 open: bundle
-    open "target/release/bundle/osx/Deck.app"
+    open "target/release/bundle/osx/Deckard.app"
 
 # Regenerate assets/icon.png + assets/icon.icns from assets/icon.svg.
 # Needs cairosvg (pip install cairosvg); falls back to qlmanage if missing.
