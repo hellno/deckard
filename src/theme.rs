@@ -17,11 +17,11 @@ use serde::{Deserialize, Serialize};
 /// settings page lets the user pick one and it re-themes the whole app live.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Accent {
-    #[default]
     Indigo,
     Blue,
     Violet,
     Emerald,
+    #[default]
     Amber,
     Rose,
 }
@@ -54,7 +54,7 @@ impl Accent {
             Accent::Blue => ("#3B82F6", "#5A95F7", "#2F6FE0"),
             Accent::Violet => ("#8B5CF6", "#9D74F7", "#7A47E6"),
             Accent::Emerald => ("#10B981", "#2DC894", "#0E9E6F"),
-            Accent::Amber => ("#F59E0B", "#F7AE2F", "#DB8C06"),
+            Accent::Amber => ("#F2A43B", "#FFB454", "#DB8C06"),
             Accent::Rose => ("#F43F5E", "#F65A75", "#E02A4A"),
         }
     }
@@ -66,7 +66,7 @@ impl Accent {
             Accent::Blue => 0x3B82F6,
             Accent::Violet => 0x8B5CF6,
             Accent::Emerald => 0x10B981,
-            Accent::Amber => 0xF59E0B,
+            Accent::Amber => 0xF2A43B,
             Accent::Rose => 0xF43F5E,
         }
     }
@@ -107,21 +107,21 @@ fn refine(config: &mut ThemeConfig, accent: Accent, dark: bool) {
     set(&mut c.ring, primary);
 
     if dark {
-        set(&mut c.background, "#0C0D11"); // soft near-black, faint blue cast
-        set(&mut c.foreground, "#E6E7EB"); // soft white, not #FFF
-        set(&mut c.secondary, "#16171D"); // cards / surfaces
-        set(&mut c.secondary_foreground, "#E6E7EB");
-        set(&mut c.muted, "#1B1C23");
-        set(&mut c.muted_foreground, "#8A8C99"); // secondary text
-        set(&mut c.border, "#262833");
-        set(&mut c.input, "#1B1C23");
-        set(&mut c.popover, "#16171D");
-        set(&mut c.popover_foreground, "#E6E7EB");
-        set(&mut c.title_bar, "#0C0D11");
-        set(&mut c.title_bar_border, "#1B1C23");
-        set(&mut c.sidebar, "#0F1014");
-        set(&mut c.accent, "#1F2029"); // subtle hover surface
-        set(&mut c.accent_foreground, "#E6E7EB");
+        set(&mut c.background, "#0A0B0D"); // Deckard near-black, faint cool cast
+        set(&mut c.foreground, "#E6E8EB");
+        set(&mut c.secondary, "#14161A"); // cards / surfaces
+        set(&mut c.secondary_foreground, "#E6E8EB");
+        set(&mut c.muted, "#1B1E24");
+        set(&mut c.muted_foreground, "#878E97");
+        set(&mut c.border, "#23272E");
+        set(&mut c.input, "#1B1E24");
+        set(&mut c.popover, "#14161A");
+        set(&mut c.popover_foreground, "#E6E8EB");
+        set(&mut c.title_bar, "#0A0B0D");
+        set(&mut c.title_bar_border, "#23272E");
+        set(&mut c.sidebar, "#0E0F12");
+        set(&mut c.accent, "#1B1E24"); // subtle hover surface
+        set(&mut c.accent_foreground, "#E6E8EB");
     } else {
         set(&mut c.background, "#FBFBFC");
         set(&mut c.foreground, "#16171D");

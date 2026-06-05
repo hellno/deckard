@@ -13,6 +13,9 @@ mod shell;
 mod theme;
 #[cfg(feature = "tray")]
 mod tray;
+mod palette;
+mod receive;
+mod wallet;
 mod welcome;
 
 use gpui::{
@@ -25,13 +28,13 @@ use settings::Settings;
 use shell::Shell;
 
 /// The display name used in the menu bar and window. Change this first when forking.
-pub const APP_NAME: &str = "Deck";
+pub const APP_NAME: &str = "Deckard";
 
 // Declare the app's actions. Each becomes a zero-sized struct you can bind a key
 // to, hang a menu item off of, and handle in a view or globally. Add your own here.
 gpui::actions!(
     deck,
-    [Quit, About, OpenSettings, ToggleTheme, NewItem, GoBack]
+    [Quit, About, OpenSettings, ToggleTheme, NewItem, GoBack, TogglePalette]
 );
 
 fn main() {
@@ -57,6 +60,7 @@ fn main() {
                 KeyBinding::new("secondary-,", OpenSettings, None),
                 KeyBinding::new("secondary-shift-d", ToggleTheme, None),
                 KeyBinding::new("secondary-[", GoBack, None),
+                KeyBinding::new("secondary-k", TogglePalette, None),
             ]);
 
             // 4. Global action handlers. View-local actions (NewItem, OpenSettings,

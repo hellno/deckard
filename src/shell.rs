@@ -17,11 +17,13 @@ use gpui_component::{
 
 use crate::settings::{Settings, ThemeModePref};
 use crate::theme::{self, Accent};
-use crate::{GoBack, NewItem, OpenSettings, ToggleTheme, APP_NAME};
+use crate::wallet::Wallet;
+use crate::{GoBack, NewItem, OpenSettings, ToggleTheme, TogglePalette, APP_NAME};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Route {
     Welcome,
+    Receive,
     Settings,
 }
 
@@ -31,6 +33,8 @@ pub struct Shell {
     pub settings: Settings,
     pub name_input: Entity<InputState>,
     pub created: usize,
+    pub wallet: Wallet,
+    pub palette_open: bool,
 }
 
 impl Shell {
@@ -53,12 +57,16 @@ impl Shell {
         })
         .detach();
 
+        let wallet = Wallet::load_or_generate();
+
         Self {
             focus_handle,
             route: Route::Welcome,
             settings,
             name_input,
             created: 0,
+            wallet,
+            palette_open: false,
         }
     }
 
@@ -116,6 +124,11 @@ impl Shell {
 
     fn on_toggle_theme(&mut self, _: &ToggleTheme, _: &mut Window, cx: &mut Context<Self>) {
         self.toggle_mode(cx);
+    }
+
+    fn on_toggle_palette(&mut self, _: &TogglePalette, _: &mut Window, cx: &mut Context<Self>) {
+        self.palette_open = !self.palette_open;
+        cx.notify();
     }
 
     fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -189,18 +202,22 @@ impl Render for Shell {
         let title_bar = self.render_title_bar(cx);
         let content = match self.route {
             Route::Welcome => self.render_welcome(cx).into_any_element(),
+            Route::Receive => self.render_receive(cx).into_any_element(),
             Route::Settings => self.render_settings(window, cx).into_any_element(),
         };
 
         v_flex()
             .size_full()
+            .relative()
             .bg(background)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::on_new_item))
             .on_action(cx.listener(Self::on_open_settings))
             .on_action(cx.listener(Self::on_go_back))
             .on_action(cx.listener(Self::on_toggle_theme))
+            .on_action(cx.listener(Self::on_toggle_palette))
             .child(title_bar)
             .child(content)
+            .children(self.palette_open.then(|| self.render_palette(cx)))
     }
 }
