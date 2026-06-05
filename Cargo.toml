@@ -4,11 +4,17 @@
 #   - deckard-app      the GPUI desktop app (binary `deckard`)
 #   - deckard-core     the headless engine (Ethereum provider, balances, keystore)
 #   - deckard-contract the frozen wire contract (Intent / Decision / Policy / RPC)
+#   - deckard-signerd  the process-isolated signer daemon (owns the key; UDS server)
 #
 # `cargo run` from the repo root still launches the app via `default-members`.
 [workspace]
 resolver = "2"
-members = ["crates/deckard-app", "crates/deckard-core", "crates/deckard-contract"]
+members = [
+    "crates/deckard-app",
+    "crates/deckard-core",
+    "crates/deckard-contract",
+    "crates/deckard-signerd",
+]
 default-members = ["crates/deckard-app"]
 
 [workspace.dependencies]

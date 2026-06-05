@@ -7,13 +7,14 @@ This crate is the single source of truth for the wire every Deckard process spea
 - **`Intent`** — the only thing that crosses `deckard-mcp → deckard-signerd` for a write. Carries `chain_id` (multi-chain ready); the daemon owns the nonce.
 - **`Decision`** — the daemon's verdict from `propose`: `Allow` / `Deny{reason}` / `NeedsApproval{request_id}`.
 - **`Policy`** — the agent-readable spending fence (caps, allowlist, approval mode, `revoked`).
-- **RPC enums** (`SignerRequest` / `SignerResponse` / `ExecuteResult` / `ApprovalStatus` / `BalanceReport`) — the daemon socket API. serde-derived → CBOR (ciborium) on the UDS, JSON for MCP.
-- **`Signer`** — a *sync* trait; the real UDS client does a fast blocking round-trip off the UI thread (an async wrapper is the daemon ticket's call).
-- **`MockSigner`** — an in-memory, deterministic implementation so T-Agent, T-UX, and the test harness can build and run the acceptance scenario **before** the real signer daemon exists.
+- **`evaluate(&Intent, &Policy) -> Decision`** — the **one** pure decision function. Both `MockSigner` and the real `deckard-signerd` call it, so the verdict can never drift between the mock and the daemon (parity is unit-asserted). It returns `RequestId::ZERO` as a placeholder for `NeedsApproval`; the stateful caller mints the real id.
+- **RPC enums** (`SignerRequest` / `SignerResponse` / `ExecuteResult` / `ApprovalStatus` / `BalanceReport` / `UnlockOutcome`) — the daemon socket API. `SignerRequest` includes `Unlock{passphrase}` / `Lock` / `Resolve{request_id, approved}` for the daemon's lock state machine + approval loop (`Unlock` → `SignerResponse::Unlock(UnlockOutcome)`; `Lock`/`Resolve` → `Ack`). serde-derived → CBOR (ciborium) on the UDS, JSON for MCP.
+- **`Signer`** — a *sync* trait (`unlock`/`lock`/`resolve`/`address`/`balance`/`policy`/`propose`/`execute`/`status`/`revoke_all`); the real UDS client does a fast blocking round-trip off the UI thread (an async wrapper is the daemon ticket's call).
+- **`MockSigner`** — an in-memory, deterministic implementation (calls `evaluate`, no duplicated decision logic) so T-Agent, T-UX, and the test harness can build and run the acceptance scenario **before** the real signer daemon exists.
 
 ## Zero key material
 
-This crate carries **no key material at all** — types + a trait + a mock. It never signs, never holds a key. The key boundary is the daemon's process (`deckard-signerd`, owned by `docs/build/00-test-harness.md`), not this crate.
+This crate carries **no key material at all** — types + a trait + a mock. It never signs, never holds a key. The key boundary is the daemon's process (`crates/deckard-signerd`; cross-process red-team owned by `docs/build/00-test-harness.md`), not this crate.
 
 ## Deterministic mock
 

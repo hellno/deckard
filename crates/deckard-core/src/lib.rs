@@ -10,15 +10,15 @@
 //! GUI thread never blocks and never touches tokio.
 
 pub mod balances;
+pub mod config;
 pub mod eth;
 pub mod keystore;
 pub mod tokens;
 
 pub use balances::{fetch_portfolio, format_amount, Portfolio, TokenBalance};
+pub use config::{config_dir, policy_path, vault_path};
 pub use eth::{EthProvider, DEFAULT_RPC};
-pub use keystore::{
-    random_word_positions, KdfParams, SecretKind, UnlockedVault, Vault, WordCount,
-};
+pub use keystore::{random_word_positions, KdfParams, SecretKind, UnlockedVault, Vault, WordCount};
 pub use tokens::{TokenInfo, DEFAULT_TOKENS};
 
 // Re-export the alloy primitive types the UI renders, so the app layer doesn't

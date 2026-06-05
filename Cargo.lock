@@ -2916,8 +2916,10 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "alloy-signer-local 2.0.5",
+ "anyhow",
  "deckard-contract",
  "deckard-core",
+ "deckard-signerd",
  "directories",
  "gpui",
  "gpui-component",
@@ -2929,6 +2931,7 @@ dependencies = [
  "qrcode",
  "serde",
  "serde_json",
+ "tokio",
  "tray-icon",
  "zeroize",
 ]
@@ -2954,8 +2957,26 @@ dependencies = [
  "argon2",
  "bip39",
  "chacha20poly1305",
+ "directories",
  "flume",
  "rand 0.8.6",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
+name = "deckard-signerd"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "alloy-primitives",
+ "anyhow",
+ "ciborium",
+ "deckard-contract",
+ "deckard-core",
+ "nix 0.29.0",
+ "serde",
+ "serde_json",
  "tokio",
  "zeroize",
 ]
