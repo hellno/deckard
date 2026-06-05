@@ -23,12 +23,15 @@ gpui-component-assets = "0.5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 directories = "5"
+qrcode = "0.14"
 
 # --- Optional: menu-bar / tray apps (`--features tray`) — cross-platform ---
 # tray-icon draws a native status item on every OS: NSStatusItem (macOS),
 # libappindicator / StatusNotifierItem (Linux), Shell_NotifyIcon (Windows).
 # There is no second renderer — your windows stay GPUI everywhere.
 tray-icon = { version = "0.24", optional = true }
+alloy-signer-local = { version = "2.0.5", features = ["mnemonic"] }
+alloy-primitives = "1.6.0"
 
 [features]
 default = []

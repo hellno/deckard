@@ -1,14 +1,15 @@
-//! The Welcome page — a Linear-style centered card. Rendered by `Shell` when the
-//! route is `Welcome`. Replace this with your app's home screen.
+//! Portfolio — Deckard's home screen. A calm, dense balance view: total at the
+//! top, a Send / Receive / Swap action row, then the token holdings. Rendered by
+//! `Shell` for the `Welcome` route. v0 uses representative data; wiring live
+//! balances over the light client / RPC is the next step.
 
 use gpui::{div, px, Context, FontWeight, IntoElement, ParentElement, Styled};
 use gpui_component::{
     button::{Button, ButtonVariants},
-    h_flex, v_flex, ActiveTheme, IconName,
+    h_flex, v_flex, ActiveTheme,
 };
 
-use crate::shell::Shell;
-use crate::APP_NAME;
+use crate::shell::{Route, Shell};
 
 /// The primary modifier label, per platform (⌘ on macOS, "Ctrl " elsewhere).
 #[cfg(target_os = "macos")]
@@ -19,21 +20,73 @@ const MOD: &str = "Ctrl ";
 impl Shell {
     pub fn render_welcome(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let foreground = theme.foreground;
+        let fg = theme.foreground;
         let muted = theme.muted_foreground;
-        let primary = theme.primary;
-        let primary_fg = theme.primary_foreground;
         let border = theme.border;
         let surface = theme.secondary;
+        let mark_bg = theme.muted;
 
-        let name = self.settings.display_name.trim();
-        let title = if name.is_empty() {
-            format!("Welcome to {APP_NAME}")
-        } else {
-            format!("Welcome back, {name}")
+        // A token holding row: mark + name/symbol on the left, amount + USD right.
+        let row = move |mark: &str, name: &str, symbol: &str, amount: &str, usd: &str| {
+            h_flex()
+                .w_full()
+                .items_center()
+                .justify_between()
+                .px_4()
+                .py_3()
+                .rounded_lg()
+                .border_1()
+                .border_color(border)
+                .bg(surface)
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap_3()
+                        .child(
+                            div()
+                                .size(px(34.0))
+                                .rounded_full()
+                                .bg(mark_bg)
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(fg)
+                                        .child(mark.to_string()),
+                                ),
+                        )
+                        .child(
+                            v_flex()
+                                .gap_0p5()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(fg)
+                                        .child(name.to_string()),
+                                )
+                                .child(div().text_xs().text_color(muted).child(symbol.to_string())),
+                        ),
+                )
+                .child(
+                    v_flex()
+                        .items_end()
+                        .gap_0p5()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(fg)
+                                .child(amount.to_string()),
+                        )
+                        .child(div().text_xs().text_color(muted).child(usd.to_string())),
+                )
         };
 
-        // A small bordered key-hint chip, e.g. ⌘N.
+        // A small bordered key-hint chip, e.g. ⌘K.
         let chip = move |keys: &str, label: &str| {
             h_flex()
                 .items_center()
@@ -46,7 +99,7 @@ impl Shell {
                         .border_1()
                         .border_color(border)
                         .bg(surface)
-                        .text_color(foreground)
+                        .text_color(fg)
                         .text_xs()
                         .child(keys.to_string()),
                 )
@@ -61,89 +114,75 @@ impl Shell {
             .justify_center()
             .child(
                 v_flex()
-                    .w(px(440.0))
-                    .items_center()
-                    .gap_7()
-                    // Logo mark — uses the accent (theme primary), so it restyles
-                    // live when the user changes accent in settings.
+                    .w(px(460.0))
+                    .gap_6()
+                    // Header: section label + active account pill.
                     .child(
-                        div()
-                            .size(px(68.0))
-                            .rounded_2xl()
-                            .bg(primary)
-                            .shadow_lg()
-                            .flex()
+                        h_flex()
+                            .w_full()
                             .items_center()
-                            .justify_center()
+                            .justify_between()
+                            .child(div().text_sm().text_color(muted).child("Portfolio"))
                             .child(
                                 div()
-                                    .text_color(primary_fg)
-                                    .text_3xl()
-                                    .font_weight(FontWeight::BOLD)
-                                    .child(APP_NAME.chars().next().unwrap_or('D').to_string()),
+                                    .px_2p5()
+                                    .py_1()
+                                    .rounded_full()
+                                    .border_1()
+                                    .border_color(border)
+                                    .bg(surface)
+                                    .text_xs()
+                                    .text_color(fg)
+                                    .child(self.wallet.short()),
                             ),
                     )
+                    // Total balance.
                     .child(
                         v_flex()
-                            .items_center()
-                            .gap_2()
+                            .gap_1()
                             .child(
                                 div()
-                                    .text_2xl()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(foreground)
-                                    .child(title),
+                                    .text_3xl()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(fg)
+                                    .child("$5,471.20"),
                             )
-                            .child(
-                                div()
-                                    .max_w(px(360.0))
-                                    .text_center()
-                                    .text_sm()
-                                    .text_color(muted)
-                                    .child(
-                                        "A tiny, native desktop starter built on GPUI. \
-                                         Fork it, rename it, and wire in your own agent.",
-                                    ),
-                            ),
+                            .child(div().text_sm().text_color(muted).child("≈ 1.934 ETH on Ethereum")),
                     )
+                    // Primary actions.
                     .child(
                         h_flex()
-                            .gap_3()
-                            .child(
-                                Button::new("get-started")
-                                    .primary()
-                                    .label("Get Started")
-                                    .icon(IconName::ArrowRight)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.created += 1;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("docs")
-                                    .ghost()
-                                    .label("Documentation")
-                                    .icon(IconName::BookOpen),
-                            ),
-                    )
-                    .child(if self.created > 0 {
-                        div()
-                            .text_sm()
-                            .text_color(foreground)
-                            .child(format!(
-                                "✓ Created {} item{}",
-                                self.created,
-                                if self.created == 1 { "" } else { "s" }
+                            .w_full()
+                            .gap_2()
+                            .child(Button::new("send").primary().label("Send").on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.created += 1;
+                                    cx.notify();
+                                }),
                             ))
-                            .into_any_element()
-                    } else {
+                            .child(Button::new("receive").ghost().label("Receive").on_click(
+                                cx.listener(|this, _, _, cx| this.navigate(Route::Receive, cx)),
+                            ))
+                            .child(Button::new("swap").ghost().label("Swap")),
+                    )
+                    // Holdings.
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .gap_2()
+                            .child(row("Ξ", "Ethereum", "ETH", "1.934", "$4,180.55"))
+                            .child(row("$", "USD Coin", "USDC", "1,200.00", "$1,200.00"))
+                            .child(row("◈", "Dai", "DAI", "90.65", "$90.65")),
+                    )
+                    // Keyboard hints — the Superhuman/Linear signal.
+                    .child(
                         h_flex()
                             .gap_4()
-                            .child(chip(&format!("{MOD}N"), "New"))
-                            .child(chip(&format!("{MOD},"), "Settings"))
-                            .child(chip(&format!("{MOD}⇧D"), "Theme"))
-                            .into_any_element()
-                    }),
+                            .pt_1()
+                            .child(chip(&format!("{MOD}K"), "Command palette"))
+                            .child(chip(&format!("{MOD}S"), "Send"))
+                            .child(chip(&format!("{MOD},"), "Settings")),
+                    ),
             )
     }
 }
