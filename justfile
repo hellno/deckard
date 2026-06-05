@@ -8,15 +8,20 @@ default:
     @just --list
 
 # Run the app (debug). This is the one you'll use 99% of the time.
+# Build the signer daemon first so the app can spawn it as a sibling binary (the app resolves
+# `deckard-signerd` next to its own binary, or via DECKARD_SIGNERD_BIN).
 run:
+    cargo build -p deckard-signerd
     cargo run
 
 # Run optimized.
 run-release:
+    cargo build -p deckard-signerd --release
     cargo run --release
 
 # Run as a menu-bar / tray app (no dock icon).
 run-tray:
+    cargo build -p deckard-signerd
     cargo run -p deckard-app --features tray
 
 # Format + lint the whole workspace (both feature configurations of the app).

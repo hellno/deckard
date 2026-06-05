@@ -32,8 +32,10 @@ pub mod signer;
 pub use decision::{Decision, RequestId};
 pub use intent::{Intent, IntentKind};
 pub use mock::MockSigner;
-pub use policy::{ApprovalMode, Policy};
-pub use rpc::{ApprovalStatus, BalanceReport, ExecuteResult, SignerRequest, SignerResponse};
+pub use policy::{evaluate, ApprovalMode, Policy};
+pub use rpc::{
+    ApprovalStatus, BalanceReport, ExecuteResult, SignerRequest, SignerResponse, UnlockOutcome,
+};
 pub use signer::Signer;
 
 #[cfg(test)]
@@ -143,6 +145,18 @@ mod roundtrip_tests {
 
     #[test]
     fn signer_request_roundtrip() {
+        roundtrip(&SignerRequest::Unlock {
+            passphrase: "correct horse battery staple".into(),
+        });
+        roundtrip(&SignerRequest::Lock);
+        roundtrip(&SignerRequest::Resolve {
+            request_id: B256::repeat_byte(0x04),
+            approved: true,
+        });
+        roundtrip(&SignerRequest::Resolve {
+            request_id: B256::repeat_byte(0x05),
+            approved: false,
+        });
         roundtrip(&SignerRequest::Propose {
             intent: sample_intent(IntentKind::Shield),
         });
@@ -161,6 +175,11 @@ mod roundtrip_tests {
 
     #[test]
     fn signer_response_roundtrip() {
+        roundtrip(&SignerResponse::Unlock(UnlockOutcome::Unlocked {
+            address: Address::repeat_byte(0x11),
+        }));
+        roundtrip(&SignerResponse::Unlock(UnlockOutcome::BadPassphrase));
+        roundtrip(&SignerResponse::Unlock(UnlockOutcome::NoVault));
         roundtrip(&SignerResponse::Decision(Decision::Allow));
         roundtrip(&SignerResponse::Execute(ExecuteResult::Broadcast {
             tx_hash: B256::repeat_byte(0xAB),

@@ -30,6 +30,10 @@ jobs:
       # source of truth. rustup (preinstalled on GitHub runners) auto-installs the
       # pinned version and its clippy/rustfmt components on the first cargo call.
       - uses: Swatinem/rust-cache@v2
+      # Foundry gives the integration tests a local `anvil` to broadcast against
+      # (deckard-signerd's anvil-fork lane). The daemon tests skip gracefully if it's absent,
+      # but CI installs it so the broadcast path is actually exercised.
+      - uses: foundry-rs/foundry-toolchain@v1
       - run: cargo build --workspace
       - run: cargo build -p deckard-app --features tray
       - run: cargo test --workspace
@@ -58,6 +62,8 @@ jobs:
             libfontconfig1-dev libfreetype6-dev \
             libssl-dev \
             libgtk-3-dev libayatana-appindicator3-dev libxdo-dev
+      # Foundry (anvil) for the deckard-signerd broadcast integration tests.
+      - uses: foundry-rs/foundry-toolchain@v1
       - run: cargo build --workspace
       - run: cargo build -p deckard-app --features tray
       - run: cargo test --workspace

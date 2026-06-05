@@ -31,5 +31,9 @@ bip39 = { version = "2.2", features = ["zeroize"] }
 zeroize = "1"
 rand = "0.8"
 
+# Resolve the platform config dir (the keystore + signer policy live there). Single-sourced
+# here so the GUI app, onboarding, and the signer daemon all agree on the path.
+directories = "5"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "sync", "rt-multi-thread"] }

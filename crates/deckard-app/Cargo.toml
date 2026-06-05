@@ -18,6 +18,10 @@ deckard-core = { path = "../deckard-core" }
 # The frozen wire contract (Intent / Decision / Policy / RPC + Signer + MockSigner).
 # The app builds the native approval card against these types; carries zero key material.
 deckard-contract = { path = "../deckard-contract" }
+# The signer daemon, used as a LIBRARY here: the app spawns + supervises the daemon binary
+# and talks to it over the socket (unlock / propose / execute). The app holds NO key — only
+# the client + the supervisor. The daemon binary is built as a sibling and launched at start.
+deckard-signerd = { path = "../deckard-signerd" }
 
 # Fresh GPUI, straight from Zed's git — the DEFAULT channel (Metal on macOS, wgpu on
 # Linux). `gpui-component` is developed against Zed's gpui HEAD, so the only way to pair
@@ -37,6 +41,9 @@ gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 directories = "5"
+# Error type that flows from deckard-core (keystore) + the signer client through the app's
+# background tasks.
+anyhow = "1"
 qrcode = "0.14"
 # Scrub the pending recovery phrase from memory after onboarding.
 zeroize = "1"
@@ -48,6 +55,11 @@ zeroize = "1"
 tray-icon = { version = "0.24", optional = true }
 alloy-signer-local = { version = "2.0.5", features = ["mnemonic"] }
 alloy-primitives = "1.6.0"
+
+[dev-dependencies]
+# The #9 test stands up a tiny recording UDS server to prove the app's send path issues
+# Propose/Execute over the socket (and signs nothing in-process).
+tokio = { version = "1", features = ["rt", "net", "io-util", "macros"] }
 
 [features]
 default = []
