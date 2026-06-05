@@ -14,11 +14,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::theme::Accent;
 
-// Reverse-DNS used for the config dir. Keep in sync with the bundle identifier
-// in Cargo.toml when you fork. (qualifier, organization, application)
+// Reverse-DNS used for the config dir. Matches the bundle identifier
+// (`com.deckard.app`) and the wallet keystore dir, so settings + keystore share one
+// location. (qualifier, organization, application)
 const QUALIFIER: &str = "com";
-const ORGANIZATION: &str = "Example";
-const APPLICATION: &str = "Deck";
+const ORGANIZATION: &str = "deckard";
+const APPLICATION: &str = "Deckard";
 
 /// Persisted theme preference. We keep our own enum (rather than reusing
 /// gpui-component's `ThemeMode`) so the on-disk format is ours to control.
@@ -47,6 +48,12 @@ pub struct Settings {
     pub accent: Accent,
     pub display_name: String,
     pub launch_minimized: bool,
+    /// Custom Ethereum RPC URL (bring-your-own-RPC). Empty = the bundled default.
+    /// The trustless default (a local Helios light client) supersedes this later.
+    pub rpc_url: String,
+    /// A read-only address or ENS name to view instead of the active wallet. Empty =
+    /// show the wallet. Lets an operator watch any address (e.g. `vitalik.eth`).
+    pub watch_address: String,
 }
 
 impl Default for Settings {
@@ -56,6 +63,20 @@ impl Default for Settings {
             accent: Accent::default(),
             display_name: String::new(),
             launch_minimized: false,
+            rpc_url: String::new(),
+            watch_address: String::new(),
+        }
+    }
+}
+
+impl Settings {
+    /// The effective RPC URL: the user's custom one, or the bundled default.
+    pub fn effective_rpc(&self) -> String {
+        let trimmed = self.rpc_url.trim();
+        if trimmed.is_empty() {
+            deckard_core::DEFAULT_RPC.to_string()
+        } else {
+            trimmed.to_string()
         }
     }
 }
