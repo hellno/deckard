@@ -3,3 +3,6 @@
 .DS_Store
 # cargo-bundle output
 /target/release/bundle
+
+# Session scratch: research transcripts, screenshot scripts
+.research/
