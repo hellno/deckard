@@ -24,6 +24,16 @@ check:
     cargo clippy --all-targets -- -D warnings
     cargo clippy --all-targets --features tray -- -D warnings
 
+# Bump the git GPUI stack to the latest upstream commits, then rebuild.
+# Reproducibility lives in Cargo.lock — commit it (and rust-toolchain.toml if you
+# bumped it) after this succeeds. If the build fails on an unstable-feature error,
+# match rust-toolchain.toml to Zed's: https://github.com/zed-industries/zed/blob/main/rust-toolchain.toml
+# Full procedure + the crates.io fallback channel: docs/UPGRADING.md
+bump-gpui:
+    cargo update -p gpui -p gpui_platform -p gpui-component -p gpui-component-assets
+    cargo build
+    @echo "→ Bumped. Run the app to smoke-test, then commit Cargo.lock (+ rust-toolchain.toml if changed)."
+
 # Build a distributable Deckard.app (needs: cargo install cargo-bundle).
 # Output: target/release/bundle/osx/Deckard.app
 bundle:
