@@ -1,79 +1,54 @@
-//! Wallet — a real, self-custodial Ethereum keypair via the **alloy** stack
-//! (alloy-signer-local), the audited library the reth/Paradigm ecosystem builds
-//! on. No hand-rolled crypto: key generation, the EIP-55 address, and (later)
-//! signing all come from alloy. v0 generates a key on first run and persists it
-//! (hex) to the platform config dir so the address is stable across launches.
-//! BIP-39 seed backup is the next increment (the `mnemonic` feature is enabled).
+//! Vault file location + legacy-key migration helpers.
+//!
+//! The keypair itself now lives encrypted in `deckard-core`'s keystore (`vault.bin`);
+//! this module only resolves where that file lives and detects the legacy plaintext
+//! `wallet.key` from the pre-keystore build so onboarding can migrate it.
 
 use std::fs;
 use std::path::PathBuf;
 
-use alloy_signer_local::PrivateKeySigner;
 use directories::ProjectDirs;
 
-pub struct Wallet {
-    /// 0x-prefixed, EIP-55 checksummed address (from alloy's `Address` Display).
-    pub address: String,
-    #[allow(dead_code)] // the signer drives send/swap signing in a later increment
-    signer: PrivateKeySigner,
-}
-
-impl Wallet {
-    /// Load the persisted key, or generate and persist a fresh one.
-    pub fn load_or_generate() -> Self {
-        if let Some(path) = key_path() {
-            if let Ok(hex) = fs::read_to_string(&path) {
-                if let Some(signer) =
-                    hex_decode(hex.trim()).and_then(|b| PrivateKeySigner::from_slice(&b).ok())
-                {
-                    return Self::from_signer(signer);
-                }
-            }
-            let signer = PrivateKeySigner::random();
-            let bytes = signer.to_bytes();
-            let _ = fs::write(&path, hex_encode(&bytes[..]));
-            return Self::from_signer(signer);
-        }
-        Self::from_signer(PrivateKeySigner::random())
-    }
-
-    fn from_signer(signer: PrivateKeySigner) -> Self {
-        let address = signer.address().to_string(); // EIP-55 checksummed
-        Self { address, signer }
-    }
-
-    /// Middle-truncated address for tight UI, e.g. `0xA1b2…9F3c`.
-    pub fn short(&self) -> String {
-        let a = &self.address;
-        if a.len() >= 12 {
-            format!("{}…{}", &a[..6], &a[a.len() - 4..])
-        } else {
-            a.clone()
-        }
-    }
-}
-
-fn key_path() -> Option<PathBuf> {
+/// The platform config dir (`~/Library/Application Support/com.deckard.Deckard` on macOS).
+fn config_dir() -> Option<PathBuf> {
     let dirs = ProjectDirs::from("com", "deckard", "Deckard")?;
     let dir = dirs.config_dir().to_path_buf();
     fs::create_dir_all(&dir).ok()?;
-    Some(dir.join("wallet.key"))
+    Some(dir)
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
+/// Where the encrypted keystore lives.
+pub fn vault_path() -> Option<PathBuf> {
+    Some(config_dir()?.join("vault.bin"))
 }
 
-fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 {
+/// The legacy plaintext key from the pre-keystore build (raw 32-byte hex).
+fn legacy_key_path() -> Option<PathBuf> {
+    Some(config_dir()?.join("wallet.key"))
+}
+
+/// True once an encrypted vault exists (the app is past first-run).
+pub fn vault_exists() -> bool {
+    vault_path().map(|p| p.exists()).unwrap_or(false)
+}
+
+/// The legacy plaintext key hex, if a pre-keystore `wallet.key` is present.
+pub fn legacy_key_hex() -> Option<String> {
+    let p = legacy_key_path()?;
+    // A raw key is ~66 bytes of hex; refuse to slurp anything larger.
+    if fs::metadata(&p).ok()?.len() > 256 {
         return None;
     }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
-        .collect()
+    let s = fs::read_to_string(&p).ok()?;
+    let s = s.trim().to_string();
+    (!s.is_empty()).then_some(s)
+}
+
+/// Best-effort delete of the legacy plaintext key after it has been migrated into the
+/// encrypted vault. (On APFS the bytes may persist in snapshots — onboarding warns the
+/// user to move funds to a freshly created wallet.)
+pub fn delete_legacy_key() {
+    if let Some(p) = legacy_key_path() {
+        let _ = fs::remove_file(p);
+    }
 }

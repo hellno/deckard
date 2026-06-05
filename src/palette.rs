@@ -82,7 +82,7 @@ impl Shell {
                         |this, _, _, cx| {
                             this.palette_open = false;
                             cx.write_to_clipboard(ClipboardItem::new_string(
-                                this.wallet.address.clone(),
+                                this.wallet_address_string(),
                             ));
                             cx.notify();
                         },
@@ -91,6 +91,12 @@ impl Shell {
                         |this, _, _, cx| {
                             this.palette_open = false;
                             this.toggle_mode(cx);
+                        },
+                    )))
+                    .child(row("cmd-lock", "Lock wallet", "").on_click(cx.listener(
+                        |this, _, _, cx| {
+                            this.palette_open = false;
+                            this.lock(cx);
                         },
                     ))),
             )

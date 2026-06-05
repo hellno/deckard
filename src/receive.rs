@@ -21,7 +21,7 @@ impl Shell {
         let border = theme.border;
         let surface = theme.secondary;
 
-        let address = self.wallet.address.clone();
+        let address = self.wallet_address_string();
 
         // Real QR on a white card (QR must be dark-on-light to scan).
         let qr = match QrCode::new(address.as_bytes()) {
@@ -92,7 +92,7 @@ impl Shell {
                                     .label("Copy address")
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         cx.write_to_clipboard(ClipboardItem::new_string(
-                                            this.wallet.address.clone(),
+                                            this.wallet_address_string(),
                                         ));
                                     })),
                             )
