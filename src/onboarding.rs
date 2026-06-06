@@ -106,7 +106,11 @@ impl Shell {
     }
 
     fn render_create_setup(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let busy_label = if self.auth_busy { "Encrypting…" } else { "Continue" };
+        let busy_label = if self.auth_busy {
+            "Encrypting…"
+        } else {
+            "Continue"
+        };
         v_flex()
             .gap_5()
             .child(self.auth_heading(
@@ -146,7 +150,11 @@ impl Shell {
             let t = cx.theme();
             (t.border, t.secondary, t.foreground, t.muted_foreground)
         };
-        let busy_label = if self.auth_busy { "Saving…" } else { "Confirm & finish" };
+        let busy_label = if self.auth_busy {
+            "Saving…"
+        } else {
+            "Confirm & finish"
+        };
 
         // The 12-word grid: each cell shows the word only while held-to-reveal.
         let words: Vec<String> = self
@@ -175,12 +183,7 @@ impl Shell {
                         .border_1()
                         .border_color(border)
                         .bg(surface)
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(muted)
-                                .child(format!("{n}")),
-                        )
+                        .child(div().text_xs().text_color(muted).child(format!("{n}")))
                         .child(
                             div()
                                 .text_sm()
@@ -256,7 +259,11 @@ impl Shell {
     }
 
     fn render_import(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let busy_label = if self.auth_busy { "Importing…" } else { "Import" };
+        let busy_label = if self.auth_busy {
+            "Importing…"
+        } else {
+            "Import"
+        };
         v_flex()
             .gap_5()
             .child(self.auth_heading(
@@ -292,7 +299,11 @@ impl Shell {
 
     fn render_migrate(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let danger = cx.theme().danger;
-        let busy_label = if self.auth_busy { "Encrypting…" } else { "Encrypt & continue" };
+        let busy_label = if self.auth_busy {
+            "Encrypting…"
+        } else {
+            "Encrypt & continue"
+        };
         v_flex()
             .gap_5()
             .child(self.auth_heading(
@@ -324,7 +335,11 @@ impl Shell {
     }
 
     fn render_unlock(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let busy_label = if self.auth_busy { "Unlocking…" } else { "Unlock" };
+        let busy_label = if self.auth_busy {
+            "Unlocking…"
+        } else {
+            "Unlock"
+        };
         v_flex()
             .gap_5()
             .child(self.auth_heading(
@@ -346,7 +361,12 @@ impl Shell {
 
     // --- small shared pieces ---
 
-    fn auth_heading(&self, title: &str, subtitle: &str, cx: &mut Context<Self>) -> impl IntoElement {
+    fn auth_heading(
+        &self,
+        title: &str,
+        subtitle: &str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let theme = cx.theme();
         v_flex()
             .gap_2()
@@ -389,12 +409,11 @@ impl Shell {
     /// A one-line error, or nothing.
     fn error_line(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        div()
-            .children(self.auth_error.as_ref().map(|e| {
-                div()
-                    .text_sm()
-                    .text_color(theme.danger)
-                    .child(format!("⚠ {e}"))
-            }))
+        div().children(self.auth_error.as_ref().map(|e| {
+            div()
+                .text_sm()
+                .text_color(theme.danger)
+                .child(format!("⚠ {e}"))
+        }))
     }
 }

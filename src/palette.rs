@@ -60,12 +60,14 @@ impl Shell {
                             .text_color(muted)
                             .child("Commands"),
                     )
-                    .child(row("cmd-portfolio", "Go to Portfolio", "").on_click(cx.listener(
-                        |this, _, _, cx| {
-                            this.palette_open = false;
-                            this.navigate(Route::Welcome, cx);
-                        },
-                    )))
+                    .child(
+                        row("cmd-portfolio", "Go to Portfolio", "").on_click(cx.listener(
+                            |this, _, _, cx| {
+                                this.palette_open = false;
+                                this.navigate(Route::Welcome, cx);
+                            },
+                        )),
+                    )
                     .child(row("cmd-receive", "Receive", "").on_click(cx.listener(
                         |this, _, _, cx| {
                             this.palette_open = false;
@@ -87,12 +89,14 @@ impl Shell {
                             cx.notify();
                         },
                     )))
-                    .child(row("cmd-theme", "Toggle theme", "⌘⇧D").on_click(cx.listener(
-                        |this, _, _, cx| {
-                            this.palette_open = false;
-                            this.toggle_mode(cx);
-                        },
-                    )))
+                    .child(
+                        row("cmd-theme", "Toggle theme", "⌘⇧D").on_click(cx.listener(
+                            |this, _, _, cx| {
+                                this.palette_open = false;
+                                this.toggle_mode(cx);
+                            },
+                        )),
+                    )
                     .child(row("cmd-lock", "Lock wallet", "").on_click(cx.listener(
                         |this, _, _, cx| {
                             this.palette_open = false;
