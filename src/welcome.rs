@@ -88,7 +88,11 @@ impl Shell {
                 ));
             }
         }
-        let has_tokens = self.portfolio.as_ref().map(|p| !p.tokens.is_empty()).unwrap_or(false);
+        let has_tokens = self
+            .portfolio
+            .as_ref()
+            .map(|p| !p.tokens.is_empty())
+            .unwrap_or(false);
 
         // Status sub-line: synced block, watching tag, or an error.
         let status_line = if let Some(err) = &self.portfolio_error {
@@ -96,12 +100,20 @@ impl Shell {
         } else if first_sync {
             "Syncing over Ethereum…".to_string()
         } else if let Some(block) = self.synced_block {
-            let net = if self.viewing_watch { "watching · " } else { "" };
+            let net = if self.viewing_watch {
+                "watching · "
+            } else {
+                ""
+            };
             format!("{net}synced · block {block}")
         } else {
             "Ethereum mainnet".to_string()
         };
-        let status_color = if self.portfolio_error.is_some() { theme.danger } else { muted };
+        let status_color = if self.portfolio_error.is_some() {
+            theme.danger
+        } else {
+            muted
+        };
 
         div()
             .flex_1()
@@ -130,7 +142,11 @@ impl Shell {
                                             .py_1()
                                             .rounded_full()
                                             .border_1()
-                                            .border_color(if self.viewing_watch { accent } else { border })
+                                            .border_color(if self.viewing_watch {
+                                                accent
+                                            } else {
+                                                border
+                                            })
                                             .bg(surface)
                                             .text_xs()
                                             .text_color(fg)
@@ -233,7 +249,12 @@ impl Shell {
                         .flex_col()
                         .items_center()
                         .gap_1()
-                        .child(div().text_sm().text_color(theme.foreground).child("No balances yet"))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(theme.foreground)
+                                .child("No balances yet"),
+                        )
                         .child(
                             div()
                                 .text_xs()

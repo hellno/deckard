@@ -21,7 +21,7 @@ use zeroize::Zeroizing;
 use crate::settings::{Settings, ThemeModePref};
 use crate::theme::{self, Accent};
 use crate::wallet;
-use crate::{GoBack, NewItem, OpenSettings, ToggleTheme, TogglePalette, APP_NAME};
+use crate::{GoBack, NewItem, OpenSettings, TogglePalette, ToggleTheme, APP_NAME};
 
 /// Trim a noisy provider error down to one short line for the UI.
 fn short_err(e: impl std::fmt::Display) -> String {
@@ -142,18 +142,21 @@ impl Shell {
                 .placeholder("https://…  (default: bundled public RPC)")
                 .default_value(settings.rpc_url.clone())
         });
-        cx.subscribe(&rpc_input, |this, state, event: &InputEvent, cx| match event {
-            InputEvent::Change => {
-                this.settings.rpc_url = state.read(cx).value().to_string();
-                this.settings.save();
-            }
-            InputEvent::Blur => {
-                this.settings.rpc_url = state.read(cx).value().to_string();
-                this.settings.save();
-                this.respawn_provider(cx);
-            }
-            _ => {}
-        })
+        cx.subscribe(
+            &rpc_input,
+            |this, state, event: &InputEvent, cx| match event {
+                InputEvent::Change => {
+                    this.settings.rpc_url = state.read(cx).value().to_string();
+                    this.settings.save();
+                }
+                InputEvent::Blur => {
+                    this.settings.rpc_url = state.read(cx).value().to_string();
+                    this.settings.save();
+                    this.respawn_provider(cx);
+                }
+                _ => {}
+            },
+        )
         .detach();
 
         // Watch address / ENS: persist as typed; re-target the portfolio on blur.
@@ -162,18 +165,21 @@ impl Shell {
                 .placeholder("0x… or name.eth  (blank = your wallet)")
                 .default_value(settings.watch_address.clone())
         });
-        cx.subscribe(&watch_input, |this, state, event: &InputEvent, cx| match event {
-            InputEvent::Change => {
-                this.settings.watch_address = state.read(cx).value().to_string();
-                this.settings.save();
-            }
-            InputEvent::Blur => {
-                this.settings.watch_address = state.read(cx).value().to_string();
-                this.settings.save();
-                this.retarget(cx);
-            }
-            _ => {}
-        })
+        cx.subscribe(
+            &watch_input,
+            |this, state, event: &InputEvent, cx| match event {
+                InputEvent::Change => {
+                    this.settings.watch_address = state.read(cx).value().to_string();
+                    this.settings.save();
+                }
+                InputEvent::Blur => {
+                    this.settings.watch_address = state.read(cx).value().to_string();
+                    this.settings.save();
+                    this.retarget(cx);
+                }
+                _ => {}
+            },
+        )
         .detach();
 
         // Auth inputs — passphrases are masked and NEVER persisted to disk.
@@ -185,10 +191,12 @@ impl Shell {
         let create_pass2 = masked(window, cx, "Confirm passphrase");
         let import_pass = masked(window, cx, "Choose a passphrase (min 8 characters)");
         let pass_input = masked(window, cx, "Passphrase");
-        let confirm_words =
-            cx.new(|cx| InputState::new(window, cx).placeholder("the requested words, space-separated"));
-        let import_secret = cx
-            .new(|cx| InputState::new(window, cx).placeholder("12 / 24-word phrase, or a 0x private key"));
+        let confirm_words = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("the requested words, space-separated")
+        });
+        let import_secret = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("12 / 24-word phrase, or a 0x private key")
+        });
 
         // Submit-on-Enter for each auth field (keyboard-first).
         cx.subscribe(&create_pass2, |this, _, event: &InputEvent, cx| {
@@ -607,7 +615,9 @@ impl Shell {
 
     /// The unlocked wallet's own address as an EIP-55 string (empty until unlocked).
     pub fn wallet_address_string(&self) -> String {
-        self.wallet_address.map(|a| a.to_string()).unwrap_or_default()
+        self.wallet_address
+            .map(|a| a.to_string())
+            .unwrap_or_default()
     }
 
     /// Auto-focus the primary input for the current auth step (so the user — and the
@@ -715,20 +725,21 @@ impl Shell {
                         return;
                     }
                     match res {
-                    Ok(Ok(addr)) => {
-                        this.display_address = addr;
-                        this.refresh_portfolio(cx);
-                    }
-                    Ok(Err(e)) => {
-                        this.portfolio_loading = false;
-                        this.portfolio_error = Some(format!("couldn't resolve name — {}", short_err(e)));
-                        cx.notify();
-                    }
-                    Err(_) => {
-                        this.portfolio_loading = false;
-                        this.portfolio_error = Some("network worker stopped".into());
-                        cx.notify();
-                    }
+                        Ok(Ok(addr)) => {
+                            this.display_address = addr;
+                            this.refresh_portfolio(cx);
+                        }
+                        Ok(Err(e)) => {
+                            this.portfolio_loading = false;
+                            this.portfolio_error =
+                                Some(format!("couldn't resolve name — {}", short_err(e)));
+                            cx.notify();
+                        }
+                        Err(_) => {
+                            this.portfolio_loading = false;
+                            this.portfolio_error = Some("network worker stopped".into());
+                            cx.notify();
+                        }
                     }
                 })
                 .ok();

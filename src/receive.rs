@@ -2,9 +2,7 @@
 //! string, and a working copy-to-clipboard. The address is a real keypair
 //! (see wallet.rs); anyone can send to it.
 
-use gpui::{
-    div, px, rgb, ClipboardItem, Context, FontWeight, IntoElement, ParentElement, Styled,
-};
+use gpui::{div, px, rgb, ClipboardItem, Context, FontWeight, IntoElement, ParentElement, Styled};
 use gpui_component::{
     button::{Button, ButtonVariants},
     h_flex, v_flex, ActiveTheme,
@@ -96,11 +94,9 @@ impl Shell {
                                         ));
                                     })),
                             )
-                            .child(
-                                Button::new("receive-back").ghost().label("Back").on_click(
-                                    cx.listener(|this, _, _, cx| this.navigate(Route::Welcome, cx)),
-                                ),
-                            ),
+                            .child(Button::new("receive-back").ghost().label("Back").on_click(
+                                cx.listener(|this, _, _, cx| this.navigate(Route::Welcome, cx)),
+                            )),
                     ),
             )
     }
