@@ -98,11 +98,30 @@ async fn propose_decision_matrix() {
         }
     );
 
-    // unsupported kind (Shield is T-Privacy).
+    // Shield (the privacy hero) is now admitted: a within-cap, on-allowlist native shield
+    // classifies like a send (its RelayAdapt calldata rides in `intent.calldata`). It is
+    // `token: None`, so it passes the ERC-20 guard; within cap → Allow.
     let mut shield = send(to, 1_000);
     shield.kind = IntentKind::Shield;
+    shield.calldata = Bytes::from_static(&[0xde, 0xad, 0xbe, 0xef]); // stand-in RelayAdapt call
+    assert_eq!(client.propose(&shield).await.unwrap(), Decision::Allow);
+
+    // A Shield with EMPTY calldata is rejected (would otherwise broadcast as a bare native
+    // send to `to` — moving ETH to an arbitrary address under the "Shield" label, no note).
+    let mut empty_shield = send(to, 1_000);
+    empty_shield.kind = IntentKind::Shield; // calldata stays empty (from send())
     assert_eq!(
-        client.propose(&shield).await.unwrap(),
+        client.propose(&empty_shield).await.unwrap(),
+        Decision::Deny {
+            reason: "undecodable".into()
+        }
+    );
+
+    // Unshield stays a fast-follow → Deny{unsupported_v1}.
+    let mut unshield = send(to, 1_000);
+    unshield.kind = IntentKind::Unshield;
+    assert_eq!(
+        client.propose(&unshield).await.unwrap(),
         Decision::Deny {
             reason: "unsupported_v1".into()
         }

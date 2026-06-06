@@ -107,13 +107,22 @@ pub fn evaluate(intent: &Intent, policy: &Policy) -> Decision {
 /// Shape check: does the calldata match the kind? The real Railgun adapter calldata is
 /// validated downstream (`10-kohaku-shield.md`); this only enforces the coarse invariant
 /// the policy gate relies on.
+///
+/// The Shield invariant matters now that Shield routes to the signing path: a
+/// `Shield`/`Unshield` MUST carry non-empty calldata. Without it, an `Intent{kind:Shield,
+/// calldata: empty}` would fall through the daemon's broadcast as a **plain native ETH send**
+/// to `intent.to` (no private note ever created) while wire-labelled "Shield" — a key-less
+/// client could thereby move ETH to an arbitrary address under the Shield label. Requiring
+/// calldata closes that. (The deeper `to == RelayAdapt(chain)` check lives downstream — the
+/// contract crate is pure policy with zero chain knowledge and no railgun dep, by charter.)
 fn calldata_ok(intent: &Intent) -> bool {
     match intent.kind {
         // A plain send carries no calldata (the daemon builds the tx from to/value/token).
         IntentKind::Send => intent.calldata.is_empty(),
-        // A generic contract write needs calldata to call.
-        IntentKind::ContractCall => !intent.calldata.is_empty(),
-        // Railgun deposit/withdraw: accept whatever calldata is handed over.
-        IntentKind::Shield | IntentKind::Unshield => true,
+        // A contract write / Railgun deposit / withdraw all carry an encoded call. An empty
+        // payload for any of these would degrade into a bare native send — reject it.
+        IntentKind::ContractCall | IntentKind::Shield | IntentKind::Unshield => {
+            !intent.calldata.is_empty()
+        }
     }
 }

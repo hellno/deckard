@@ -329,7 +329,9 @@ mod tests {
             to: Address::repeat_byte(0x44),
             token: None,
             value: U256::from(value),
-            calldata: Bytes::new(),
+            // A real Shield always carries the RelayAdapt call; the policy gate now requires
+            // it (an empty payload would degrade into a bare native send). Stand-in bytes here.
+            calldata: Bytes::from_static(&[0xde, 0xad, 0xbe, 0xef]),
             kind: IntentKind::Shield,
         }
     }
@@ -422,6 +424,18 @@ mod tests {
         };
         assert_eq!(
             s.propose(&empty_call),
+            Decision::Deny {
+                reason: "undecodable".into()
+            }
+        );
+        // A Shield with EMPTY calldata is rejected: without the RelayAdapt call it would
+        // degrade into a bare native send to `to` (no private note) while labelled "Shield".
+        let empty_shield = Intent {
+            calldata: Bytes::new(),
+            ..shield(20)
+        };
+        assert_eq!(
+            s.propose(&empty_shield),
             Decision::Deny {
                 reason: "undecodable".into()
             }

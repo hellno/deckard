@@ -17,6 +17,11 @@ pub mod eth;
 #[cfg(feature = "verified-reads")]
 pub mod helios;
 pub mod keystore;
+/// Key-less Railgun shield-calldata builder. Gated behind the default-on `shield` feature
+/// so the heavy ZK `railgun` crate is toggleable. When the feature is off, the
+/// `build_shield_native_intent` stub below returns a clear error (never a fake success).
+#[cfg(feature = "shield")]
+pub mod shield;
 pub mod tokens;
 
 pub use balances::{fetch_portfolio, format_amount, Portfolio, TokenBalance};
@@ -25,7 +30,24 @@ pub use eth::{EthProvider, Read, DEFAULT_RPC};
 #[cfg(feature = "verified-reads")]
 pub use helios::{launch_verified, VerifiedReader, DEFAULT_CONSENSUS_RPC};
 pub use keystore::{random_word_positions, KdfParams, SecretKind, UnlockedVault, Vault, WordCount};
+// The key-less shield-calldata builder + the 0zk recipient type, re-exported so the daemon
+// and its tests can name them through core without a direct `railgun` dependency.
+#[cfg(feature = "shield")]
+pub use shield::{build_shield_native_intent, RailgunAddress};
 pub use tokens::{TokenInfo, DEFAULT_TOKENS};
+
+/// Feature-off stub: when `shield` is compiled out, the symbol still exists so the daemon
+/// and tests build, but it returns a clear error — NEVER a fake success. Mirrors the
+/// honest-failure pattern the `verified-reads`-off read path uses (a Deny/Unsynced label
+/// rather than a silent fabricated value).
+#[cfg(not(feature = "shield"))]
+pub fn build_shield_native_intent(
+    _chain_id: u64,
+    _recipient: (),
+    _value: alloy_primitives::U256,
+) -> anyhow::Result<deckard_contract::Intent> {
+    anyhow::bail!("shield unavailable (feature off)")
+}
 
 // The shared trust label, re-exported so the app + daemon can name it through core
 // without a direct deckard-contract dependency just to render a read status.

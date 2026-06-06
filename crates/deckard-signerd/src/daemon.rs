@@ -313,12 +313,18 @@ impl Daemon {
                 reason: "chain_mismatch".into(),
             };
         }
-        if intent.kind != IntentKind::Send {
+        // v1 admits a native Send and a Shield (the privacy hero). The Shield's RelayAdapt
+        // calldata is built key-less in deckard-core and rides in `intent.calldata`; the
+        // daemon never sees the ZK crate, it only signs+broadcasts the handed bytes. Unshield
+        // / ContractCall stay a fast-follow.
+        if !matches!(intent.kind, IntentKind::Send | IntentKind::Shield) {
             return Decision::Deny {
                 reason: "unsupported_v1".into(),
             };
         }
         // v1 spine is native ETH only; an ERC-20 (`token = Some`) Send is a fast-follow.
+        // A native shield is `token: None` (the value rides as msg.value via RelayAdapt
+        // wrapBase), so it passes this guard.
         if intent.token.is_some() {
             return Decision::Deny {
                 reason: "erc20_unsupported_v1".into(),
@@ -377,7 +383,7 @@ impl Daemon {
 
         // Phase 1 (lock held): TOCTOU re-check + eligibility, then extract tx params and the
         // raw scalar (transiently, into `Zeroizing`). Borrows end before the await.
-        let (to, value, scalar) = {
+        let (to, value, calldata, scalar) = {
             let vault = match &self.state {
                 // STOP landed first — refuse even a previously-approved request.
                 VaultState::Locked => {
@@ -438,17 +444,26 @@ impl Daemon {
             };
             // Only the version-stable raw scalar crosses into our alloy stack; zeroized on drop.
             let scalar = Zeroizing::new(signer.to_bytes().0);
-            (req.intent.to, req.intent.value, scalar)
+            // Calldata is empty for a native Send (→ broadcast is byte-identical to before) and
+            // carries the RelayAdapt call for a Shield. The empty-vs-non-empty input IS the
+            // native/contract-call discriminator, so no IntentKind branch is needed here.
+            (
+                req.intent.to,
+                req.intent.value,
+                req.intent.calldata.clone(),
+                scalar,
+            )
         };
 
         // Phase 2: sign + broadcast (lock held — serialized; acceptable for v1). A bounded
         // timeout keeps a hung RPC from wedging the daemon (and STOP) behind the held lock.
-        let broadcast = signing::broadcast_native_send(
+        let broadcast = signing::broadcast_intent(
             scalar.as_slice(),
             &self.cfg.rpc_url,
             self.cfg.chain_id,
             to,
             value,
+            &calldata,
         );
         let tx_hash = match tokio::time::timeout(BROADCAST_TIMEOUT, broadcast).await {
             Ok(Ok(hash)) => hash,

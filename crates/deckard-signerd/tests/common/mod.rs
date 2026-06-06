@@ -148,6 +148,7 @@ fn free_port() -> u16 {
 pub struct Anvil {
     child: Child,
     port: u16,
+    chain_id: u64,
 }
 
 impl Anvil {
@@ -183,7 +184,45 @@ pub fn start_anvil() -> Anvil {
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn anvil");
-    Anvil { child, port }
+    Anvil {
+        child,
+        port,
+        chain_id: 31337,
+    }
+}
+
+impl Anvil {
+    pub fn chain_id(&self) -> u64 {
+        self.chain_id
+    }
+}
+
+/// Start a FRESH anvil forking a chain at a pinned block, prefunding account-0 of [`MNEMONIC`]
+/// (so a vault sealed from that phrase controls a funded EOA). A fresh fork each run is
+/// deterministic — re-using a non-reset fork would accumulate the EOA's balance and drift the
+/// asserts. Killed on drop. The fork preserves the upstream chain id (e.g. Sepolia 11155111).
+pub fn start_anvil_fork(fork_url: &str, fork_block: u64, chain_id: u64) -> Anvil {
+    let port = free_port();
+    let child = Command::new("anvil")
+        .args([
+            "--fork-url",
+            fork_url,
+            "--fork-block-number",
+            &fork_block.to_string(),
+            "--mnemonic",
+            MNEMONIC,
+            "--port",
+            &port.to_string(),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn anvil fork");
+    Anvil {
+        child,
+        port,
+        chain_id,
+    }
 }
 
 /// Wait until anvil answers JSON-RPC.

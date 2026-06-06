@@ -19,16 +19,22 @@ path = "src/main.rs"
 # Verified reads via the embedded Helios light client (shared launcher in deckard-core).
 # ON by default; threads through to deckard-core's `verified-reads`. When OFF, the
 # daemon's balance read falls back to the raw RPC, tagged Unsynced("verification disabled").
-default = ["verified-reads"]
+default = ["verified-reads", "shield"]
 verified-reads = ["deckard-core/verified-reads"]
+# Threads deckard-core's key-less shield-calldata builder through (DEFAULT ON). The daemon
+# itself gains NO railgun dep — it only broadcasts handed calldata; this feature just lets the
+# black-box `shield_e2e` integration test drive deckard-core's builder + assert via railgun.
+shield = ["deckard-core/shield"]
 
 [dependencies]
 # The frozen wire contract (Intent / Decision / Policy / RPC + the shared `evaluate`).
 deckard-contract = { path = "../deckard-contract" }
 # The headless engine: the keystore (`Vault`/`UnlockedVault`) we reuse — never rebuilt
 # here — plus the shared Helios launcher (`launch_verified`) behind `verified-reads`.
-# `default-features = false` is NOT set, so deckard-core's default `verified-reads` is on.
-deckard-core = { path = "../deckard-core" }
+# `default-features = false` so this crate's own feature flags (below) are the SINGLE source
+# of truth for what core builds: toggling signerd's `shield` / `verified-reads` off actually
+# drops the heavy `railgun` / `helios` tree from core (no leaky default pulling them back in).
+deckard-core = { path = "../deckard-core", default-features = false }
 
 # Async UDS server + framing. multi-thread rt so the Argon2 unlock can run on the blocking
 # pool without starving the reactor.
@@ -51,3 +57,17 @@ alloy-primitives = { workspace = true }
 nix = { version = "0.29", features = ["fs", "user"] }
 zeroize = "1"
 anyhow = "1"
+
+[dev-dependencies]
+# The black-box `shield_e2e` test drives deckard-core's key-less builder to get the Intent,
+# but to ASSERT the privacy property it talks to railgun directly (register an ephemeral 0zk
+# recipient, sync against the anvil fork, read the private balance). These mirror the proven
+# shield spike's edge (rev 618c53f, `testing` feature) so the [patch] set resolves identically.
+# Only the TEST gets railgun — never the daemon binary/lib.
+railgun = { git = "https://github.com/ethereum/kohaku", package = "railgun", rev = "618c53facd0d44cf0f01d74e0dcc18d2242351c7", features = ["testing"] }
+# Match Kohaku's alloy (1.8.3 / alloy-primitives 1.6.0) + the erased provider the spike uses
+# to fund the EOA and to drive railgun's RPC syncer.
+alloy = { version = "1.8", features = ["eips", "rpc-types", "network", "providers", "provider-http", "sol-types", "signer-local", "contract"] }
+rand_09 = { package = "rand", version = "0.9" }
+eyre = "0.6"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
