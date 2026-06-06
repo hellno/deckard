@@ -21,8 +21,8 @@ run-tray:
 fmt:
     cargo fmt
 check:
-    cargo clippy --all-targets -- -D warnings
-    cargo clippy --all-targets --features tray -- -D warnings
+    cargo clippy --locked --all-targets -- -D warnings
+    cargo clippy --locked --all-targets --features tray -- -D warnings
 
 # Bump the git GPUI stack to the latest upstream commits, then rebuild.
 # Reproducibility lives in Cargo.lock — commit it (and rust-toolchain.toml if you

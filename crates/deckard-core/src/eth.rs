@@ -23,10 +23,21 @@ type Reply<T> = flume::Sender<anyhow::Result<T>>;
 /// Typed requests the GUI sends to the network worker. Each carries its own reply
 /// channel so call sites stay ergonomic and unrelated requests never head-of-line block.
 enum EthReq {
-    Balance { addr: Address, reply: Reply<U256> },
-    BlockNumber { reply: Reply<u64> },
-    Portfolio { addr: Address, reply: Reply<Portfolio> },
-    ResolveName { name: String, reply: Reply<Address> },
+    Balance {
+        addr: Address,
+        reply: Reply<U256>,
+    },
+    BlockNumber {
+        reply: Reply<u64>,
+    },
+    Portfolio {
+        addr: Address,
+        reply: Reply<Portfolio>,
+    },
+    ResolveName {
+        name: String,
+        reply: Reply<Address>,
+    },
 }
 
 /// A cloneable handle to the network worker thread. Clone it freely into UI views;
@@ -42,6 +53,9 @@ impl EthProvider {
     pub fn spawn(rpc_url: impl Into<String>) -> Self {
         let rpc_url = rpc_url.into();
         let (tx, rx) = flume::unbounded::<EthReq>();
+        // Fatal-at-startup boundary: if the OS refuses to spawn the network thread the app cannot
+        // function, so a clear panic is correct here — this is not fallible user input.
+        #[allow(clippy::expect_used)]
         std::thread::Builder::new()
             .name("deckard-eth".into())
             .spawn(move || run_worker(rpc_url, rx))
@@ -68,7 +82,10 @@ impl EthProvider {
     }
 
     /// Forward-resolve an ENS name (e.g. `vitalik.eth`) to an address.
-    pub fn resolve_name(&self, name: impl Into<String>) -> flume::Receiver<anyhow::Result<Address>> {
+    pub fn resolve_name(
+        &self,
+        name: impl Into<String>,
+    ) -> flume::Receiver<anyhow::Result<Address>> {
         let name = name.into();
         self.request(|reply| EthReq::ResolveName { name, reply })
     }
@@ -91,6 +108,9 @@ impl EthProvider {
 /// The worker entry point: build the runtime + provider, then service requests until
 /// every `EthProvider` handle has dropped (which closes `rx`).
 fn run_worker(rpc_url: String, rx: flume::Receiver<EthReq>) {
+    // Fatal-at-startup boundary: a current-thread runtime we cannot build leaves the worker unable
+    // to do anything; panicking with a clear message beats silently servicing nothing.
+    #[allow(clippy::expect_used)]
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
