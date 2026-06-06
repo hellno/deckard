@@ -30,10 +30,25 @@ strip = true
 lto = "thin"
 codegen-units = 1
 
-# Mirror Helios's own workspace patch. `[patch]` only resolves at the workspace ROOT
-# and does NOT inherit through a git dependency, so the embedded helios-ethereum
-# (behind deckard-core's `verified-reads` feature) needs this here or its consensus
-# crates fail to build. The `ruint`/`ark-circom` patches from the eip1193-railgun
-# spike are Kohaku/Railgun-ZK-only — NOT needed for a helios-only consumer, omitted.
+# Mirror Helios's + Kohaku/Railgun's workspace patches. `[patch]` only resolves at the
+# workspace ROOT and does NOT inherit through a git dependency, so every patched git-dep
+# (helios-ethereum behind `verified-reads`; the ZK `railgun` tree behind deckard-core's
+# `shield` feature) needs its patches here or those crates fail to build.
+#   - ethereum_hashing: Helios consensus crates (verified-reads).
+#   - ruint + ark-circom: MANDATORY for the Railgun ZK tree (merkle tree / circom-compat) —
+#     copied from the proven shield spike. With `shield` off these resolve but pull nothing
+#     extra into the build.
 [patch.crates-io]
 ethereum_hashing = { git = "https://github.com/ncitron/ethereum_hashing", rev = "7ee70944ed4fabe301551da8c447e4f4ae5e6c35" }
+ruint = { git = "https://github.com/Robert-MacWha/ruint" }
+ark-circom = { git = "https://github.com/Robert-MacWha/circom-compat", branch = "release/0.6.0" }
+
+# Redirect Kohaku's own `eip-1193-provider` to a native-only fork (vendor/) that DROPS the
+# wasm32-only `js` feature. Upstream's `js` default pins `wasm-bindgen = "=0.2.108"`, which
+# collides head-on with the GPUI app's `web-sys`→`wasm-bindgen = "=0.2.122"` exact pin — two
+# exact pins can't coexist in one workspace. Deckard never builds wasm32, so the fork removes
+# `js` (and only `js`); the native API railgun uses is byte-identical. See
+# vendor/eip-1193-provider/Cargo.toml for the full rationale. This is what lets the heavy
+# `railgun` shield tree live in the app workspace behind the default-on `shield` feature.
+[patch."https://github.com/ethereum/kohaku"]
+eip-1193-provider = { path = "vendor/eip-1193-provider" }

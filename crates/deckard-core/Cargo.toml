@@ -10,8 +10,14 @@ description = "Deckard's headless engine: Ethereum provider, balances, HD keys, 
 # default so the app + daemon get verified reads, but toggleable so the heavy build
 # can be skipped. When OFF, reads fall back to the raw RPC and are tagged
 # ReadStatus::Unsynced("verification disabled") — never silently Verified.
-default = ["verified-reads"]
+default = ["verified-reads", "shield"]
 verified-reads = ["dep:helios-ethereum"]
+# Key-less Railgun shield-calldata builder. Heavy (the full ZK `railgun` tree); ON by
+# default so the app + daemon can build shield intents, but toggleable so the heavy build
+# can be skipped. When OFF, `build_shield_native_intent` returns "shield unavailable
+# (feature off)" — never a fake success. Pulls `rand_09` because railgun pins rand 0.9
+# while core's own `rand` stays 0.8.
+shield = ["dep:railgun", "dep:rand_09"]
 
 [dependencies]
 # The frozen wire contract — only for the shared `ReadStatus` trust label attached
@@ -33,6 +39,18 @@ alloy-primitives = "1.6.0"
 # behind `verified-reads`. The `ethereum_hashing` patch it needs is at the workspace
 # root (a git-dep can't carry its own `[patch]`).
 helios-ethereum = { git = "https://github.com/a16z/helios", tag = "0.11.1", optional = true }
+
+# Kohaku's pure-Rust Railgun client — the heavy ZK crate. Gated behind `shield` (DEFAULT
+# ON). We use ONLY the key-less `ShieldBuilder` (no sync, no proving, no key), but the crate
+# pulls the full ZK tree, so it is `optional`. `testing` matches the proven spike edge (rev
+# 618c53f) so the workspace-root `[patch.crates-io]` set resolves identically. The two
+# mandatory ZK patches (ruint, ark-circom) live at the workspace root — a git-dep can't
+# carry its own `[patch]`.
+railgun = { git = "https://github.com/ethereum/kohaku", package = "railgun", rev = "618c53facd0d44cf0f01d74e0dcc18d2242351c7", features = ["testing"], optional = true }
+# railgun's `ShieldBuilder::build<R: Rng>` requires a rand **0.9** Rng; core's own `rand`
+# (below) is 0.8 (RustCrypto-aligned), so the 0.9 crate is aliased `rand_09` and pulled only
+# with the `shield` feature.
+rand_09 = { package = "rand", version = "0.9", optional = true }
 
 # A single background tokio runtime owns all network; the GUI thread never makes
 # a network call. `rt` (current-thread) only — no multi-thread worker pool needed.

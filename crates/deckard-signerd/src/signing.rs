@@ -14,18 +14,40 @@ use alloy::network::{Ethereum, EthereumWallet, TransactionBuilder};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::types::TransactionRequest;
 use alloy::signers::local::PrivateKeySigner;
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, Bytes, B256, U256};
 
 /// Sign + broadcast a native-ETH send and return the broadcast tx hash.
 ///
-/// `scalar` is the raw 32-byte private key (the caller keeps it in `Zeroizing`). v1 supports
-/// native sends only; ERC-20/contract sends are rejected upstream in `propose`.
+/// Thin wrapper over [`broadcast_intent`] with empty calldata, so the native-send call
+/// sites (and their tests) keep byte-identical behaviour: no `input` field is set, the gas
+/// filler produces the same type-2 tx as before.
+///
+/// `scalar` is the raw 32-byte private key (the caller keeps it in `Zeroizing`).
 pub async fn broadcast_native_send(
     scalar: &[u8],
     rpc_url: &str,
     chain_id: u64,
     to: Address,
     value_wei: U256,
+) -> anyhow::Result<B256> {
+    broadcast_intent(scalar, rpc_url, chain_id, to, value_wei, &Bytes::new()).await
+}
+
+/// Sign + broadcast an intent's `(to, value, calldata)` and return the broadcast tx hash.
+///
+/// Generalizes the native send to carry **calldata**, so a Shield / ContractCall intent
+/// broadcasts the RelayAdapt (or other) call the key-less builder handed over. The selection
+/// is implicit: empty `input` ⇒ a plain native send (identical to the old path); a non-empty
+/// `input` ⇒ a contract call. The daemon stays ZK-free — it only signs+broadcasts the bytes.
+///
+/// `scalar` is the raw 32-byte private key (the caller keeps it in `Zeroizing`).
+pub async fn broadcast_intent(
+    scalar: &[u8],
+    rpc_url: &str,
+    chain_id: u64,
+    to: Address,
+    value_wei: U256,
+    input: &Bytes,
 ) -> anyhow::Result<B256> {
     let signer = PrivateKeySigner::from_slice(scalar)
         .map_err(|e| anyhow::anyhow!("reconstruct signer: {e}"))?;
@@ -37,8 +59,9 @@ pub async fn broadcast_native_send(
     // `new()` installs the recommended fillers (nonce/gas/chain-id); `.wallet()` adds signing.
     let provider = ProviderBuilder::new().wallet(wallet).connect_http(url);
 
-    // Only `to`/`value` set ⇒ the gas filler produces an EIP-1559 (type-2) tx and fills the
-    // fee fields; the nonce filler uses the pending count; chain id is pinned explicitly.
+    // `to`/`value` (and, for a shield/contract call, `input`) set ⇒ the gas filler produces an
+    // EIP-1559 (type-2) tx and fills the fee fields — now estimating gas against the calldata
+    // too; the nonce filler uses the pending count; chain id is pinned explicitly.
     //
     // The `TransactionBuilder` methods are disambiguated to alloy's `Ethereum` network:
     // pulling helios-ethereum into the tree (via deckard-core's `verified-reads`) adds a
@@ -49,6 +72,9 @@ pub async fn broadcast_native_send(
     <TransactionRequest as TransactionBuilder<Ethereum>>::set_to(&mut tx, to);
     <TransactionRequest as TransactionBuilder<Ethereum>>::set_value(&mut tx, value_wei);
     <TransactionRequest as TransactionBuilder<Ethereum>>::set_chain_id(&mut tx, chain_id);
+    if !input.is_empty() {
+        <TransactionRequest as TransactionBuilder<Ethereum>>::set_input(&mut tx, input.clone());
+    }
 
     let pending = provider
         .send_transaction(tx)
