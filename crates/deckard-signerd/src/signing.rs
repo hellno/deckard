@@ -10,7 +10,7 @@
 //! thing that crosses), and we reconstruct the signer in *this* alloy stack from those
 //! bytes. The scalar is held in a `Zeroizing` buffer by the caller.
 
-use alloy::network::{EthereumWallet, TransactionBuilder};
+use alloy::network::{Ethereum, EthereumWallet, TransactionBuilder};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::types::TransactionRequest;
 use alloy::signers::local::PrivateKeySigner;
@@ -39,10 +39,16 @@ pub async fn broadcast_native_send(
 
     // Only `to`/`value` set ⇒ the gas filler produces an EIP-1559 (type-2) tx and fills the
     // fee fields; the nonce filler uses the pending count; chain id is pinned explicitly.
-    let tx = TransactionRequest::default()
-        .with_to(to)
-        .with_value(value_wei)
-        .with_chain_id(chain_id);
+    //
+    // The `TransactionBuilder` methods are disambiguated to alloy's `Ethereum` network:
+    // pulling helios-ethereum into the tree (via deckard-core's `verified-reads`) adds a
+    // second `TransactionBuilder<helios_ethereum::spec::Ethereum>` impl for
+    // `TransactionRequest`, so the chained builder calls would otherwise be ambiguous.
+    // Setting via `&mut` with an `Ethereum`-typed binding anchors every call to alloy's impl.
+    let mut tx = TransactionRequest::default();
+    <TransactionRequest as TransactionBuilder<Ethereum>>::set_to(&mut tx, to);
+    <TransactionRequest as TransactionBuilder<Ethereum>>::set_value(&mut tx, value_wei);
+    <TransactionRequest as TransactionBuilder<Ethereum>>::set_chain_id(&mut tx, chain_id);
 
     let pending = provider
         .send_transaction(tx)
@@ -51,12 +57,22 @@ pub async fn broadcast_native_send(
     Ok(*pending.tx_hash())
 }
 
-/// Read an address's public (native) balance through the RPC — key-less, read-only.
-pub async fn read_balance(rpc_url: &str, addr: Address) -> anyhow::Result<U256> {
-    let url = rpc_url
+/// Read an address's public (native) balance through `read_url` — key-less, read-only.
+///
+/// `read_url` is the endpoint the consumer provider reads through. With verified reads
+/// on (the default) the daemon passes Helios's **localhost** URL here, so this read is
+/// proof-checked; with the feature off it is the raw RPC (and the caller tags the result
+/// `Unsynced`). The `with_default_block(latest)` fix is applied uniformly: alloy defaults
+/// `eth_call`/`estimateGas` to the `pending` tag, which a Helios light client cannot
+/// serve — `get_balance` itself targets `latest`, but layering the default keeps every
+/// read path uniform with the eth_call-backed reads.
+pub async fn read_balance(read_url: &str, addr: Address) -> anyhow::Result<U256> {
+    let url = read_url
         .parse()
-        .map_err(|e| anyhow::anyhow!("bad RPC URL {rpc_url:?}: {e}"))?;
-    let provider = ProviderBuilder::new().connect_http(url);
+        .map_err(|e| anyhow::anyhow!("bad read URL {read_url:?}: {e}"))?;
+    let provider = ProviderBuilder::new()
+        .with_default_block(alloy::eips::BlockId::latest())
+        .connect_http(url);
     provider
         .get_balance(addr)
         .await

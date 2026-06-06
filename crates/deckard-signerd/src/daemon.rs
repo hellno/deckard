@@ -10,14 +10,18 @@
 //! any execute whose STOP landed first.
 
 use std::collections::HashMap;
+#[cfg(feature = "verified-reads")]
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use alloy_primitives::{Address, B256, U256};
+#[cfg(feature = "verified-reads")]
+use tokio::sync::Mutex as AsyncMutex;
 use zeroize::Zeroizing;
 
 use deckard_contract::{
     evaluate, ApprovalStatus, BalanceReport, Decision, ExecuteResult, Intent, IntentKind, Policy,
-    RequestId, SignerRequest, SignerResponse, UnlockOutcome,
+    ReadStatus, RequestId, SignerRequest, SignerResponse, UnlockOutcome,
 };
 use deckard_core::{UnlockedVault, Vault};
 
@@ -65,6 +69,57 @@ struct PendingReq {
 /// rather than wedging the daemon (and STOP) forever behind the held state lock.
 const BROADCAST_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// The daemon's embedded Helios verified-read path, kept in a **separately-locked** cell so
+/// the multi-second-to-90s `launch_verified` bootstrap can run WITHOUT holding the daemon's
+/// own `Mutex`. The server clones this `Arc` and primes it (see [`HeliosCell::ensure`]) off
+/// the daemon lock before dispatching a `Balance`, so a slow first read can never serialize
+/// behind it — the STOP/Lock brake stays responsive.
+///
+/// Its own `Drop` (via the inner `VerifiedReader`) tears the spawned localhost server down.
+/// `None` inside the option means "not built / failed to come up" — reads then fall back,
+/// tagged Unsynced, never silently Verified.
+///
+/// TODO(post-v1): v1 runs an INDEPENDENT Helios instance here (separate from the app's
+/// deckard-core::EthProvider one). The "consolidate all reads into the daemon" refactor is
+/// deferred.
+#[cfg(feature = "verified-reads")]
+#[derive(Clone, Default)]
+pub struct HeliosCell {
+    inner: Arc<AsyncMutex<Option<deckard_core::VerifiedReader>>>,
+}
+
+#[cfg(feature = "verified-reads")]
+impl HeliosCell {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Bootstrap the embedded Helios client if it isn't up yet. Runs the long
+    /// `launch_verified` while holding ONLY this cell's lock — never the daemon's — so the
+    /// security brake (STOP/Lock) and every other request stay live during the bootstrap.
+    /// Idempotent: a second caller that finds the client already built returns immediately.
+    /// On failure leaves the cell empty and logs (so the read falls back to a raw,
+    /// Unsynced-tagged read — never a silent Verified).
+    pub async fn ensure(
+        &self,
+        consensus_rpc: &str,
+        execution_rpc: &str,
+        data_dir: std::path::PathBuf,
+    ) {
+        let mut guard = self.inner.lock().await;
+        if guard.is_some() {
+            return;
+        }
+        match deckard_core::launch_verified(consensus_rpc, execution_rpc, data_dir).await {
+            Ok(reader) => *guard = Some(reader),
+            Err(e) => {
+                // Stays None → the read path falls back to a raw, Unsynced read.
+                eprintln!("signerd: helios bootstrap failed (reads tagged unsynced): {}", one_line(&e));
+            }
+        }
+    }
+}
+
 /// The whole daemon: config, the lock state, the live policy (with in-memory daily spend),
 /// and the request table.
 pub struct Daemon {
@@ -76,6 +131,13 @@ pub struct Daemon {
     /// Lifetime of a `NeedsApproval` record.
     approval_ttl: Duration,
     requests: HashMap<RequestId, PendingReq>,
+    /// The daemon's embedded Helios verified-read path, held in a SEPARATELY-locked
+    /// [`HeliosCell`] so its slow bootstrap never blocks the daemon mutex (see the cell's
+    /// docs). The server primes it off the daemon lock before a `Balance` dispatch; the
+    /// `balance` handler then borrows the already-built reader for the quick read. Cloning
+    /// the `Arc` is cheap and lets the server hold a handle without the daemon lock.
+    #[cfg(feature = "verified-reads")]
+    helios: HeliosCell,
 }
 
 impl Daemon {
@@ -89,7 +151,28 @@ impl Daemon {
             spent_day: current_utc_day(),
             approval_ttl: approval_ttl(),
             requests: HashMap::new(),
+            #[cfg(feature = "verified-reads")]
+            helios: HeliosCell::new(),
         }
+    }
+
+    /// A clone of the daemon's [`HeliosCell`] handle, so the server can prime the Helios
+    /// bootstrap OFF the daemon lock before dispatching a `Balance` (keeping the STOP/Lock
+    /// brake responsive — the long bootstrap never holds the daemon mutex).
+    #[cfg(feature = "verified-reads")]
+    pub fn helios_cell(&self) -> HeliosCell {
+        self.helios.clone()
+    }
+
+    /// The (consensus_rpc, execution_rpc, data_dir) the embedded Helios client bootstraps
+    /// with. Exposed so the server can prime the cell off the daemon lock.
+    #[cfg(feature = "verified-reads")]
+    pub fn helios_bootstrap_args(&self) -> (&'static str, String, std::path::PathBuf) {
+        (
+            deckard_core::DEFAULT_CONSENSUS_RPC,
+            self.cfg.rpc_url.clone(),
+            self.cfg.config_dir.join("helios-signerd"),
+        )
     }
 
     /// Dispatch one request to one response. `async` because `execute`/`balance` do network
@@ -401,8 +484,18 @@ impl Daemon {
         }
     }
 
-    /// Public balance via the RPC (key-less). `shielded_wei` is 0 until T-Privacy. A locked
-    /// daemon reports zeros (it doesn't know which address to read).
+    /// Public balance, key-less. `shielded_wei` is 0 until T-Privacy.
+    ///
+    /// With `verified-reads` on (the default), the read goes through the daemon's own
+    /// embedded Helios light client (built lazily here) and is tagged
+    /// [`ReadStatus::Verified`] only when a fresh Helios head backs it. If Helios isn't
+    /// up / the head is stale / the read fails, the value is tagged `Unsynced` — we
+    /// **stop the old silent `.unwrap_or(ZERO)`-as-truth**: a 0 is no longer reported as
+    /// a trusted balance. With the feature off, the read goes through the raw RPC and is
+    /// always tagged `Unsynced("verification disabled")` — never `Verified`.
+    ///
+    /// A locked daemon doesn't know which address to read, so it reports zeros tagged
+    /// `Unsynced("locked")` — honest non-verification, not a trusted zero.
     async fn balance(&mut self, _shielded: bool) -> BalanceReport {
         self.rollover();
         let addr = match &self.state {
@@ -411,15 +504,76 @@ impl Daemon {
                 return BalanceReport {
                     public_wei: U256::ZERO,
                     shielded_wei: U256::ZERO,
+                    read_status: ReadStatus::unsynced("locked"),
                 }
             }
         };
-        let public_wei = signing::read_balance(&self.cfg.rpc_url, addr)
-            .await
-            .unwrap_or(U256::ZERO);
+
+        let (public_wei, read_status) = self.read_public_balance(addr).await;
         BalanceReport {
             public_wei,
             shielded_wei: U256::ZERO,
+            read_status,
+        }
+    }
+
+    /// Resolve the read endpoint + trust label, then read the native balance. Verified
+    /// path: reuse the embedded Helios client (already primed off the daemon lock by the
+    /// server — see [`HeliosCell`]), read through its localhost server, and label by head
+    /// freshness. Feature-off / Helios-down: read the raw RPC, label `Unsynced`. NEVER
+    /// returns `Verified` without a fresh Helios-verified read.
+    ///
+    /// The configured rpc_url is the EXECUTION-layer endpoint Helios proves against (must
+    /// serve eth_getProof); Nimbus drives the CL sync (deckard-core's default).
+    #[cfg(feature = "verified-reads")]
+    async fn read_public_balance(&mut self, addr: Address) -> (U256, ReadStatus) {
+        // The server primes the cell off-lock before dispatch, so this is normally a fast
+        // already-built borrow. `ensure` here is a defensive no-op fallback for callers
+        // (e.g. unit tests) that drive `handle` directly without the server priming first.
+        let (cl, el, data_dir) = self.helios_bootstrap_args();
+        self.helios.ensure(cl, &el, data_dir).await;
+
+        let guard = self.helios.inner.lock().await;
+        let reader = match guard.as_ref() {
+            Some(reader) => reader,
+            None => {
+                // Helios isn't up. Read the raw RPC so a value can be shown, but tag it
+                // Unsynced — we do NOT claim a raw read is Verified.
+                drop(guard);
+                let wei = signing::read_balance(&self.cfg.rpc_url, addr)
+                    .await
+                    .unwrap_or(U256::ZERO);
+                return (wei, ReadStatus::unsynced("helios unavailable"));
+            }
+        };
+        // Read the value FIRST, then derive its freshness label, so a `Verified` tag is
+        // bound to a head observed *after* the value came back (consistent with the
+        // app-side path in deckard-core::eth). A small TOCTOU window remains between the
+        // two round-trips, but it always fails toward "fresh head backed the value".
+        let read_url = reader.localhost_url().to_string();
+        match signing::read_balance(&read_url, addr).await {
+            Ok(wei) => {
+                // head_status() re-probes Helios freshness; a head gone stale → Unsynced.
+                let status = reader.head_status().await;
+                (wei, status)
+            }
+            Err(e) => (
+                U256::ZERO,
+                ReadStatus::unsynced(format!("verified read failed: {}", one_line(&e))),
+            ),
+        }
+    }
+
+    /// Feature-off path: read the raw RPC directly, always tagged Unsynced — never claim
+    /// a raw read is Verified.
+    #[cfg(not(feature = "verified-reads"))]
+    async fn read_public_balance(&mut self, addr: Address) -> (U256, ReadStatus) {
+        match signing::read_balance(&self.cfg.rpc_url, addr).await {
+            Ok(wei) => (wei, ReadStatus::unsynced("verification disabled")),
+            Err(e) => (
+                U256::ZERO,
+                ReadStatus::unsynced(format!("read failed: {}", one_line(&e))),
+            ),
         }
     }
 

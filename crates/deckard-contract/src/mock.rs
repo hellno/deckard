@@ -14,6 +14,7 @@ use alloy_primitives::{Address, B256, U256};
 use crate::decision::{Decision, RequestId};
 use crate::intent::Intent;
 use crate::policy::{self, Policy};
+use crate::read_status::ReadStatus;
 use crate::rpc::{ApprovalStatus, BalanceReport, ExecuteResult, UnlockOutcome};
 use crate::signer::Signer;
 
@@ -63,6 +64,9 @@ impl MockSigner {
             balance: Mutex::new(BalanceReport {
                 public_wei: U256::ZERO,
                 shielded_wei: U256::ZERO,
+                // The mock is deterministic + offline; it never touches a chain, so
+                // it reports its canned balances as Verified (no untrusted RPC behind it).
+                read_status: ReadStatus::Verified,
             }),
         }
     }
@@ -563,6 +567,7 @@ mod tests {
         s.set_balance(BalanceReport {
             public_wei: U256::from(7u64),
             shielded_wei: U256::from(3u64),
+            read_status: ReadStatus::Verified,
         });
         let b = s.balance(false);
         assert_eq!(b.public_wei, U256::from(7u64));

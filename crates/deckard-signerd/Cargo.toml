@@ -15,10 +15,19 @@ path = "src/lib.rs"
 name = "deckard-signerd"
 path = "src/main.rs"
 
+[features]
+# Verified reads via the embedded Helios light client (shared launcher in deckard-core).
+# ON by default; threads through to deckard-core's `verified-reads`. When OFF, the
+# daemon's balance read falls back to the raw RPC, tagged Unsynced("verification disabled").
+default = ["verified-reads"]
+verified-reads = ["deckard-core/verified-reads"]
+
 [dependencies]
 # The frozen wire contract (Intent / Decision / Policy / RPC + the shared `evaluate`).
 deckard-contract = { path = "../deckard-contract" }
-# The headless engine: the keystore (`Vault`/`UnlockedVault`) we reuse — never rebuilt here.
+# The headless engine: the keystore (`Vault`/`UnlockedVault`) we reuse — never rebuilt
+# here — plus the shared Helios launcher (`launch_verified`) behind `verified-reads`.
+# `default-features = false` is NOT set, so deckard-core's default `verified-reads` is on.
 deckard-core = { path = "../deckard-core" }
 
 # Async UDS server + framing. multi-thread rt so the Argon2 unlock can run on the blocking
@@ -35,7 +44,7 @@ serde_json = "1"
 # B256 scalar crosses the boundary). Features mirror deckard-core (default features on, which
 # already bring the rustls TLS backend) so the workspace shares ONE alloy build + TLS stack —
 # no second TLS backend, no feature drift.
-alloy = { version = "1", features = ["provider-http", "network", "rpc-types", "signer-local"] }
+alloy = { version = "1", features = ["provider-http", "network", "rpc-types", "signer-local", "eips"] }
 alloy-primitives = { workspace = true }
 
 # Peer-cred uid (geteuid) + the single-instance flock.

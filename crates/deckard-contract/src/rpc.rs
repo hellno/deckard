@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::decision::{Decision, RequestId};
 use crate::intent::Intent;
 use crate::policy::Policy;
+use crate::read_status::ReadStatus;
 
 /// `deckard-mcp` → `deckard-signerd`. The key-less client only proposes; it never signs.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -99,4 +100,8 @@ pub enum ApprovalStatus {
 pub struct BalanceReport {
     pub public_wei: U256,
     pub shielded_wei: U256,
+    /// Trust label for this read (Helios-verified vs unsynced/degraded). The hard
+    /// rule: a balance is `Verified` only when a fresh Helios-verified read backs
+    /// it; otherwise it is visibly `Unsynced`/`Degraded`, never quietly trusted.
+    pub read_status: ReadStatus,
 }
