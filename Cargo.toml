@@ -29,3 +29,11 @@ serde = { version = "1", features = ["derive"] }
 strip = true
 lto = "thin"
 codegen-units = 1
+
+# Mirror Helios's own workspace patch. `[patch]` only resolves at the workspace ROOT
+# and does NOT inherit through a git dependency, so the embedded helios-ethereum
+# (behind deckard-core's `verified-reads` feature) needs this here or its consensus
+# crates fail to build. The `ruint`/`ark-circom` patches from the eip1193-railgun
+# spike are Kohaku/Railgun-ZK-only — NOT needed for a helios-only consumer, omitted.
+[patch.crates-io]
+ethereum_hashing = { git = "https://github.com/ncitron/ethereum_hashing", rev = "7ee70944ed4fabe301551da8c447e4f4ae5e6c35" }

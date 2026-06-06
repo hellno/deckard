@@ -75,6 +75,20 @@ async fn handle_conn(mut stream: UnixStream, daemon: Arc<Mutex<Daemon>>) -> anyh
             }
         };
 
+        // A `Balance` read needs the embedded Helios light client. Its first-time bootstrap
+        // (`launch_verified`) can take seconds-to-90s; prime it HERE, OFF the daemon lock, so
+        // the long bootstrap never serializes ahead of the security brake (STOP/Lock) or any
+        // other request. The cell is idempotent and separately locked — after this returns,
+        // the daemon's `balance` handler does only the quick verified read under its mutex.
+        #[cfg(feature = "verified-reads")]
+        if matches!(req, SignerRequest::Balance { .. }) {
+            let (cell, (cl, el, data_dir)) = {
+                let d = daemon.lock().await;
+                (d.helios_cell(), d.helios_bootstrap_args())
+            };
+            cell.ensure(cl, &el, data_dir).await;
+        }
+
         // Dispatch behind the shared lock (serializes all requests). Note: we deliberately
         // never log the request contents — an Unlock passphrase must never reach a log line.
         let resp = daemon.lock().await.handle(req).await;

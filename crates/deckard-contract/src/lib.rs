@@ -26,6 +26,7 @@ pub mod decision;
 pub mod intent;
 pub mod mock;
 pub mod policy;
+pub mod read_status;
 pub mod rpc;
 pub mod signer;
 
@@ -33,6 +34,7 @@ pub use decision::{Decision, RequestId};
 pub use intent::{Intent, IntentKind};
 pub use mock::MockSigner;
 pub use policy::{evaluate, ApprovalMode, Policy};
+pub use read_status::ReadStatus;
 pub use rpc::{
     ApprovalStatus, BalanceReport, ExecuteResult, SignerRequest, SignerResponse, UnlockOutcome,
 };
@@ -191,6 +193,7 @@ mod roundtrip_tests {
         roundtrip(&SignerResponse::Balance(BalanceReport {
             public_wei: U256::from(1_u64),
             shielded_wei: U256::from(2_u64),
+            read_status: ReadStatus::Verified,
         }));
     }
 
@@ -212,13 +215,37 @@ mod roundtrip_tests {
 
     #[test]
     fn balance_report_roundtrip() {
+        // Exercise every ReadStatus variant (incl. the owned-String reasons) so both
+        // CBOR and JSON coverage of the new field stays complete + byte-stable.
         roundtrip(&BalanceReport {
             public_wei: U256::from(0_u64),
             shielded_wei: U256::from(0_u64),
+            read_status: ReadStatus::Verified,
         });
         roundtrip(&BalanceReport {
             public_wei: U256::MAX,
             shielded_wei: U256::from(42_u64),
+            read_status: ReadStatus::Unsynced {
+                reason: "head stale".into(),
+            },
+        });
+        roundtrip(&BalanceReport {
+            public_wei: U256::from(7_u64),
+            shielded_wei: U256::from(0_u64),
+            read_status: ReadStatus::Degraded {
+                reason: "failover→nimbus".into(),
+            },
+        });
+    }
+
+    #[test]
+    fn read_status_roundtrip() {
+        roundtrip(&ReadStatus::Verified);
+        roundtrip(&ReadStatus::Degraded {
+            reason: "failover→drpc".into(),
+        });
+        roundtrip(&ReadStatus::Unsynced {
+            reason: "verification disabled".into(),
         });
     }
 }

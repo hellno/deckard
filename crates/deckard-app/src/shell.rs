@@ -15,7 +15,7 @@ use gpui_component::{
     v_flex, ActiveTheme, IconName, TitleBar,
 };
 
-use deckard_core::{Address, EthProvider, KdfParams, Portfolio, Vault, WordCount};
+use deckard_core::{Address, EthProvider, KdfParams, Portfolio, ReadStatus, Vault, WordCount};
 use zeroize::Zeroizing;
 
 use deckard_signerd::SignerClient;
@@ -131,6 +131,9 @@ pub struct Shell {
     /// True only during the first sync (the one allowed loading state).
     pub portfolio_loading: bool,
     pub portfolio_error: Option<String>,
+    /// Trust label for the last portfolio/block read: Helios-`Verified` vs visibly
+    /// `Unsynced`/`Degraded`. Never silently "trusted" — surfaced in the status line.
+    pub read_status: Option<ReadStatus>,
     /// Latest block height — a liveness/sync indicator for the status line.
     pub synced_block: Option<u64>,
     /// Bumped on every `retarget`; a slow ENS resolution checks it before applying so a
@@ -301,6 +304,7 @@ impl Shell {
             portfolio: None,
             portfolio_loading: false,
             portfolio_error: None,
+            read_status: None,
             synced_block: None,
             view_epoch: 0,
             current_rpc,
@@ -680,11 +684,13 @@ impl Shell {
             this.update(cx, |this, cx| {
                 this.portfolio_loading = false;
                 match res {
-                    Ok(Ok(p)) => {
+                    Ok(Ok(read)) => {
                         // Ignore a stale reply for an address we're no longer viewing.
-                        if p.address == this.display_address {
-                            this.portfolio = Some(p);
+                        if read.value.address == this.display_address {
+                            this.portfolio = Some(read.value);
                             this.portfolio_error = None;
+                            // Surface the trust label (Helios-verified vs unsynced).
+                            this.read_status = Some(read.status);
                         }
                     }
                     Ok(Err(e)) => this.portfolio_error = Some(short_err(e)),
@@ -701,9 +707,10 @@ impl Shell {
     fn kick_block_number(eth: &EthProvider, cx: &mut Context<Self>) {
         let rx = eth.block_number();
         cx.spawn(async move |this, cx| {
-            if let Ok(Ok(n)) = rx.recv_async().await {
+            if let Ok(Ok(read)) = rx.recv_async().await {
                 this.update(cx, |this, cx| {
-                    this.synced_block = Some(n);
+                    this.synced_block = Some(read.value);
+                    this.read_status = Some(read.status);
                     cx.notify();
                 })
                 .ok();
