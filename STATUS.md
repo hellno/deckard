@@ -46,6 +46,18 @@ Legend: ✅ done + tested · 🟡 partial / integrated-not-finished · 🧪 spik
 
 balances ✅ · receive ✅ · keystore + onboarding ✅ (BIP-39 vault) · **send** (daemon + app-socket path ✅/tested, UI gated 🟡) · **swap** ⬜ (CoW, deferred; button disabled)
 
+## Remaining for a minimum recordable demo
+
+The mechanisms are de-risked + built; the gap is **reachability + visible state** (turning terminal-proven paths into on-screen beats). In record order:
+
+- **A · Beat 2 (hero) — shield on screen** *(the one genuinely new build)*: a **trigger** (a "Shield" button → `build_shield_native_intent` → propose → execute, the path `shield_e2e` already drives) + a **shielded-balance view** (derive the railgun viewing key from the seed, in-app railgun `sync`, show the `0zk` balance rise while public drops + "link broken"). Without the shielded-balance view, "instantly private" has no visual.
+- **B · Beat 3 — in-app walkaway**: a demo control to cut the RPC + the `ReadStatus` badge flipping `Verified → failover → Verified` (or `NOT VERIFIED`). The badge already renders in the GUI; minimum viable is the single-client "cut → NOT VERIFIED → reconnect → Verified" framing (the Shape-A failover supervisor is the nicer version, deferred).
+- **C · Beat 1 — receive landing**: balance refreshes visibly when funds arrive (poll/refresh; QR exists). Auto-watcher → auto-shield is the fuller version; manual refresh suffices to record.
+- **D · the "agent-driven" spine**: minimum = a scripted/manual stand-in (the app triggers the shield, narrated as the agent); fuller = build `deckard-mcp` + drive from Claude Desktop.
+- **E · one continuous take + polish** to `DESIGN.md` (onboarding → funded → 3 beats).
+
+**Critical path for the smallest take:** A + B + C, with D as narration. **Biggest single build: the shielded-balance view (A).**
+
 ## Open risks / track-before-ship
 
 - **CL is the fragile, no-SLA dependency** (walkaway): Nimbus + dRPC are the two proven CLs; **cut the EL on camera, never the CL.** [`20`]
