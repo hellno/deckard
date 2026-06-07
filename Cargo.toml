@@ -4,11 +4,17 @@
 #   - deckard-app      the GPUI desktop app (binary `deckard`)
 #   - deckard-core     the headless engine (Ethereum provider, balances, keystore)
 #   - deckard-contract the frozen wire contract (Intent / Decision / Policy / RPC)
+#   - deckard-signerd  the process-isolated signer daemon (owns the key; UDS server)
 #
 # `cargo run` from the repo root still launches the app via `default-members`.
 [workspace]
 resolver = "2"
-members = ["crates/deckard-app", "crates/deckard-core", "crates/deckard-contract"]
+members = [
+    "crates/deckard-app",
+    "crates/deckard-core",
+    "crates/deckard-contract",
+    "crates/deckard-signerd",
+]
 default-members = ["crates/deckard-app"]
 
 [workspace.dependencies]
@@ -23,3 +29,26 @@ serde = { version = "1", features = ["derive"] }
 strip = true
 lto = "thin"
 codegen-units = 1
+
+# Mirror Helios's + Kohaku/Railgun's workspace patches. `[patch]` only resolves at the
+# workspace ROOT and does NOT inherit through a git dependency, so every patched git-dep
+# (helios-ethereum behind `verified-reads`; the ZK `railgun` tree behind deckard-core's
+# `shield` feature) needs its patches here or those crates fail to build.
+#   - ethereum_hashing: Helios consensus crates (verified-reads).
+#   - ruint + ark-circom: MANDATORY for the Railgun ZK tree (merkle tree / circom-compat) —
+#     copied from the proven shield spike. With `shield` off these resolve but pull nothing
+#     extra into the build.
+[patch.crates-io]
+ethereum_hashing = { git = "https://github.com/ncitron/ethereum_hashing", rev = "7ee70944ed4fabe301551da8c447e4f4ae5e6c35" }
+ruint = { git = "https://github.com/Robert-MacWha/ruint" }
+ark-circom = { git = "https://github.com/Robert-MacWha/circom-compat", branch = "release/0.6.0" }
+
+# Redirect Kohaku's own `eip-1193-provider` to a native-only fork (vendor/) that DROPS the
+# wasm32-only `js` feature. Upstream's `js` default pins `wasm-bindgen = "=0.2.108"`, which
+# collides head-on with the GPUI app's `web-sys`→`wasm-bindgen = "=0.2.122"` exact pin — two
+# exact pins can't coexist in one workspace. Deckard never builds wasm32, so the fork removes
+# `js` (and only `js`); the native API railgun uses is byte-identical. See
+# vendor/eip-1193-provider/Cargo.toml for the full rationale. This is what lets the heavy
+# `railgun` shield tree live in the app workspace behind the default-on `shield` feature.
+[patch."https://github.com/ethereum/kohaku"]
+eip-1193-provider = { path = "vendor/eip-1193-provider" }

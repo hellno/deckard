@@ -1,14 +1,24 @@
 # Helios Light-Client Sidecar
 
-> Embed a16z Helios so every read is verified locally, and to power the demo's WALKAWAY beat (cut the centralized RPC on camera, keep working). Serves demo beat 3 + acceptance step 3. This is risk **R2**. Status: **spike proven on mainnet** (cold ≈11s, warm ≈2s, cut→failover ≤1 block; runnable spike in `spikes/helios-walkaway/`). Part of the Deckard build docs.
+> Embed a16z Helios so every read is verified locally, and to power the demo's WALKAWAY beat (cut the centralized RPC on camera, keep working). Serves demo beat 3 + acceptance step 3. This is risk **R2**. Status: **core mechanism proven on mainnet** — the spike shows verified reads survive a cut EL (failover) and a lying RPC is rejected (cold ≈11s, warm ≈2s, cut→failover ≤1 block; `spikes/helios-walkaway/`). **App integration is still unbuilt** (EIP-1193 provider for Railgun, ReadStatus on the wire, CL-rebuild, receive-watcher, `simulate`) — see "Integration into the app." Part of the Deckard build docs.
 >
 > **Verification note (2026-06-05):** every API/architecture claim below was re-derived from the actual a16z/helios source at tag `0.11.1` (ref `204c998a`) and adversarially re-checked by a second pass — *not* from memory. The numbers come from a runnable spike that actually syncs mainnet and survives a cut EL on this desktop. Anything still unverifiable is flagged ⚠.
 
 ## Why this exists (concrete)
 
-Deckard today reads chain state from whatever RPC it's pointed at — a trusted-server assumption Deckard's whole pitch rejects. [Helios](https://github.com/a16z/helios) (a16z, Rust, MIT) turns an *untrusted* execution-layer RPC into a *verified* local endpoint by checking EL state against the consensus-layer sync committee. We embed it as a Rust library and point **all** of Deckard's reads at the local verified client; the demo then cuts the upstream RPC on camera and Deckard keeps serving verified balances. Without this, beat 3 ("works even if Infura — or the EF — disappears") is theater, not a property.
+Deckard today reads chain state from whatever RPC it's pointed at and **believes the answer** — a trusted-server assumption Deckard's whole pitch rejects. [Helios](https://github.com/a16z/helios) (a16z, Rust, MIT) turns an *untrusted* execution-layer RPC into a *verified* local endpoint: it re-derives every balance from a Merkle proof and checks it against the consensus-layer sync committee, so **the RPC cannot lie to you.** We embed it as a Rust library and route **all** of Deckard's reads through it.
 
-**This is now proven, not hoped.** The spike in `spikes/helios-walkaway/` syncs a real mainnet Helios client, serves the verified deposit-contract balance (86,313,877.35 ETH), then cuts the primary EL RPC and keeps returning that verified balance via a second EL — headless, exit-coded PASS.
+**The core property is integrity, not availability.** Deckard can even *ship its own default RPC* and the user need not trust it — every instance runs Helios locally and verifies, so a Deckard-hosted (or any) RPC is a convenience, not a trust dependency (and the user can point at their own RPC with one setting). That is the moat: self-custody of *keys* is half the story; Helios makes your *view of the chain* self-custodial too.
+
+Two demonstrations of the one property, both proven by the spike in `spikes/helios-walkaway/`:
+- **Integrity (the moat) — `SCENARIO=lie`:** point Helios at a *malicious* RPC that rewrites the balance in every `eth_getProof`. Deckard **refuses the read** (`invalid account proof`) instead of showing the fake 1,000,000,000 ETH a centralized wallet would display. *No centralized wallet can do this.*
+- **Availability (the beat) — default scenario:** sync a real mainnet client, serve the verified deposit-contract balance (≈86.3M ETH), then **cut the primary EL RPC** on camera and keep returning that verified balance via a second EL. Headless, exit-coded PASS.
+
+## A naming caveat: our "walkaway beat" ≠ Vitalik's "walkaway test"
+
+Vitalik's **"walkaway test"** (X, Jan 2026) is a property of the **protocol**: Ethereum should be able to *ossify* — keep running safely and stay useful **even if core developers stop shipping upgrades** — which is why he frames **quantum resistance** as urgent (be safe for decades before a crisis forces rushed changes). That is *not* what Deckard's demo "walkaway beat" means.
+
+Deckard's beat is the **user-side analogue**: you don't depend on any *particular* infrastructure operator (RPC vendor / the EF's endpoints) to use or verify Ethereum. The two rhyme — both are "the system survives if a privileged party walks away" — and Helios is in fact a *component* of Vitalik's vision: an ossified chain only stays usable for normal people if anyone can **verify it cheaply without trusting operators**, which is exactly the light-client thesis ("don't trust, verify"). So position Deckard as **walkaway-test-*aligned*** (verify-it-yourself reads, no operator dependence, quantum-readiness on the roadmap via Kohaku's PQ account — see `06-privacy.md`) — **not** as "the walkaway test." To avoid the clash, prefer naming the beat **"verified reads / no-trusted-RPC"** (integrity) with **"cut-the-RPC"** as its availability demo; keep "walkaway" as an internal nickname only.
 
 ## Where it sits — Depends on / Unblocks (cross-doc + demo)
 
@@ -93,23 +103,70 @@ These four facts dictate the entire failover design and the demo's behavior. The
 **Chosen shape: (A) two synced clients + a supervisor.** Build `primary` (EL #1 = the "centralized" one we cut) and `secondary` (EL #2 = independent EL), both verifying against the same CL + checkpoint, both already synced. The supervisor routes reads to `primary`; on error/timeout it fails over to `secondary` and the first success becomes active. Both clients are equally trustless — failover re-derives the proof from an independent untrusted EL and re-verifies; it is **not** a cached stale value. This is `spikes/helios-walkaway/src/upstreams.rs`. We rejected shape (B) (tear down + rebuild on EL #2) because (A) needs no rebuild and the second client is already at the head.
 
 **Cut the EL, not the CL — that's where the property lives.** Because the head is CL-driven and cached:
-- **Cut EL #1 (CL stays up):** the head keeps advancing and `get_block_number()` *still returns* (from cache, proven: `head after cut = 25252835 ✓` with EL1 dead). State reads fail on EL1 and recover on EL2. This is the demoable beat: `Verified → Degraded{failover} → Verified`.
+- **Cut EL #1 (CL stays up):** the head keeps advancing and `get_block_number()` *still returns* — proven by reading the **cut primary's own client** after the cut (`head_of_primary` returns from the CL-pushed cache with its EL dead). State reads fail on EL1 and recover on EL2. The transition is `Verified → Degraded{failover→EL2}` and it **stays Degraded on the backup** — the supervisor does not auto-probe back to the primary yet (recovery-to-`Verified` is a TODO, see Integration). For the demo that's fine: the balance is still verified the whole time; only the trust label reads "degraded/failover."
 - **Cut the CL instead:** the head freezes; after 60 s every `Latest`-tag read hard-fails `OutOfSync` and `syncing()` flips to `Info`. **And Helios does not self-heal a dead CL** — when the consensus channel closes, the node logs *"consensus client stopped, shut Helios down manually"* and stops (`core/src/client/node.rs`); transient CL blips are retried inside the consensus loop, but a sustained CL death requires Deckard to **rebuild** the client against CL #2 (warm-start from the cached checkpoint, ~2 s). So cutting the CL is the *graceful-degradation* path ("verified locally, head frozen → NOT VERIFIED"), not a "keeps working" beat. **Don't cut the CL on camera.**
 
 **The cache cushion (measured, important for the shoot).** After the EL cut, reads stay `Verified` from the per-block proof cache until the head advances to a *new* block, which forces a cache-miss `eth_getProof` → that's when failover actually fires. So the **cut→failover wall-clock is gated by the block cadence (0–12 s), not the supervisor** (which adds ~250–500 ms once a real EL read is attempted). Two spike runs bracketed this exactly: **1998 ms** (cut landed late in a slot) and **14744 ms** (cut landed just after a block). On camera this reads *well*: the verified balance never blinks — it holds through the cut and re-verifies via the backup within a block. If you want an instant visible flip, the supervisor can proactively issue a `get_proof` on cut-detection instead of waiting for the cached read to expire.
 
-**`ReadStatus` transitions, mapped to real Helios observables:**
+**`ReadStatus` transitions, mapped to real Helios observables** (this is the **target** contract; what the spike implements today is noted per row):
 
 | State | Condition (observable) | Demo meaning |
 |---|---|---|
-| `Verified` | `syncing()==None` (head age ≤60 s) **and** served by the primary EL | trustless, happy path |
-| `Degraded { reason: "failover→EL2" }` | primary EL read errored, secondary EL read succeeded; head still fresh | **the walkaway** — re-verified via backup, balance unchanged |
-| `Degraded { reason: "checkpoint:community" }` | running on `load_external_fallback` (ethPandaOps) checkpoint | verified, but checkpoint source untrusted — show a trust note |
-| `Unsynced { reason: "head frozen…" }` | every EL failed **and** `syncing()==Info` (head age >60 s, CL dark) | NOT VERIFIED — never serve raw RPC |
-| `Unsynced { reason: "all EL upstreams down" }` | every EL failed but head still fresh | NOT VERIFIED — can't produce a proof |
-| `Unsynced { reason: "checkpoint too old" }` | `strict_checkpoint_age` rejects a >14 d checkpoint at build/sync | NOT VERIFIED — re-bootstrap from a fresh checkpoint |
+| State | Condition (observable) | Demo meaning | Spike today |
+|---|---|---|---|
+| `Verified` | served by the primary EL (head fresh) | trustless, happy path | ✅ implemented |
+| `Degraded { reason: "failover→EL2" }` | primary EL read errored, secondary EL read succeeded; head still fresh | **the walkaway** — re-verified via backup, balance unchanged (stays Degraded; no auto-probe back) | ✅ implemented |
+| `Degraded { reason: "checkpoint:community" }` | running on `load_external_fallback` (ethPandaOps) checkpoint | verified, but checkpoint source untrusted — show a trust note | ⛔ not yet — daemon build task |
+| `Unsynced { reason: "head frozen…" }` | every EL failed **and** `syncing()==Info` (head age >60 s, CL dark) | NOT VERIFIED — never serve raw RPC | ✅ classified via `syncing()` |
+| `Unsynced { reason: "all EL upstreams down" }` | every EL failed but head still fresh | NOT VERIFIED — can't produce a proof | ✅ implemented |
+| `Unsynced { reason: "checkpoint too old" }` | `strict_checkpoint_age` rejects a >14 d checkpoint at build/sync | NOT VERIFIED — re-bootstrap from a fresh checkpoint | ⛔ not yet (the builder *can* fail; not surfaced as a status) |
 
-Hard rule (unchanged): **never silently fall back to a raw untrusted RPC.** Verified-or-visibly-degraded, never quietly-trusted. The exact wire shape of how `ReadStatus` rides on a read `Decision` is owned by `30-mcp-shape.md`.
+(The spike uses `Verified` as "served by primary," not literally `syncing()==None` on every read; for the demo the two coincide. The checkpoint-status rows are the daemon's job, not the spike's.)
+
+Hard rule (unchanged): **never silently fall back to a raw untrusted RPC.** Verified-or-visibly-degraded, never quietly-trusted. The wire shape of how `ReadStatus` rides on a read response is **proposed, not yet frozen** in `30-mcp-shape.md` (see "Integration into the app").
+
+## Integration into the app (how this wires in)
+
+> Status: **designed here, not yet built** — the spike is standalone and `src/wallet.rs` is still a plaintext EOA (per `30`). This section closes the cross-doc seam the README lists as "20 provides the EIP-1193 provider + ReadStatus," and resolves the two open placement questions.
+
+**One read module, in the daemon, key-less.** A single `Upstreams` supervisor (the Shape-A failover wrapper, which itself holds 1–2 `EthereumClient`s) lives inside `deckard-signerd` as a **read-only module with no handle to the key.** This resolves the "daemon read path vs MCP `Decision` resolver" question in favor of the daemon — matching `30`'s lean (*"simulate in the daemon so the approval card and the agent see identical numbers"*). Helios is read-only and never touches the keystore (already a stated dependency), so co-locating the read module with the signer adds no key-access path; its only outbound traffic goes to the already-untrusted EL/CL over the private/proxied upstreams.
+
+```
+   ┌─────────────── deckard-signerd (one process) ───────────────┐
+   │   key module (isolated)            read module (NO key)      │
+   │     sign / policy gate               Upstreams (Helios)      │
+   └──────────────▲──────────────────────────────▲──────────────┘
+   UDS: propose/  │                  UDS: wallet_balance/simulate │  (key-less,
+   execute        │                  + ReadStatus on every read   │   ReadStatus-tagged)
+   ┌──────────────┴───────────┐  ┌────────────────┴───┐  ┌────────┴──────────────────┐
+   │ deckard-mcp (thin shell) │  │ GPUI app (UI badge)│  │ Railgun shield (EIP-1193) │
+   └──────────────────────────┘  └────────────────────┘  └───────────────────────────┘
+```
+
+**Three consumers, two read paths:**
+1. **Daemon socket reads** (`wallet_balance`, `simulate`) — typed `HeliosApi` calls through the supervisor, so they get EL-cut failover **and** a `ReadStatus`. The GPUI UI badge and the MCP agent both consume these → one source of truth, identical numbers.
+2. **Railgun's chain reads** (UTXO/TXID sync, balance, state) — Railgun wants `RailgunBuilder::new(chain, impl IntoEip1193Provider)`, but `EthereumClient` exposes the typed `HeliosApi`, **not** an EIP-1193 `request(method, params)` JSON interface. Decision:
+   - **v1 (demo) — Helios's built-in localhost JSON-RPC server.** Build the primary client with `.rpc_address(127.0.0.1:<ephemeral>)` (verified: `EthereumClientBuilder::rpc_address(SocketAddr)`; `HeliosClient::new` then spawns `jsonrpc::start`, which serves the `eth_*` subset Helios implements — the methods Railgun needs for live/state reads, all proof-checked; it is **not** a full JSON-RPC surface, so ⚠ confirm Railgun only calls served methods) and hand Railgun an **alloy HTTP provider** pointed at it. Least code, reuses Helios's own correct mapping. Accepted tradeoffs: (i) a loopback hop + a port (bind `127.0.0.1`, same-uid only); (ii) the server is per-`EthereumClient`, so Railgun's reads hit the primary only and do **not** get the supervisor's EL-cut failover — fine, because the shield completes *before* the on-camera cut and Railgun's reads are never the thing being cut. ✅ **PROVEN end-to-end** (`spikes/eip1193-railgun/`, 2026-06-06, against `kohaku@618c53f`): `IntoEip1193Provider` is Kohaku's *own* narrow 7-method trait (its `eip-1193-provider` crate) — **not** alloy's and **not** a generic `request(method,params)`; an alloy `DynProvider` (`ProviderBuilder::new().connect(url).erased()`) satisfies it via Kohaku's **shipped** `Alloy` adapter (`impl IntoEip1193Provider for DynProvider`) — **no custom adapter for v1** (confirmed by upstream's own `sync_utxo.rs`). The read/sync/balance path calls exactly **3** of those methods, all in Helios's served set: `eth_blockNumber` (`RpcSyncer.latest_block`) + `eth_getLogs` (`RpcSyncer.events`, tail range only) + `eth_call` (`SmartWalletUtxoVerifier.verify_root`); `balance()`/`register()` are local. **One required fix:** alloy's `Provider::call` defaults to the `pending` block tag (`alloy-provider 1.8.3` `trait.rs:198`), which Helios (a light client) can't serve (`block not found: pending`) — build the provider with `ProviderBuilder::new().with_default_block(BlockId::latest())` (installs alloy's `BlockIdLayer`) so the **unmodified** adapter's `eth_call` targets `latest`. One line, Deckard-side, no Kohaku/Helios patch. Historical UTXO ranges go to Subsquid, not Helios (10).
+   - **production — a thin Rust adapter.** `struct HeliosEip1193(Arc<Upstreams>)` implementing Kohaku's `Eip1193Provider` trait (7 methods) by mapping each → a typed `HeliosApi` call (`get_block_number`, `get_logs`, **`call` at `Latest`** — same pin-to-latest discipline, since it bypasses the alloy `pending` default entirely). Removes the loopback hop and puts Railgun's reads behind the same failover + `ReadStatus`. Build post-demo; keep it the single place a Helios↔Railgun API change touches.
+
+**`ReadStatus` on the wire — cross-doc proposal to `30` (it owns the contract).** For "every read carries Verified|Degraded|Unsynced" to be enforceable, `ReadStatus` must live in `deckard-contract` (the shared type home `30` owns) and ride on the read responses. Proposed delta:
+- define `enum ReadStatus { Verified, Degraded{reason}, Unsynced{reason} }` in `deckard-contract` — **20 owns the semantics/transitions** (table above); the **type lives with the contract** so it can serialize on the wire.
+- `wallet_balance` → `{ public_wei, shielded_wei, token_balances[], read_status }`
+- `simulate` → `{ asset_changes[], gas, warnings[], read_status }`
+
+Today `30`'s read responses omit `read_status`; without it the "never silently trust" rule can't be enforced at the wire. (30 owns the final shape — this is the ask.)
+
+**CL-death handling (build task).** The supervisor gains a frozen-head detector: when `syncing()` flips to `Info` (head age >60 s) and no EL failover recovers it, **rebuild** the client against CL #2 (warm from the cached checkpoint, ~2 s), surfacing `Unsynced{reason:"reconnecting CL"}` in the gap. Never serve a raw read while reconnecting.
+
+**Deckard-side file layout:**
+```
+src/chain/helios.rs        # EthereumClient wrapper: build, wait_synced → servable, shutdown
+src/chain/upstreams.rs     # Upstreams supervisor (Shape A) + CL-rebuild-on-frozen
+src/chain/read_status.rs   # ReadStatus (re-exported from deckard-contract)
+src/chain/eip1193.rs       # v1: localhost-server wiring · prod: HeliosEip1193 adapter
+~/.../Deckard/helios/      # data_dir: cached finalized checkpoint (with_file_db)
+```
+The spike (`spikes/helios-walkaway/`) already implements `read_status.rs` + `upstreams.rs` in portable form — lift them in, add `helios.rs` (build/servable wrapper) and `eip1193.rs`.
 
 ## Inputs, trust, and the checkpoint
 
@@ -131,14 +188,18 @@ A provider qualifies only if it serves the `/eth/v1/beacon/light_client/*` REST 
 |---|---|---|---|
 | `http://testing.mainnet.beacon-api.nimbus.team` (Nimbus) | yes | **yes (verified — cold 11 s, warm 2 s)** | Helios's shipped mainnet default backend. Plain HTTP, no SLA, team "testing" box. **Use this for the spike.** |
 | `https://lodestar-mainnet.chainsafe.io` (ChainSafe) | yes | **NO in our test** — head stuck at timestamp 0 (`out of sync`) | Routes return 200 but Helios couldn't derive a fresh execution head against it on 2026-06-05. ⚠ re-test before relying. |
-| `https://ethereum-beacon-api.publicnode.com` (PublicNode) | yes (`/updates` `count` param buggy) | not run in spike | keyless, HTTPS, no-log policy. `/updates` over-delivers — Helios tolerates bounded over-delivery, but flag. |
-| `https://eth-beacon-chain.drpc.org` (dRPC) | yes | not run in spike | keyless, HTTPS. |
+| `https://ethereum-beacon-api.publicnode.com` (PublicNode) | yes (`/updates` `count` param buggy) | **NO** — `sync failed: invalid sync committee period` | keyless, HTTPS, no-log policy, but the `/updates` bug breaks Helios bootstrap. Don't use as a Helios CL. |
+| `https://eth-beacon-chain.drpc.org` (dRPC) | yes | **yes (verified — cold 10.4 s, head 25253907)** | keyless, HTTPS. **The proven public second CL.** |
 | `https://www.lightclientdata.org` (a16z old default) | **503** | — | down. |
 | beaconcha.in / checkpoint-sync hosts (sigp, attestant, ethpandaops) | 404 on LC routes | — | checkpoint-sync only; **not** an LC API. |
 
-**Most commercial EL-RPC providers do NOT expose the light-client subset** (Ankr's beacon endpoint 404s on `light_client/*`; QuickNode serves it only if you provision your own Lighthouse-backed beacon endpoint; Chainstack/Blockdaemon/Nodereal unconfirmed). The reliably-working keyless mainnet LC servers are Nimbus-testing, PublicNode, and dRPC (Lodestar serves the routes but failed Helios sync in our test).
+**Most commercial EL-RPC providers do NOT expose the light-client subset** (Ankr's beacon endpoint 404s on `light_client/*`; QuickNode serves it only if you provision your own Lighthouse-backed beacon endpoint; Chainstack/Blockdaemon/Nodereal unconfirmed). Of the keyless mainnet LC servers, only two are **proven to actually drive a Helios sync**: **Nimbus-testing** and **dRPC**. Lodestar and PublicNode return 200 on the routes but fail Helios sync (timestamp-0 head; `invalid sync committee period`, respectively). 200 ≠ syncs.
 
-**Recommendation for the hero:** primary CL = the Nimbus endpoint that's proven to sync (or self-host); redundant second = PublicNode or dRPC, but **re-verify each candidate actually drives a Helios sync, not just returns 200.** Honest caveat: these are best-effort, **no-SLA** hosts; integrity is still guaranteed by the sync committee + checkpoint regardless of which CL you use — only **liveness** and **metadata** depend on the provider.
+**Chosen approach for the hero (CEO review): public CLs — and the prerequisite is now met.** Two independent, keyless, proven-to-sync public CLs:
+- **Primary: Nimbus** `http://testing.mainnet.beacon-api.nimbus.team` (cold ~11 s). Plain HTTP, no-SLA team box.
+- **Second: dRPC** `https://eth-beacon-chain.drpc.org` (cold ~10.4 s, verified 2026-06-05). HTTPS, keyless.
+
+Self-hosting a Lighthouse CL stays as the fallback only if a pre-shoot rehearsal shows both publics are flaky. Honest caveat: both are best-effort, **no-SLA** hosts; integrity is guaranteed by the sync committee + checkpoint regardless of which CL you use — only **liveness** and **metadata** depend on the provider. Still do a health-check of both in the hour before the take, and only ever cut the EL on camera, never the CL.
 
 **Self-host fallback (smallest path).** The `light_client/*` namespace is standard ([beacon-APIs spec](https://github.com/ethereum/beacon-APIs)). Which CLs serve it:
 
@@ -165,9 +226,11 @@ So spend the privacy budget on the **EL**; the CL needs IP hygiene only, not add
 
 ## Measured (M-series desktop, mainnet, 2026-06-05, from the spike)
 
+> These are **observed values from real runs on this build host**, reproducible via the spike's commands — they are **not** asserted in CI or stored as committed artifacts. Re-measure on the actual demo machine. The spike prints current-run values; only the PASS/FAIL verdict is asserted.
+
 | Metric | Number | Notes |
 |---|---|---|
-| **Cold sync** (build → first servable verified head) | **≈ 10.9 s** | fresh community checkpoint + sync; includes the ~12 s-bounded wait for the first execution head push |
+| **Cold sync** (build → first servable verified head) | **≈ 10.9 s** | with `strict_checkpoint_age` + no user pin, the stale built-in default is rejected so `load_external_fallback` fetches a fresh community checkpoint; includes the ~12 s-bounded wait for the first execution head push. (`FileDB` otherwise falls back to the *built-in default* checkpoint, not the community one — the external fallback is conditional.) |
 | **Warm sync** (cached `data_dir/checkpoint`) | **≈ 2.2 s** | ~5× faster; this is the demo-day number — **pre-sync, ship warm** |
 | **Cut → failover (wall-clock)** | **≈ 2–15 s** | gated by block cadence (per-block proof cache), **not** the mechanism |
 | **Failover mechanism alone** | ~250–500 ms | one failed EL attempt + one success on EL2, once a real `eth_getProof` is forced |
@@ -177,9 +240,13 @@ So spend the privacy budget on the **EL**; the CL needs IP hygiene only, not add
 
 Implication for the demo: the beat is **"warm-start instant"** (pre-sync to ~2 s) and the cut keeps the balance verified through one block. Cold start (~11 s) is a "syncing…" state if ever shown un-pre-synced.
 
-## Local end-to-end testing (Kurtosis) — the answer to the gating question
+**Measured — `eip1193-railgun` spike (M-series, mainnet, `--release`, 2026-06-06).** Helios warm sync ≈ 2.1 s / cold ≈ 10.5 s (consistent with above). All read-path methods (`eth_chainId`/`eth_blockNumber`/`eth_getLogs`/`eth_call`) resolve through Helios's localhost server; a 2000-block `eth_getLogs` window on the live RAILGUN wallet returned ~100–326 verified events, and Kohaku's real `RpcSyncer` parsed 414 `SyncEvents` through it. **Loopback-hop overhead: direct typed `HeliosApi` head read ≈ 0.75 ms/call vs alloy→Helios-localhost ≈ 1.0 ms/call → Δ ≈ 0.27–0.31 ms/call** (HTTP-serialize + two loopback syscalls + jsonrpsee dispatch). That hop is **cheap enough to ship the v1 localhost path for the demo and defer the production `HeliosEip1193` adapter** (which removes this hop and adds failover + `ReadStatus`).
 
-A plain **anvil** node has no consensus layer, so Helios cannot verify against it. The open question was whether the Kurtosis `ethpandaops/ethereum-package` CL serves the LC API out of the box. **Answer: yes, with zero/near-zero flags** — Lighthouse, Nimbus, Lodestar all serve the LC API **on by default**, and ethereum-package runs **all forks from genesis** (Altair + sync committee live at slot 0). Minimal config:
+## Local end-to-end testing (Kurtosis) — DEFERRED (not v1-critical)
+
+> **Decision (CEO review):** Kurtosis is **deferred off the v1 critical path.** The mainnet spike already proves the whole R2 beat (sync, verified balance, cut-the-EL failover, refuse-a-lie) with **zero** Kurtosis, so a local devnet is not required to ship the demo. Its only added value is a *fully offline, deterministic CI lane where you own the CL* (no public-beacon flakiness in tests) — a post-demo hardening nice-to-have, not a gate. v1 testing runs on mainnet + Sepolia public endpoints. **TODO (post-demo): build the hermetic Kurtosis CI lane** (needs the hand-written Helios devnet `Config` below). The findings below are kept so that build is cheap when we pick it up. Note: Kurtosis is *not* a wallet feature and is *not* mainnet — it's a private throwaway devnet (a few GB, laptop-fine) used only for testing; it can't be shipped to users and can't replace Helios (it's the thing Helios verifies *against* in a test).
+
+A plain **anvil** node has no consensus layer, so Helios cannot verify against it. The (now-answered) gating question was whether the Kurtosis `ethpandaops/ethereum-package` CL serves the LC API out of the box. **Answer: yes, with zero/near-zero flags** — Lighthouse, Nimbus, Lodestar all serve the LC API **on by default**, and ethereum-package runs **all forks from genesis** (Altair + sync committee live at slot 0). Minimal config:
 
 ```yaml
 # lc-devnet.yaml — CL answers the light_client/* routes out of the box
@@ -190,7 +257,7 @@ participants:
 ```
 `kurtosis run github.com/ethpandaops/ethereum-package --args-file lc-devnet.yaml`, then point Helios's `consensus_rpc`/`execution_rpc` at the enclave's mapped CL/EL ports.
 
-- **Option A (recommended local gate):** the full Kurtosis devnet — CL and EL are internally consistent, so you can literally cut the EL on camera against a CL you control. **Requires a hand-built Helios `Config`** (the `Network` enum hardcodes mainnet's CL and the testnets are `None`) with the devnet `chain_id`, both RPCs, and a fresh checkpoint (genesis/first-finalized root). This config does not exist yet — it's a build task that gates Lane B. (`00-test-harness.md` owns it.)
+- **Option A (the deferred hermetic-CI lane):** the full Kurtosis devnet — CL and EL are internally consistent, so you can cut the EL against a CL you fully control with no public dependency. **Requires a hand-built Helios `Config`** (the `Network` enum hardcodes mainnet's CL and the testnets are `None`) with the devnet `chain_id`, both RPCs, and a fresh checkpoint (genesis/first-finalized root). Not built (deferred). When picked up, coordinate with `00-test-harness.md`.
 - **Option B (anvil-fork EL + real mainnet CL) does NOT work** — and it's a trap worth stating: Helios verifies EL responses against the `state_root` the mainnet CL header attests to. A forked anvil matches that root only at the exact fork block with zero mutations; the instant it advances/mines, the root diverges and Helios's verification **fails** (not "works with stale data"). Plus the mainnet CL head keeps advancing while the fork doesn't, tripping the 60 s gate. Don't build the walkaway on it.
 - **Gotchas:** `finality_update` only returns meaningfully after ~2 epochs finalize (~12.8 min at 12 s slots) — don't assert on it immediately post-`kurtosis run`. Keep all fork epochs at 0 (default). For the EL-only failover logic, unit-test the supervisor with mocked clients (no real verify) — the spike already isolates it in `upstreams.rs`.
 
@@ -199,30 +266,39 @@ participants:
 A standalone crate (own `[workspace]`, not part of deck's build) that proves the beat headless and prints the measurements above. Files mirror Deckard's intended layout:
 - `read_status.rs` — `ReadStatus { Verified | Degraded | Unsynced }` (Deckard-owned).
 - `upstreams.rs` — the failover supervisor (Shape A): `get_balance` with failover, `head()` (EL-independent), outage classification via `syncing()`.
-- `proxy.rs` — a killable HTTP/1.1 reverse proxy = the on-camera "cut" (one `AtomicBool`).
-- `main.rs` — the scenario + cold/warm/failover measurements; exit 0 = PASS.
+- `proxy.rs` — a killable **and optionally lying** HTTP/1.1 reverse proxy: the kill switch is the on-camera "cut"; `lie=true` rewrites the `balance` in every `eth_getProof` response (a malicious RPC).
+- `main.rs` — two scenarios + measurements; exit 0 = PASS.
 
-Run: `cargo run --release` (warm) or `WIPE=1 cargo run --release` (cold). Defaults to the privacy-correct posture (publicnode proxied + dRPC failover + Nimbus CL). See its README for the CL-choice and key-restricted-EL caveats.
+Run:
+- **Availability (cut-the-RPC):** `cargo run --release` (warm) / `WIPE=1 cargo run --release` (cold). Defaults to the privacy-correct posture (publicnode proxied + dRPC failover + Nimbus CL).
+- **Integrity (refuse a lie):** `SCENARIO=lie WIPE=1 cargo run --release`. Proven result: malicious RPC claims **1,000,000,000 ETH**, Deckard returns `REJECTED — invalid account proof` (a centralized wallet would show the billion). Note it still *syncs and serves the head through the lying RPC* — only the proof-bearing balance read catches the lie, because the head is CL-verified.
+
+See the README for the CL-choice and key-restricted-EL caveats.
+
+**Sibling spike — `spikes/eip1193-railgun/` (the Railgun EIP-1193 seam, T-Trustless #3).** Boots the *same* Helios localhost server (`.rpc_address`) and settles the "v1 localhost vs forced-adapter" question in "Integration" above. **Tier-2** (default, light): an alloy `DynProvider` through Kohaku's *own* `IntoEip1193Provider` adapter drives `eth_chainId`/`eth_blockNumber`/`eth_getLogs`/`eth_call` through Helios, logged by a method-recording pass-through proxy. **Tier-1** (`--features railgun`, heavy): links the *full* `railgun` ZK crate (ark-circom/wasmer/groth16) — `RailgunBuilder::new(ChainConfig::mainnet(), <Helios DynProvider>).build()` OK, then Kohaku's real `RpcSyncer` drives `eth_getLogs` through Helios → 414 parsed `SyncEvents` from the live mainnet RAILGUN wallet. Verdict: **v1 WORKS** with the one-line `with_default_block(latest)` fix; the `railgun` crate compiles standalone from the spike's dep edge (mirrors 3 `[patch]`es). Numbers in "Measured" below.
 
 **Acceptance test (the R2 slice; the spike implements steps 1–3):**
 ```
-Scenario "Helios verified reads + walkaway" (mainnet hero):
+Scenario "Helios verified reads" (mainnet hero):
   1. build EthereumClient(EL1,CL,checkpoint); wait_synced(); poll until head servable
        assert: first servable head within the pre-sync window (cold ~11s / warm ~2s)
   2. read a KNOWN value (deposit contract balance) at the head
        assert: get_balance matches an independent source; ReadStatus == Verified
-  3. WALKAWAY: cut EL1 (kill the proxy)
+  3. INTEGRITY (the moat): point Helios at a MALICIOUS RPC (tampered eth_getProof balance)
+       assert: get_balance REJECTS the read (invalid account proof); never returns the fake value
+               (head still syncs through the liar — only the proof-bearing read catches it)
+  4. AVAILABILITY (cut-the-RPC): cut EL1 (kill the proxy)
        assert: supervisor fails over to EL2, returns a VERIFIED balance, head still advances
-               (Verified -> Degraded{failover} -> Verified), within ≤1 block + mechanism
-  4. STALE CHECKPOINT: start with a >14d checkpoint + strict_checkpoint_age
+               (Verified -> Degraded{failover→EL2}; stays Degraded on the backup), within ≤1 block + mechanism
+  5. STALE CHECKPOINT: start with a >14d checkpoint + strict_checkpoint_age
        assert: build/sync FAILS visibly (Unsynced); NEVER silently serves raw RPC
 ```
-Steps 1–3 are the on-camera beat; the same headless run + screen capture is the cut.
+Steps 2–4 are the on-camera beats (verified read, refuse-a-lie, cut-the-RPC); the same headless run + screen capture is the cut. The spike implements steps 1–4 across its two scenarios (default = 1/2/4, `SCENARIO=lie` = 3); step 5 is an unwritten guard test.
 
 ## Risks & fallbacks
 
-- **R2 — no native EL/CL failover (verified).** Live "cut and continue" needs our supervisor (Shape A). *Status: proven on mainnet.* Fallback for the EL: "verified locally, head frozen" badge if even (A) misbehaves.
-- **The CL is the fragile, least-redundant dependency.** A single keyless no-SLA CL stalling >60 s on camera hard-fails *every* `Latest`-tag read — looks like a crash. And Helios doesn't auto-recover a dead CL (requires a rebuild against CL #2). *Mitigations:* self-host a Lighthouse CL as primary (removes the third-party SPOF), pre-stage CL #2 + a rebuild-on-frozen path, rehearse in the hour before, and **only ever cut the EL on camera, never the CL.** Cheapest de-risk for rehearsal: run the beat against a local Kurtosis devnet (Option A) where you own the CL.
+- **R2 — no native EL/CL failover (verified).** Live "cut and continue" needs our supervisor (Shape A). *Status: the core is proven on mainnet (balance-read failover + lying-RPC rejection); the app-level wiring (EIP-1193, ReadStatus-on-wire, CL-rebuild, receive-watcher, simulate) is unbuilt.* Fallback for the EL: "verified locally, head frozen" badge if even (A) misbehaves.
+- **The CL is the fragile, no-SLA dependency** (but redundancy is now real). A single CL stalling >60 s on camera hard-fails *every* `Latest`-tag read — looks like a crash. And Helios doesn't auto-recover a dead CL (requires a rebuild against CL #2). *Chosen mitigation (CEO review): public CLs, redundancy proven* — **Nimbus primary + dRPC second, both verified to drive a Helios sync** (Nimbus ~11 s, dRPC ~10.4 s). Rehearse/health-check both in the hour before, and **only ever cut the EL on camera, never the CL.** Self-host a Lighthouse CL only as the fallback if both publics look flaky at rehearsal. (Lodestar + PublicNode beacon return 200 but fail Helios sync — don't use them as CLs.)
 - **Cache cushion shifts failover timing.** Cut→visible-failover is ≤1 block because of the per-block proof cache; the balance holds verified through the cut (good), but the visible `Degraded` flip waits for the next block. Force it with a proactive `get_proof` on cut-detection if an instant flip is wanted.
 - **Checkpoint trust / community fallback "not secure."** Ship a recent pinned default + user override; run `strict_checkpoint_age`; mark community-sourced checkpoints `Degraded`.
 - **API churn / git-pin.** Pre-1.0, git-pinned. Keep the thin wrapper (`upstreams.rs`/`read_status.rs`) so a Helios API change touches one place. Re-verify builder method names at each bump.
@@ -232,10 +308,12 @@ Steps 1–3 are the on-camera beat; the same headless run + screen capture is th
 
 - ~~Cold vs warm sync time; real failover latency~~ → **measured** (≈11 s / ≈2 s; failover ≤1 block). Re-measure on the actual demo machine.
 - ~~Published crates.io release?~~ → **no**; `helios-ethereum` git-only at `0.11.1` (crates.io stale at 0.1.0).
-- ~~alloy alignment~~ → **resolved**; unifies to one `alloy-primitives 1.6.0`.
-- **Best CL provider for the hero (+ redundant second):** narrowed to Nimbus-testing (proven-syncs), PublicNode, dRPC; **Lodestar returns 200 but failed Helios sync in our test — re-verify.** Strongly consider self-hosting Lighthouse for the hero to remove the no-SLA SPOF. Resolve the **Teku** default-flag contradiction or avoid Teku.
-- **Does Deckard auto-rebuild on a dead CL?** Helios won't self-heal; Deckard needs a frozen-head detector → rebuild against CL #2 (warm, ~2 s). Build task — coordinate with the read path.
-- **Failover (Shape A) in the daemon read path vs behind the MCP read `Decision` resolver?** Coordinate the boundary with `30-mcp-shape.md`. (Cross-doc need — not resolved here.)
+- ~~alloy alignment~~ → **resolved**; unifies to one `alloy-primitives 1.6.0` (umbrella `alloy 1.8.3`). The `eip1193-railgun` spike confirms **Kohaku's `railgun` independently resolves to the identical `alloy 1.8.3`/`alloy-primitives 1.6.0`**, so Helios + Railgun link in one process with no version conflict (mirror 3 `[patch]`es: `ethereum_hashing` + the `ruint` & `ark-circom` forks).
+- ~~CL approach + redundant second~~ → **decided + proven:** public CLs, **Nimbus primary + dRPC second** (both verified to drive a Helios sync, ~11 s / ~10.4 s). Lodestar + PublicNode beacon fail (200 but no sync). Self-host = flaky-rehearsal fallback only. Remaining minor: resolve the **Teku** default-flag contradiction or just avoid Teku.
+- ~~Does Deckard auto-rebuild on a dead CL?~~ → **specced** as a supervisor build task (frozen-head detector → rebuild against CL #2, ~2 s warm) in "Integration into the app." Not yet built.
+- ~~Failover (Shape A) in the daemon read path vs MCP `Decision` resolver?~~ → **decided:** one key-less `Upstreams` in `deckard-signerd` (see "Integration into the app"). Matches `30`'s "daemon so the numbers match" lean.
+- ~~EIP-1193 adapter for Railgun~~ → **RESOLVED + PROVEN** (`spikes/eip1193-railgun/`): v1 = Helios localhost server + alloy `DynProvider` through Kohaku's *own* `IntoEip1193Provider` (no custom adapter), with the one-line `with_default_block(latest)` fix (alloy's `call` defaults to `pending`; Helios has none). Both the adapter-only path and the **full `railgun` crate** (linked under `--features railgun`; `RailgunBuilder::new(ChainConfig::mainnet(), <Helios DynProvider>).build()` + Kohaku's real `RpcSyncer` drove `eth_getLogs` through Helios → 414 SyncEvents) verified on mainnet. The `railgun` crate **compiles standalone** from our dep edge (retires 10's R1c). Production `HeliosEip1193` adapter still wanted (drops the loopback hop + adds failover/ReadStatus) and must likewise pin `eth_call`→`latest`. Loopback-hop overhead: see "Measured."
+- **`read_status` on `30`'s read responses:** proposed (define `ReadStatus` in `deckard-contract`, add the field to `wallet_balance`/`simulate`). Needs `30`'s sign-off — it owns the contract.
 
 ## Sources (repos + docs)
 

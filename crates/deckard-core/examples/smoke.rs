@@ -19,7 +19,10 @@ fn main() {
     println!("{name} -> {addr}");
 
     match eth.portfolio(addr).recv() {
-        Ok(Ok(p)) => {
+        Ok(Ok(read)) => {
+            // The trust label the read carries (Helios-Verified vs Unsynced).
+            println!("read status: {}", read.status);
+            let p = read.value;
             println!("ETH: {}", format_amount(p.native_wei, 18, 6));
             for t in &p.tokens {
                 println!("{:>5}: {}", t.symbol, format_amount(t.raw, t.decimals, 4));

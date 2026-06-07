@@ -7,12 +7,19 @@ use alloy_primitives::Address;
 use crate::decision::{Decision, RequestId};
 use crate::intent::Intent;
 use crate::policy::Policy;
-use crate::rpc::{ApprovalStatus, BalanceReport, ExecuteResult};
+use crate::rpc::{ApprovalStatus, BalanceReport, ExecuteResult, UnlockOutcome};
 
 /// The daemon-socket API expressed as a trait, so callers can hold a `Box<dyn Signer>` and
 /// swap the mock for the real UDS client without changing a line. Object-safe: every method
 /// takes `&self` and returns owned values.
 pub trait Signer {
+    /// Unlock the vault for the session (the daemon decrypts + holds the key). Returns the
+    /// wallet address on success — never key material.
+    fn unlock(&self, passphrase: &str) -> UnlockOutcome;
+    /// Lock: zeroize + drop the held key and deny in-flight approvals. Re-arm via `unlock`.
+    fn lock(&self);
+    /// Close an approval loop: flip a `Pending` request to `Allowed`/`Denied`.
+    fn resolve(&self, request_id: RequestId, approved: bool);
     /// The wallet's public address (key-less to read).
     fn address(&self) -> Address;
     /// Public + shielded balances. `shielded` mirrors the wire request; the report carries

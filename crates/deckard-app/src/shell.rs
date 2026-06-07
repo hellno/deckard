@@ -15,19 +15,41 @@ use gpui_component::{
     v_flex, ActiveTheme, IconName, TitleBar,
 };
 
-use deckard_core::{Address, EthProvider, KdfParams, Portfolio, UnlockedVault, Vault, WordCount};
+use deckard_core::{Address, EthProvider, KdfParams, Portfolio, ReadStatus, Vault, WordCount};
 use zeroize::Zeroizing;
 
+use deckard_signerd::SignerClient;
+
 use crate::settings::{Settings, ThemeModePref};
+use crate::signer::{self, AppSigner};
 use crate::theme::{self, Accent};
 use crate::wallet;
-use crate::{GoBack, NewItem, OpenSettings, ToggleTheme, TogglePalette, APP_NAME};
+use crate::{GoBack, NewItem, OpenSettings, TogglePalette, ToggleTheme, APP_NAME};
+
+/// The chain the supervised daemon signs for. v1 is mainnet-first (the default RPC is
+/// mainnet); multi-chain app config that re-points both the reader and the daemon is a
+/// fast-follow.
+const DAEMON_CHAIN_ID: u64 = 1;
 
 /// Trim a noisy provider error down to one short line for the UI.
 fn short_err(e: impl std::fmt::Display) -> String {
     let line = e.to_string();
     let line = line.lines().next().unwrap_or("").trim();
     line.chars().take(140).collect()
+}
+
+/// Run `prework` (which seals + writes the keystore for create/import/migrate, or is a no-op
+/// for a plain unlock), then unlock OVER THE DAEMON SOCKET — the key is decrypted in the
+/// daemon, never here. Returns the wallet address or a one-line, user-facing error. Always
+/// called from a background thread (it blocks on Argon2 + a socket round-trip).
+fn write_then_unlock(
+    client: &SignerClient,
+    passphrase: &str,
+    prework: impl FnOnce() -> anyhow::Result<()>,
+) -> Result<Address, String> {
+    prework().map_err(short_err)?;
+    let outcome = client.unlock_blocking(passphrase).map_err(short_err)?;
+    signer::address_or_error(outcome)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -72,10 +94,13 @@ pub struct Shell {
     pub auth_error: Option<String>,
     /// True while an Argon2 create/unlock runs on a background thread.
     pub auth_busy: bool,
-    /// The unlocked wallet's own address (for Receive / copy). `None` until unlocked.
+    /// The unlocked wallet's own address (for Receive / copy). `None` until unlocked. This is
+    /// the ONLY wallet identity the app holds — the key lives in the daemon, never here.
     pub wallet_address: Option<Address>,
-    /// The in-memory unlocked wallet; dropped (and zeroized) on lock.
-    unlocked: Option<UnlockedVault>,
+    /// The key-less bridge to the process-isolated signer daemon: the app spawns + supervises
+    /// it and talks over the socket (unlock / propose / execute). Unlock happens *in the
+    /// daemon*; the app only learns the address. Dropping this kills the daemon child.
+    signer: AppSigner,
     /// During create: the sealed-but-unwritten vault and its phrase, pending backup.
     pending_vault: Option<Vault>,
     pub pending_phrase: Option<Zeroizing<String>>,
@@ -106,6 +131,9 @@ pub struct Shell {
     /// True only during the first sync (the one allowed loading state).
     pub portfolio_loading: bool,
     pub portfolio_error: Option<String>,
+    /// Trust label for the last portfolio/block read: Helios-`Verified` vs visibly
+    /// `Unsynced`/`Degraded`. Never silently "trusted" — surfaced in the status line.
+    pub read_status: Option<ReadStatus>,
     /// Latest block height — a liveness/sync indicator for the status line.
     pub synced_block: Option<u64>,
     /// Bumped on every `retarget`; a slow ENS resolution checks it before applying so a
@@ -142,18 +170,21 @@ impl Shell {
                 .placeholder("https://…  (default: bundled public RPC)")
                 .default_value(settings.rpc_url.clone())
         });
-        cx.subscribe(&rpc_input, |this, state, event: &InputEvent, cx| match event {
-            InputEvent::Change => {
-                this.settings.rpc_url = state.read(cx).value().to_string();
-                this.settings.save();
-            }
-            InputEvent::Blur => {
-                this.settings.rpc_url = state.read(cx).value().to_string();
-                this.settings.save();
-                this.respawn_provider(cx);
-            }
-            _ => {}
-        })
+        cx.subscribe(
+            &rpc_input,
+            |this, state, event: &InputEvent, cx| match event {
+                InputEvent::Change => {
+                    this.settings.rpc_url = state.read(cx).value().to_string();
+                    this.settings.save();
+                }
+                InputEvent::Blur => {
+                    this.settings.rpc_url = state.read(cx).value().to_string();
+                    this.settings.save();
+                    this.respawn_provider(cx);
+                }
+                _ => {}
+            },
+        )
         .detach();
 
         // Watch address / ENS: persist as typed; re-target the portfolio on blur.
@@ -162,18 +193,21 @@ impl Shell {
                 .placeholder("0x… or name.eth  (blank = your wallet)")
                 .default_value(settings.watch_address.clone())
         });
-        cx.subscribe(&watch_input, |this, state, event: &InputEvent, cx| match event {
-            InputEvent::Change => {
-                this.settings.watch_address = state.read(cx).value().to_string();
-                this.settings.save();
-            }
-            InputEvent::Blur => {
-                this.settings.watch_address = state.read(cx).value().to_string();
-                this.settings.save();
-                this.retarget(cx);
-            }
-            _ => {}
-        })
+        cx.subscribe(
+            &watch_input,
+            |this, state, event: &InputEvent, cx| match event {
+                InputEvent::Change => {
+                    this.settings.watch_address = state.read(cx).value().to_string();
+                    this.settings.save();
+                }
+                InputEvent::Blur => {
+                    this.settings.watch_address = state.read(cx).value().to_string();
+                    this.settings.save();
+                    this.retarget(cx);
+                }
+                _ => {}
+            },
+        )
         .detach();
 
         // Auth inputs — passphrases are masked and NEVER persisted to disk.
@@ -185,10 +219,12 @@ impl Shell {
         let create_pass2 = masked(window, cx, "Confirm passphrase");
         let import_pass = masked(window, cx, "Choose a passphrase (min 8 characters)");
         let pass_input = masked(window, cx, "Passphrase");
-        let confirm_words =
-            cx.new(|cx| InputState::new(window, cx).placeholder("the requested words, space-separated"));
-        let import_secret = cx
-            .new(|cx| InputState::new(window, cx).placeholder("12 / 24-word phrase, or a 0x private key"));
+        let confirm_words = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("the requested words, space-separated")
+        });
+        let import_secret = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("12 / 24-word phrase, or a 0x private key")
+        });
 
         // Submit-on-Enter for each auth field (keyboard-first).
         cx.subscribe(&create_pass2, |this, _, event: &InputEvent, cx| {
@@ -231,6 +267,11 @@ impl Shell {
         let current_rpc = settings.effective_rpc();
         let eth = EthProvider::spawn(current_rpc.clone());
 
+        // Spawn + supervise the process-isolated signer daemon. It owns the key; the app is a
+        // key-less client that unlocks/signs over the socket. The daemon broadcasts via the
+        // same RPC the app reads from.
+        let signer = AppSigner::launch(current_rpc.clone(), DAEMON_CHAIN_ID);
+
         Self {
             focus_handle,
             route: Route::Welcome,
@@ -244,7 +285,7 @@ impl Shell {
             auth_error: None,
             auth_busy: false,
             wallet_address: None,
-            unlocked: None,
+            signer,
             pending_vault: None,
             pending_phrase: None,
             pending_pass: None,
@@ -263,6 +304,7 @@ impl Shell {
             portfolio: None,
             portfolio_loading: false,
             portfolio_error: None,
+            read_status: None,
             synced_block: None,
             view_epoch: 0,
             current_rpc,
@@ -303,9 +345,14 @@ impl Shell {
         }
     }
 
-    /// Lock the wallet: drop (zeroize) the unlocked secret and return to the unlock gate.
+    /// Lock the wallet: tell the daemon to zeroize the key (best-effort, off the UI thread)
+    /// and return to the unlock gate. The app held no key to drop — locking is the daemon's job.
     pub fn lock(&mut self, cx: &mut Context<Self>) {
-        self.unlocked = None;
+        let client = self.signer.client();
+        cx.background_spawn(async move {
+            let _ = client.lock_blocking();
+        })
+        .detach();
         self.wallet_address = None;
         self.portfolio = None;
         self.auth = AuthStep::Unlock;
@@ -401,24 +448,24 @@ impl Shell {
             cx.notify();
             return;
         };
+        let client = self.signer.client();
         let task = cx.background_spawn(async move {
-            vault.write_atomic(&path)?;
-            vault.unlock(pass.as_str())
+            write_then_unlock(&client, pass.as_str(), move || vault.write_atomic(&path))
         });
         cx.spawn(async move |this, cx| {
             let res = task.await;
             this.update(cx, |this, cx| {
                 this.auth_busy = false;
                 match res {
-                    Ok(unlocked) => {
+                    Ok(addr) => {
                         wallet::delete_legacy_key();
                         this.pending_phrase = None;
                         this.pending_pass = None;
                         this.pending_vault = None;
-                        this.finish_unlock(unlocked, cx);
+                        this.finish_unlock(addr, cx);
                     }
-                    Err(e) => {
-                        this.auth_error = Some(short_err(e));
+                    Err(msg) => {
+                        this.auth_error = Some(msg);
                         cx.notify();
                     }
                 }
@@ -456,34 +503,38 @@ impl Shell {
         };
         let secret = Zeroizing::new(secret);
         let pass = Zeroizing::new(pass);
+        let seal_pass = pass.clone();
+        let client = self.signer.client();
         let task = cx.background_spawn(async move {
-            let trimmed = secret.trim();
-            // Route by shape, not word count: a pure-hex string (optional 0x) is a raw key;
-            // anything with spaces/words is a mnemonic, so a short/long phrase gets a real
-            // BIP-39 error rather than a misleading "must be 32 bytes".
-            let h = trimmed.strip_prefix("0x").unwrap_or(trimmed);
-            let looks_like_hex_key = !trimmed.contains(char::is_whitespace)
-                && !h.is_empty()
-                && h.chars().all(|c| c.is_ascii_hexdigit());
-            let vault = if looks_like_hex_key {
-                Vault::import_raw_key(trimmed, pass.as_str(), KdfParams::PRODUCTION)?
-            } else {
-                Vault::import_mnemonic(trimmed, pass.as_str(), KdfParams::PRODUCTION)?
-            };
-            vault.write_atomic(&path)?;
-            vault.unlock(pass.as_str())
+            write_then_unlock(&client, pass.as_str(), move || {
+                let trimmed = secret.trim();
+                // Route by shape, not word count: a pure-hex string (optional 0x) is a raw
+                // key; anything with spaces/words is a mnemonic, so a short/long phrase gets a
+                // real BIP-39 error rather than a misleading "must be 32 bytes".
+                let h = trimmed.strip_prefix("0x").unwrap_or(trimmed);
+                let looks_like_hex_key = !trimmed.contains(char::is_whitespace)
+                    && !h.is_empty()
+                    && h.chars().all(|c| c.is_ascii_hexdigit());
+                let vault = if looks_like_hex_key {
+                    Vault::import_raw_key(trimmed, seal_pass.as_str(), KdfParams::PRODUCTION)?
+                } else {
+                    Vault::import_mnemonic(trimmed, seal_pass.as_str(), KdfParams::PRODUCTION)?
+                };
+                vault.write_atomic(&path)?;
+                Ok(())
+            })
         });
         cx.spawn(async move |this, cx| {
             let res = task.await;
             this.update(cx, |this, cx| {
                 this.auth_busy = false;
                 match res {
-                    Ok(unlocked) => {
+                    Ok(addr) => {
                         wallet::delete_legacy_key();
-                        this.finish_unlock(unlocked, cx);
+                        this.finish_unlock(addr, cx);
                     }
-                    Err(e) => {
-                        this.auth_error = Some(short_err(e));
+                    Err(msg) => {
+                        this.auth_error = Some(msg);
                         cx.notify();
                     }
                 }
@@ -507,25 +558,19 @@ impl Shell {
         self.auth_error = None;
         self.auth_busy = true;
         cx.notify();
-        let Some(path) = wallet::vault_path() else {
-            self.auth_error = Some("no config directory available".into());
-            self.auth_busy = false;
-            cx.notify();
-            return;
-        };
+        // No vault write: the daemon reads the existing keystore and decrypts it.
         let pass = Zeroizing::new(pass);
-        let task = cx.background_spawn(async move {
-            let vault = Vault::read(&path)?;
-            vault.unlock(pass.as_str())
-        });
+        let client = self.signer.client();
+        let task = cx
+            .background_spawn(async move { write_then_unlock(&client, pass.as_str(), || Ok(())) });
         cx.spawn(async move |this, cx| {
             let res = task.await;
             this.update(cx, |this, cx| {
                 this.auth_busy = false;
                 match res {
-                    Ok(unlocked) => this.finish_unlock(unlocked, cx),
-                    Err(e) => {
-                        this.auth_error = Some(short_err(e));
+                    Ok(addr) => this.finish_unlock(addr, cx),
+                    Err(msg) => {
+                        this.auth_error = Some(msg);
                         cx.notify();
                     }
                 }
@@ -561,23 +606,28 @@ impl Shell {
             return;
         };
         let pass = Zeroizing::new(pass);
+        let seal_pass = pass.clone();
         let hex = Zeroizing::new(hex);
+        let client = self.signer.client();
         let task = cx.background_spawn(async move {
-            let vault = Vault::import_raw_key(hex.as_str(), pass.as_str(), KdfParams::PRODUCTION)?;
-            vault.write_atomic(&path)?;
-            vault.unlock(pass.as_str())
+            write_then_unlock(&client, pass.as_str(), move || {
+                let vault =
+                    Vault::import_raw_key(hex.as_str(), seal_pass.as_str(), KdfParams::PRODUCTION)?;
+                vault.write_atomic(&path)?;
+                Ok(())
+            })
         });
         cx.spawn(async move |this, cx| {
             let res = task.await;
             this.update(cx, |this, cx| {
                 this.auth_busy = false;
                 match res {
-                    Ok(unlocked) => {
+                    Ok(addr) => {
                         wallet::delete_legacy_key();
-                        this.finish_unlock(unlocked, cx);
+                        this.finish_unlock(addr, cx);
                     }
-                    Err(e) => {
-                        this.auth_error = Some(short_err(e));
+                    Err(msg) => {
+                        this.auth_error = Some(msg);
                         cx.notify();
                     }
                 }
@@ -587,27 +637,21 @@ impl Shell {
         .detach();
     }
 
-    /// Land in the unlocked app: stash the wallet, derive its address, fetch the portfolio.
-    fn finish_unlock(&mut self, unlocked: UnlockedVault, cx: &mut Context<Self>) {
-        match unlocked.primary_address() {
-            Ok(addr) => {
-                self.wallet_address = Some(addr);
-                self.unlocked = Some(unlocked);
-                self.auth = AuthStep::Ready;
-                self.auth_error = None;
-                self.route = Route::Welcome;
-                self.retarget(cx);
-            }
-            Err(e) => {
-                self.auth_error = Some(short_err(e));
-                cx.notify();
-            }
-        }
+    /// Land in the unlocked app: stash the address the daemon returned and fetch the
+    /// portfolio. The key stays in the daemon — the app only holds this address.
+    fn finish_unlock(&mut self, address: Address, cx: &mut Context<Self>) {
+        self.wallet_address = Some(address);
+        self.auth = AuthStep::Ready;
+        self.auth_error = None;
+        self.route = Route::Welcome;
+        self.retarget(cx);
     }
 
     /// The unlocked wallet's own address as an EIP-55 string (empty until unlocked).
     pub fn wallet_address_string(&self) -> String {
-        self.wallet_address.map(|a| a.to_string()).unwrap_or_default()
+        self.wallet_address
+            .map(|a| a.to_string())
+            .unwrap_or_default()
     }
 
     /// Auto-focus the primary input for the current auth step (so the user — and the
@@ -640,11 +684,13 @@ impl Shell {
             this.update(cx, |this, cx| {
                 this.portfolio_loading = false;
                 match res {
-                    Ok(Ok(p)) => {
+                    Ok(Ok(read)) => {
                         // Ignore a stale reply for an address we're no longer viewing.
-                        if p.address == this.display_address {
-                            this.portfolio = Some(p);
+                        if read.value.address == this.display_address {
+                            this.portfolio = Some(read.value);
                             this.portfolio_error = None;
+                            // Surface the trust label (Helios-verified vs unsynced).
+                            this.read_status = Some(read.status);
                         }
                     }
                     Ok(Err(e)) => this.portfolio_error = Some(short_err(e)),
@@ -661,9 +707,10 @@ impl Shell {
     fn kick_block_number(eth: &EthProvider, cx: &mut Context<Self>) {
         let rx = eth.block_number();
         cx.spawn(async move |this, cx| {
-            if let Ok(Ok(n)) = rx.recv_async().await {
+            if let Ok(Ok(read)) = rx.recv_async().await {
                 this.update(cx, |this, cx| {
-                    this.synced_block = Some(n);
+                    this.synced_block = Some(read.value);
+                    this.read_status = Some(read.status);
                     cx.notify();
                 })
                 .ok();
@@ -715,20 +762,21 @@ impl Shell {
                         return;
                     }
                     match res {
-                    Ok(Ok(addr)) => {
-                        this.display_address = addr;
-                        this.refresh_portfolio(cx);
-                    }
-                    Ok(Err(e)) => {
-                        this.portfolio_loading = false;
-                        this.portfolio_error = Some(format!("couldn't resolve name — {}", short_err(e)));
-                        cx.notify();
-                    }
-                    Err(_) => {
-                        this.portfolio_loading = false;
-                        this.portfolio_error = Some("network worker stopped".into());
-                        cx.notify();
-                    }
+                        Ok(Ok(addr)) => {
+                            this.display_address = addr;
+                            this.refresh_portfolio(cx);
+                        }
+                        Ok(Err(e)) => {
+                            this.portfolio_loading = false;
+                            this.portfolio_error =
+                                Some(format!("couldn't resolve name — {}", short_err(e)));
+                            cx.notify();
+                        }
+                        Err(_) => {
+                            this.portfolio_loading = false;
+                            this.portfolio_error = Some("network worker stopped".into());
+                            cx.notify();
+                        }
                     }
                 })
                 .ok();
@@ -739,6 +787,12 @@ impl Shell {
 
     /// Re-spawn the network worker against the RPC URL, but only if it actually changed —
     /// so a no-op blur of the RPC field doesn't tear down the live worker and refetch.
+    ///
+    /// v1 limitation: this re-points only the *reader*. The signer daemon's RPC + chain are
+    /// fixed at launch (mainnet-first), so changing the RPC here does NOT re-point where the
+    /// daemon would broadcast. There is no send UI yet (T-UX), so nothing broadcasts through a
+    /// diverged endpoint; re-pointing the daemon (and forcing a re-unlock) lands with the send
+    /// screen.
     pub fn respawn_provider(&mut self, cx: &mut Context<Self>) {
         let url = self.settings.effective_rpc();
         if url == self.current_rpc {

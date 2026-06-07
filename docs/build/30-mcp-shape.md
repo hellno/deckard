@@ -100,30 +100,43 @@ pub enum ApprovalMode { Never, OverCap, Always }
 
 ### Daemon socket API (the wire the harness implements)
 
-UDS at `$XDG_RUNTIME_DIR/deckard/signerd.sock` (mode `0600`, owner-only), CBOR request/response, one request per frame:
+> **Status: implemented in `crates/deckard-signerd` (issue #4).** This doc owns the wire; the daemon implements it. v1 scope = `Send` only (Shield → T-Privacy, Helios reads → `20`, `deckard-mcp` → `30`).
+
+UDS at `$XDG_RUNTIME_DIR/deckard/signerd.sock` (Linux) — macOS fallback `$TMPDIR/deckard-$UID/signerd.sock` — socket mode `0600` inside a `0700` dir, **length-delimited CBOR** (4-byte big-endian length prefix + body, max 1 MiB), one request per frame. Caller auth is `SO_PEERCRED`/`LOCAL_PEERCRED` **same-uid only**; single-instance via `flock` on a sibling `signerd.lock`.
 
 ```rust
-// deckard-mcp (key-less) → deckard-signerd
+// deckard-mcp / deckard-app (key-less) → deckard-signerd
 enum SignerRequest {
-    Propose   { intent: Intent },        // -> Decision   (policy check, NO signing yet)
-    Execute   { request_id: RequestId }, // -> ExecuteResult (sign + broadcast; only if Allow/approved)
-    Status    { request_id: RequestId }, // -> ApprovalStatus (poll for native-card result)
-    RevokeAll,                           // -> Ack  (STOP: sets policy.revoked, drops in-flight approvals)
-    PolicyGet,                           // -> Policy (read-only snapshot for the agent)
-    // read-only, key-less helpers the daemon answers from Helios state:
-    Address,                             // -> Address
-    Balance   { shielded: bool },        // -> BalanceReport
+    Unlock    { passphrase: String },             // -> Unlock(UnlockOutcome)  (decrypt + hold the key)
+    Lock,                                          // -> Ack  (zeroize the key → Locked; deny in-flight)
+    Resolve   { request_id: RequestId, approved: bool }, // -> Ack  (close an approval loop)
+    Propose   { intent: Intent },                 // -> Decision   (policy check, NO signing yet)
+    Execute   { request_id: RequestId },          // -> ExecuteResult (sign + broadcast; only if Allow/approved)
+    Status    { request_id: RequestId },          // -> ApprovalStatus (poll for native-card result)
+    RevokeAll,                                     // -> Ack  (STOP: zeroize the key → Locked, deny in-flight)
+    PolicyGet,                                     // -> Policy (read-only snapshot for the agent)
+    // read-only, key-less helpers:
+    Address,                                       // -> Address (or Deny{"locked"} when Locked)
+    Balance   { shielded: bool },                 // -> BalanceReport (public only in v1; shielded_wei = 0)
 }
 
 enum ExecuteResult { Broadcast { tx_hash: B256 }, Denied { reason: String } }
 enum ApprovalStatus { Pending, Allowed, Denied { reason: String }, Expired }
+enum UnlockOutcome { Unlocked { address: Address }, BadPassphrase, NoVault }
 ```
 
-Invariants frozen here, asserted by `00-test-harness.md`:
-- `Propose` **never signs** and never broadcasts. It returns a `Decision`. A `Decision::Allow`/approved `RequestId` is the *only* token that lets `Execute` sign.
-- `Execute` re-checks policy and `revoked` at sign time (TOCTOU guard): an approval granted before `RevokeAll` must still be denied at `Execute` if `revoked == true`.
-- `RevokeAll` is idempotent and irreversible for the session (unlocks again only via the keystore unlock flow, `08-security-keystores.md`).
-- The MCP process holds **no key, no decrypted seed, no signing capability** — verified by the red-team script in `00-test-harness.md` (`deckard-mcp` memory + fd scan finds no key; it has no UDS method that returns raw key bytes).
+**Unlock / Lock / Resolve (the operator state machine).** The daemon is `Locked` (no key) ⇄ `Unlocked { vault }`:
+- `Unlock{passphrase}` reads the keystore (`deckard-core`'s `vault.bin` in the config dir), decrypts, and holds the key → `Unlocked{address}`. The wire passphrase is a plain `String` (`Zeroizing` isn't `Serialize`); the daemon moves it into `Zeroizing` on receipt, scrubs the raw frame, and never echoes or logs it. Wrong passphrase / tampered vault → `BadPassphrase`; missing file → `NoVault`.
+- `Lock` and `RevokeAll` both zeroize + drop the key → `Locked` and deny every in-flight approval (`Pending` **and** `Allowed`). Re-arm only via a fresh `Unlock` (which also starts a clean request session).
+- `Resolve{request_id, approved}` closes the loop a `NeedsApproval` opened: it flips that `Pending` record to `Allowed`/`Denied`. Without it nothing turns `Pending` into executable; the native GPUI card (T-UX) is the human-facing caller.
+
+Invariants frozen here, asserted by `crates/deckard-signerd/tests/*` (cross-process red-team → `00-test-harness.md`):
+- **One decision function.** `policy::evaluate(&Intent, &Policy) -> Decision` is the single source of the verdict; both `MockSigner` and the daemon call it (parity is unit-asserted), so the mock and the real daemon can never drift. The daemon adds only process-level pre-checks `evaluate` can't express (`Locked` → `Deny{"locked"}`, `chain_id` mismatch → `Deny{"chain_mismatch"}`, `kind != Send` → `Deny{"unsupported_v1"}`).
+- `Propose` **never signs** and never broadcasts. It returns a `Decision`. A `Decision::Allow`/approved `RequestId` is the *only* token that lets `Execute` sign. (v1 `RequestId` = `keccak256` of a stable encoding of the intent, so a client that got `Allow` derives the id locally to execute it; a `NeedsApproval` id rides the wire. Production should switch to a salted, returned id.)
+- `Execute` re-checks **policy** at sign time (TOCTOU guard): an approval granted before `Lock`/`RevokeAll` is still denied (`Denied{"revoked"}`); an *auto*-allow is re-run against the spend caps against the **current** `spent_today` (`Denied{"cap_exceeded"}`) so two within-cap proposals can't both broadcast past the daily cap — a human-approved overage carries its own consent and isn't re-capped. A broadcast id never signs twice (`Denied{"already_executed"}`); a stale (TTL-expired) request — `Pending` **or** `Allowed` — is `Denied{"expired"}`. A re-`Propose` of an identical intent is idempotent (it never resets a live card's TTL, downgrades an approval, or re-raises a `Denied`). It builds an **EIP-1559** tx via alloy fillers (pending nonce, fee/gas estimation, `chain_id` from the intent) and broadcasts via the config RPC (`DECKARD_RPC_URL`/`DECKARD_CHAIN_ID`) under a bounded timeout.
+- **Policy (v1):** loaded from `policy.json` in the config dir, with a safe default if absent (per-tx 0.05 ETH, daily 0.2 ETH, empty allowlist = any, auto-shield-min 0.01 ETH, approval-over-cap). `spent_today_wei` is in-memory, UTC-midnight rollover, resets on restart (cross-restart persistence is a fast-follow). No `SetPolicy` yet.
+- `RevokeAll` is idempotent and irreversible for the session (re-arm only via `Unlock`, `08-security-keystores.md`).
+- The MCP/app process holds **no key, no decrypted seed, no signing capability** — verified by the red-team script in `00-test-harness.md` (memory + fd scan finds no key; there is no UDS method that returns raw key bytes).
 
 ### MCP tool surface (concrete list)
 
@@ -135,6 +148,8 @@ Read tools (no approval, key-less, safe to call freely — the "observe" half, 0
 | `wallet_balance` | `SignerRequest::Balance{shielded}` | `{ public_wei, shielded_wei, token_balances[] }` (Helios-verified, 20-helios-sidecar.md) | none |
 | `simulate` | local eth_call/fork against Helios state | `{ asset_changes[], gas, warnings[] }` (Tenderly-style preview, 05 [13]) | none |
 | `policy_get` | `SignerRequest::PolicyGet` | `Policy` snapshot | none |
+
+> ⚠ **Cross-doc need (from `20-helios-sidecar.md` "Integration into the app"):** the `wallet_balance` and `simulate` responses must carry a `read_status` field (`ReadStatus { Verified | Degraded | Unsynced }`), and `ReadStatus` should be defined in `deckard-contract` (here) since it rides the wire. Without it the "never silently serve an untrusted read" rule isn't enforceable at the contract level. `20` owns the semantics/transitions; `30` owns the final type + field placement.
 
 Write tools (route through `propose` → `Decision`; "execute validated intents, not raw LLM suggestions", 05 [10]):
 

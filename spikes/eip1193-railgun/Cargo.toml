@@ -1,0 +1,64 @@
+# Deckard T-Trustless #3 spike — prove Helios's localhost JSON-RPC server can be
+# the EIP-1193 provider Kohaku's `railgun` crate reads through, so the shield path
+# gets *verified* chain reads instead of trusting a raw vendor RPC.
+#
+# Standalone crate (empty [workspace] table) so it can pull BOTH the heavy Helios
+# tree (revm, bls12_381) AND — under the `railgun` feature — Kohaku's ZK railgun
+# tree (ark-circom, wasmer) without bloating the app workspace at the repo root.
+[package]
+name = "eip1193-railgun"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone — keep this spike's deps out of the repo-root workspace.
+[workspace]
+
+[[bin]]
+name = "eip1193-railgun"
+path = "src/main.rs"
+
+[features]
+default = []
+# Tier-1: ALSO link Kohaku's full `railgun` crate and drive the real
+# RailgunBuilder + RpcSyncer + SmartWalletUtxoVerifier through Helios. Off by
+# default so the crate always builds in the light Tier-2 mode (Kohaku's real
+# eip-1193-provider trait + alloy adapter, no ark-circom/wasmer compile).
+railgun = ["dep:railgun"]
+
+[dependencies]
+# Helios — depend on `helios-ethereum` directly (NOT the umbrella `helios` crate,
+# which pulls helios-opstack → libp2p → a yanked core2). Git-only, tag "0.11.1"
+# (no `v`; crates.io is stale at 0.1.0). This is the crate that ships the
+# localhost JSON-RPC server (`EthereumClientBuilder::rpc_address`).
+helios-ethereum = { git = "https://github.com/a16z/helios", tag = "0.11.1" }
+
+# Kohaku's REAL EIP-1193 provider crate — the `Eip1193Provider`/`IntoEip1193Provider`
+# trait + the `Alloy`/`DynProvider` adapter Railgun reads through. Pinned to the
+# exact commit `railgun` is pinned to. default-features=false drops the `js`
+# (wasm-bindgen) feature; keep only `alloy` (the native adapter).
+eip-1193-provider = { git = "https://github.com/ethereum/kohaku", package = "eip-1193-provider", rev = "618c53facd0d44cf0f01d74e0dcc18d2242351c7", default-features = false, features = ["alloy"] }
+
+# Tier-1 (optional): the full Railgun client. Same git rev so the [patch]es resolve.
+railgun = { git = "https://github.com/ethereum/kohaku", package = "railgun", rev = "618c53facd0d44cf0f01d74e0dcc18d2242351c7", optional = true }
+
+# Match Kohaku + Helios's alloy: both already resolve to alloy 1.8.3 /
+# alloy-primitives 1.6.0 independently, so the whole tree unifies to ONE alloy.
+alloy = { version = "1.8", features = ["eips", "rpc-types", "network", "providers", "provider-http", "sol-types"] }
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
+reqwest = { version = "0.12", features = ["json"] }
+eyre = "0.6"
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# [patch] does NOT inherit through a git dependency, so we mirror every patch the
+# upstream workspaces apply, or their consensus/ZK crates fail to build:
+#   * ethereum_hashing → Helios's workspace patch (consensus crates).
+#   * ruint, ark-circom → Kohaku's workspace patches (only used under `railgun`;
+#     harmless "unused patch" warning in the default Tier-2 build).
+[patch.crates-io]
+ethereum_hashing = { git = "https://github.com/ncitron/ethereum_hashing", rev = "7ee70944ed4fabe301551da8c447e4f4ae5e6c35" }
+ruint = { git = "https://github.com/Robert-MacWha/ruint" }
+ark-circom = { git = "https://github.com/Robert-MacWha/circom-compat", branch = "release/0.6.0" }

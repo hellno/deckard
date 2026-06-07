@@ -34,12 +34,19 @@ fn demo_signer() -> MockSigner {
 }
 
 fn intent(kind: IntentKind, value: u64) -> Intent {
+    // Send carries no calldata; every other kind (Shield/Unshield/ContractCall) must carry
+    // its encoded call — the policy gate now rejects an empty payload for those (an empty
+    // "Shield" would otherwise degrade into a bare native send). Stand-in bytes for non-Send.
+    let calldata = match kind {
+        IntentKind::Send => Bytes::new(),
+        _ => Bytes::from_static(&[0xde, 0xad, 0xbe, 0xef]),
+    };
     Intent {
         chain_id: 1,
         to: Address::repeat_byte(0x22),
         token: None,
         value: U256::from(value),
-        calldata: Bytes::new(),
+        calldata,
         kind,
     }
 }

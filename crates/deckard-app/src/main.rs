@@ -7,15 +7,16 @@
 //! Fork checklist: rename the crate in `Cargo.toml`, change `APP_NAME` and the
 //! bundle identifier, swap `assets/icon.png`, then start editing the views.
 
-mod settings;
-mod settings_view;
-mod shell;
-mod theme;
-#[cfg(feature = "tray")]
-mod tray;
 mod onboarding;
 mod palette;
 mod receive;
+mod settings;
+mod settings_view;
+mod shell;
+mod signer;
+mod theme;
+#[cfg(feature = "tray")]
+mod tray;
 mod wallet;
 mod welcome;
 
@@ -35,7 +36,15 @@ pub const APP_NAME: &str = "Deckard";
 // to, hang a menu item off of, and handle in a view or globally. Add your own here.
 gpui::actions!(
     deckard,
-    [Quit, About, OpenSettings, ToggleTheme, NewItem, GoBack, TogglePalette]
+    [
+        Quit,
+        About,
+        OpenSettings,
+        ToggleTheme,
+        NewItem,
+        GoBack,
+        TogglePalette
+    ]
 );
 
 fn main() {

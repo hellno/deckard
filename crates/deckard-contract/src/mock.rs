@@ -12,9 +12,10 @@ use std::sync::Mutex;
 use alloy_primitives::{Address, B256, U256};
 
 use crate::decision::{Decision, RequestId};
-use crate::intent::{Intent, IntentKind};
-use crate::policy::{ApprovalMode, Policy};
-use crate::rpc::{ApprovalStatus, BalanceReport, ExecuteResult};
+use crate::intent::Intent;
+use crate::policy::{self, Policy};
+use crate::read_status::ReadStatus;
+use crate::rpc::{ApprovalStatus, BalanceReport, ExecuteResult, UnlockOutcome};
 use crate::signer::Signer;
 
 /// One tracked proposal. `status` is the wire-visible approval state; `broadcast` is `Some`
@@ -37,6 +38,11 @@ struct Requests {
 
 /// An in-memory signer. The `policy` and `requests` locks are always acquired **policy
 /// before requests**, so the pair can never deadlock; `balance` is only ever taken alone.
+///
+/// The mock holds no real key, so its `Locked`/`Unlocked` state is modelled by the
+/// `Policy::revoked` brake: `lock`/`revoke_all` trip it (deny everything), `unlock` clears
+/// it (re-arm). This mirrors the daemon, where `Lock` and `RevokeAll` both reach `Locked`
+/// and only a fresh `Unlock` re-arms.
 #[derive(Debug)]
 pub struct MockSigner {
     policy: Mutex<Policy>,
@@ -58,6 +64,9 @@ impl MockSigner {
             balance: Mutex::new(BalanceReport {
                 public_wei: U256::ZERO,
                 shielded_wei: U256::ZERO,
+                // The mock is deterministic + offline; it never touches a chain, so
+                // it reports its canned balances as Verified (no untrusted RPC behind it).
+                read_status: ReadStatus::Verified,
             }),
         }
     }
@@ -78,14 +87,9 @@ impl MockSigner {
     }
 
     /// Test helper: flip a `Pending` request to `Allowed`, simulating the human tapping
-    /// Approve on the native card. No-op for any other state.
+    /// Approve on the native card. Thin wrapper over [`Signer::resolve`].
     pub fn approve(&self, request_id: RequestId) {
-        let mut reqs = self.requests.lock().expect("mock requests mutex poisoned");
-        if let Some(req) = reqs.by_id.get_mut(&request_id) {
-            if req.status == ApprovalStatus::Pending {
-                req.status = ApprovalStatus::Allowed;
-            }
-        }
+        self.resolve(request_id, true);
     }
 
     /// Test helper: the id of the most recently minted request, or `None` if none yet.
@@ -113,20 +117,44 @@ impl MockSigner {
     }
 }
 
-/// Mock decodability rule. The real adapter calldata is validated by `deckard-signerd`
-/// (`10-kohaku-shield.md`); this just checks the shape matches the kind.
-fn calldata_ok(intent: &Intent) -> bool {
-    match intent.kind {
-        // A plain send carries no calldata.
-        IntentKind::Send => intent.calldata.is_empty(),
-        // A generic contract write needs calldata to call.
-        IntentKind::ContractCall => !intent.calldata.is_empty(),
-        // Railgun deposit/withdraw: the mock accepts whatever calldata it is handed.
-        IntentKind::Shield | IntentKind::Unshield => true,
-    }
-}
-
 impl Signer for MockSigner {
+    fn unlock(&self, _passphrase: &str) -> UnlockOutcome {
+        // The mock holds no real keystore, so any passphrase "unlocks" it. A fresh unlock
+        // re-arms the session by clearing the `revoked` brake (mirrors the daemon's
+        // "re-unlock to re-arm").
+        self.policy
+            .lock()
+            .expect("mock policy mutex poisoned")
+            .revoked = false;
+        UnlockOutcome::Unlocked {
+            address: Self::mock_address(),
+        }
+    }
+
+    fn lock(&self) {
+        // Lock the session (trip the brake) and deny everything in flight — same as the
+        // daemon's `Lock`, which reaches `Locked` exactly like `RevokeAll`.
+        let mut policy = self.policy.lock().expect("mock policy mutex poisoned");
+        let mut reqs = self.requests.lock().expect("mock requests mutex poisoned");
+        policy.revoked = true;
+        deny_pending(&mut reqs);
+    }
+
+    fn resolve(&self, request_id: RequestId, approved: bool) {
+        let mut reqs = self.requests.lock().expect("mock requests mutex poisoned");
+        if let Some(req) = reqs.by_id.get_mut(&request_id) {
+            if req.status == ApprovalStatus::Pending {
+                req.status = if approved {
+                    ApprovalStatus::Allowed
+                } else {
+                    ApprovalStatus::Denied {
+                        reason: "user_denied".into(),
+                    }
+                };
+            }
+        }
+    }
+
     fn address(&self) -> Address {
         Self::mock_address()
     }
@@ -146,46 +174,20 @@ impl Signer for MockSigner {
     }
 
     fn propose(&self, intent: &Intent) -> Decision {
-        let needs_card;
-        {
+        // The verdict comes from the ONE shared decision function — no logic lives here.
+        // (`revoked`, the mock's lock state, is one of the checks `evaluate` makes.)
+        let needs_card = {
             let policy = self.policy.lock().expect("mock policy mutex poisoned");
-
-            // 1. STOP overrides everything.
-            if policy.revoked {
-                return Decision::Deny {
-                    reason: "revoked".into(),
-                };
+            match policy::evaluate(intent, &policy) {
+                // Terminal verdicts return straight through.
+                deny @ Decision::Deny { .. } => return deny,
+                Decision::Allow => false,
+                Decision::NeedsApproval { .. } => true,
             }
-            // 2. Allowlist (empty = any address).
-            if !policy.allow_to.is_empty() && !policy.allow_to.contains(&intent.to) {
-                return Decision::Deny {
-                    reason: "off_allowlist".into(),
-                };
-            }
-            // 3. Calldata must be decodable for the kind.
-            if !calldata_ok(intent) {
-                return Decision::Deny {
-                    reason: "undecodable".into(),
-                };
-            }
-            // 4. Cap check: spent_today + value vs the per-tx and daily caps.
-            let projected = policy.spent_today_wei.saturating_add(intent.value);
-            let over = projected > policy.per_tx_cap_wei || projected > policy.daily_cap_wei;
+        }; // policy lock released before taking the requests lock (preserves lock order)
 
-            needs_card = match policy.require_approval {
-                ApprovalMode::Never => false,
-                ApprovalMode::OverCap => over,
-                ApprovalMode::Always => true,
-            };
-
-            // Never raises no card, so an over-cap write has nothing to authorise it → deny.
-            if over && matches!(policy.require_approval, ApprovalMode::Never) {
-                return Decision::Deny {
-                    reason: "over_cap".into(),
-                };
-            }
-        } // policy lock released before taking the requests lock (preserves lock order)
-
+        // Mint the real, trackable id (replacing `evaluate`'s placeholder) and store the
+        // pending record under it.
         let mut reqs = self.requests.lock().expect("mock requests mutex poisoned");
         let id = Self::mint_id(&mut reqs);
         let status = if needs_card {
@@ -268,16 +270,22 @@ impl Signer for MockSigner {
     }
 
     fn revoke_all(&self) {
+        // STOP: trip the policy brake, then deny everything in flight.
         // Same lock order as execute(): policy before requests.
         let mut policy = self.policy.lock().expect("mock policy mutex poisoned");
         let mut reqs = self.requests.lock().expect("mock requests mutex poisoned");
         policy.revoked = true;
-        for req in reqs.by_id.values_mut() {
-            if req.status == ApprovalStatus::Pending {
-                req.status = ApprovalStatus::Denied {
-                    reason: "revoked".into(),
-                };
-            }
+        deny_pending(&mut reqs);
+    }
+}
+
+/// Flip every still-`Pending` request to `Denied{revoked}` — shared by `lock`/`revoke_all`.
+fn deny_pending(reqs: &mut Requests) {
+    for req in reqs.by_id.values_mut() {
+        if req.status == ApprovalStatus::Pending {
+            req.status = ApprovalStatus::Denied {
+                reason: "revoked".into(),
+            };
         }
     }
 }
@@ -285,6 +293,8 @@ impl Signer for MockSigner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::intent::IntentKind;
+    use crate::policy::ApprovalMode;
     use alloy_primitives::Bytes;
 
     // --- builders -------------------------------------------------------------------
@@ -319,7 +329,9 @@ mod tests {
             to: Address::repeat_byte(0x44),
             token: None,
             value: U256::from(value),
-            calldata: Bytes::new(),
+            // A real Shield always carries the RelayAdapt call; the policy gate now requires
+            // it (an empty payload would degrade into a bare native send). Stand-in bytes here.
+            calldata: Bytes::from_static(&[0xde, 0xad, 0xbe, 0xef]),
             kind: IntentKind::Shield,
         }
     }
@@ -412,6 +424,18 @@ mod tests {
         };
         assert_eq!(
             s.propose(&empty_call),
+            Decision::Deny {
+                reason: "undecodable".into()
+            }
+        );
+        // A Shield with EMPTY calldata is rejected: without the RelayAdapt call it would
+        // degrade into a bare native send to `to` (no private note) while labelled "Shield".
+        let empty_shield = Intent {
+            calldata: Bytes::new(),
+            ..shield(20)
+        };
+        assert_eq!(
+            s.propose(&empty_shield),
             Decision::Deny {
                 reason: "undecodable".into()
             }
@@ -557,6 +581,7 @@ mod tests {
         s.set_balance(BalanceReport {
             public_wei: U256::from(7u64),
             shielded_wei: U256::from(3u64),
+            read_status: ReadStatus::Verified,
         });
         let b = s.balance(false);
         assert_eq!(b.public_wei, U256::from(7u64));
