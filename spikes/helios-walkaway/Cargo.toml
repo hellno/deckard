@@ -1,0 +1,43 @@
+# Deckard R2 spike — embed Helios, serve a verified mainnet balance, prove the
+# "cut the centralized EL RPC on camera → keep serving verified reads" walkaway beat.
+#
+# Standalone crate (NOT a member of deck's package) so it can pull the heavy
+# Helios dependency tree (revm, bls12_381, alloy 1.0.37) without bloating the app.
+[package]
+name = "helios-walkaway"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone — the parent dir (deck) is a [package], not a [workspace], so an empty
+# [workspace] table here keeps this spike's heavy Helios deps out of deck's build.
+[workspace]
+
+[[bin]]
+name = "helios-walkaway"
+path = "src/main.rs"
+
+[dependencies]
+# Depend on `helios-ethereum` directly — NOT the umbrella `helios` crate. The
+# umbrella pulls in `helios-opstack` → libp2p → a YANKED `core2 0.4.0`, which fails
+# to resolve today; ethereum-only avoids opstack/linea/libp2p entirely (smaller tree,
+# no p2p stack). Git-only at 0.11.1 (crates.io `helios-ethereum` is stale at 0.1.0,
+# Oct 2024). Tag is "0.11.1" — NOT "v0.11.1".
+helios-ethereum = { git = "https://github.com/a16z/helios", tag = "0.11.1" }
+
+# Match Helios's alloy pin exactly so Address/B256/U256/BlockId unify to ONE
+# alloy-primitives in the tree (no duplicate-types mismatch at the builder boundary).
+alloy = { version = "1.0.37", features = ["eips", "rpc-types"] }
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
+reqwest = { version = "0.12", features = ["json"] }
+eyre = "0.6"
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Helios's own workspace patches ethereum_hashing to ncitron's fork. `[patch]` does
+# NOT inherit through a git dependency, so we mirror it here or the consensus crates
+# fail to build. (Verified: this exact patch is in a16z/helios root Cargo.toml.)
+[patch.crates-io]
+ethereum_hashing = { git = "https://github.com/ncitron/ethereum_hashing", rev = "7ee70944ed4fabe301551da8c447e4f4ae5e6c35" }
