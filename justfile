@@ -24,6 +24,13 @@ check:
     cargo clippy --locked --all-targets -- -D warnings
     cargo clippy --locked --all-targets --features tray -- -D warnings
 
+# Fast inner loop for ENGINE work: deckard-core is GPUI-free, so this clippy+tests in seconds
+# (no gpui build). Use it while iterating on keystore/eth/balances. The full Definition of Done
+# still applies before "done": `just check` (both feature configs) + `cargo test --workspace`.
+core:
+    cargo clippy -p deckard-core --all-targets --locked -- -D warnings
+    cargo test -p deckard-core --locked
+
 # Bump the git GPUI stack to the latest upstream commits, then rebuild.
 # Reproducibility lives in Cargo.lock — commit it (and rust-toolchain.toml if you
 # bumped it) after this succeeds. If the build fails on an unstable-feature error,

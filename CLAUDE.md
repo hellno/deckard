@@ -16,7 +16,9 @@ interactive, dogfooded reference lives at
 The full rationale (what we enforce and *why*, plus deliberately-rejected rules) is in
 `docs/AGENTIC-ENGINEERING.md`. The quick reference:
 
-**Iterate fast:** `cargo check -p deckard-core` — the engine is GPUI-free and checks in seconds.
+**Iterate fast:** `just core` — clippy + tests the GPUI-free engine (`deckard-core`) in seconds, no
+gpui build. Reach for it while working on the engine; the full Definition of Done below still applies
+before you're done. (For UI work you must build the app: `just check`.)
 
 **Definition of done** (ALL must hold; paste the command output as evidence — do not claim done while red):
 1. `cargo fmt --all --check` is clean

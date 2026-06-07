@@ -523,8 +523,9 @@ impl Shell {
         };
         let pass = Zeroizing::new(pass);
         let task = cx.background_spawn(async move {
-            let vault = Vault::read(&path)?;
-            vault.unlock(pass.as_str())
+            // Single no-oracle auth step: a corrupt/tampered vault and a wrong passphrase surface
+            // the SAME generic error (see Vault::open), so the unlock screen can't distinguish them.
+            Vault::open(&path, pass.as_str())
         });
         cx.spawn(async move |this, cx| {
             let res = task.await;
