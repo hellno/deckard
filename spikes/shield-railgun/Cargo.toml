@@ -1,0 +1,63 @@
+# Deckard SHIELD spike (beat 2) — de-risk the hero auto-shield action.
+#
+# Proves Kohaku's pure-Rust `railgun` crate does a full
+#   shield -> sync -> balance -> transfer -> unshield
+# from OUR OWN dependency edge, against a LOCAL anvil fork of Sepolia
+# (block 10822990), with the EXACT upstream numeric asserts so any
+# regression in our edge is loud.
+#
+# KEY DELIVERABLE (R1d): measure the proof-generation wall-clock for the
+# 1-in/2-out shield, default features vs the railgun `parallel` feature.
+# That number decides whether "instant auto-shield" is honest.
+#
+# Standalone crate (empty [workspace] table) so the heavy ZK tree
+# (ark-circom / wasmer / groth16) stays out of the app workspace at the
+# repo root. Dep edge copied verbatim from spikes/eip1193-railgun.
+[package]
+name = "shield-railgun"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone — keep this spike's heavy deps out of the repo-root workspace.
+[workspace]
+
+[features]
+default = []
+# Forward railgun's `parallel` feature (ark-* rayon parallelism) so we can
+# measure proving wall-clock BOTH ways for R1d.
+parallel = ["railgun/parallel"]
+
+[dependencies]
+# Kohaku's full Railgun client — the ZK crate. Plain (non-optional) dep:
+# the shield spike always needs it. Same git rev as the proven eip1193 edge
+# so the [patch.crates-io] set resolves identically.
+#
+# `testing` feature is REQUIRED here (the dissection said otherwise, but the
+# checked-out source at 618c53f gates `SubsquidSyncer::with_latest_block`
+# — the call the upstream test uses to cap Subsquid at the fork block —
+# behind `#[cfg(any(test, feature = "testing"))]`. Upstream gets it via the
+# crate's own `cfg(test)`; as an EXTERNAL consumer we must opt into `testing`).
+railgun = { git = "https://github.com/ethereum/kohaku", package = "railgun", rev = "618c53facd0d44cf0f01d74e0dcc18d2242351c7", features = ["testing"] }
+
+# Match Kohaku's alloy (resolves to 1.8.3 / alloy-primitives 1.6.0 so the
+# whole tree unifies to ONE alloy). Add signer-local + contract + sol-types
+# for the upstream test's EOA signer and the WETH sol! interface.
+alloy = { version = "1.8", features = ["eips", "rpc-types", "network", "providers", "provider-http", "sol-types", "signer-local", "contract"] }
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
+rand = "0.9"             # upstream uses rand::random() and rand::rng()
+eyre = "0.6"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# [patch] does NOT inherit through a git dependency, so mirror Kohaku's
+# workspace patches or the ZK tree fails to build. ruint + ark-circom are
+# MANDATORY (the merkle tree / circom-compat won't build without them).
+# ethereum_hashing was only needed by Helios in eip1193-railgun; kept here
+# harmlessly (an unused patch is just a warning) for parity with the
+# proven edge.
+[patch.crates-io]
+ethereum_hashing = { git = "https://github.com/ncitron/ethereum_hashing", rev = "7ee70944ed4fabe301551da8c447e4f4ae5e6c35" }
+ruint = { git = "https://github.com/Robert-MacWha/ruint" }
+ark-circom = { git = "https://github.com/Robert-MacWha/circom-compat", branch = "release/0.6.0" }

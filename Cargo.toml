@@ -1,80 +1,54 @@
-[package]
-name = "deckard"
-version = "0.1.0"
-edition = "2021"
-description = "Deckard — a native, self-custodial Ethereum wallet for onchain operators (GPUI + Rust). Forked from the deck starter; now its own project."
-license = "AGPL-3.0-or-later"
-default-run = "deckard"
-
-# The GUI app is the workspace root; `deckard-core` is the headless engine (no GPUI).
+# Deckard — virtual Cargo workspace.
+#
+# The root carries NO `[package]`; every crate lives under `crates/`:
+#   - deckard-app      the GPUI desktop app (binary `deckard`)
+#   - deckard-core     the headless engine (Ethereum provider, balances, keystore)
+#   - deckard-contract the frozen wire contract (Intent / Decision / Policy / RPC)
+#   - deckard-signerd  the process-isolated signer daemon (owns the key; UDS server)
+#
+# `cargo run` from the repo root still launches the app via `default-members`.
 [workspace]
-members = ["crates/deckard-core"]
+resolver = "2"
+members = [
+    "crates/deckard-app",
+    "crates/deckard-core",
+    "crates/deckard-contract",
+    "crates/deckard-signerd",
+]
+default-members = ["crates/deckard-app"]
 
-[[bin]]
-name = "deckard"
-path = "src/main.rs"
-
-[dependencies]
-# The headless engine: Ethereum provider, balances, HD keys, keystore. No GPUI.
-deckard-core = { path = "crates/deckard-core" }
-
-# Fresh GPUI, straight from Zed's git — the DEFAULT channel (Metal on macOS, wgpu on
-# Linux). `gpui-component` is developed against Zed's gpui HEAD, so the only way to pair
-# fresh gpui with the component kit is this matched git pair. Reproducibility comes from
-# the committed Cargo.lock (it pins exact commits); bump on a cadence with `just bump-gpui`.
-# Prefer the simpler-but-stale pure-crates.io pair instead? See docs/UPGRADING.md.
-gpui = { git = "https://github.com/zed-industries/zed" }
-# After Zed split gpui into multiple crates, the windowing + renderer backend (and the
-# `Application` bootstrap) live in `gpui_platform`.
-gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit"] }
-gpui-component = { git = "https://github.com/longbridge/gpui-component" }
-# Prebuilt asset source: all gpui-component icon SVGs + bundled fonts.
-# Register it with `.with_assets(...)` so `IconName::*` renders.
-gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
-
-# Preferences: serialize a Settings struct to the platform config dir.
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-directories = "5"
-qrcode = "0.14"
-# Scrub the pending recovery phrase from memory after onboarding.
-zeroize = "1"
-
-# --- Optional: menu-bar / tray apps (`--features tray`) — cross-platform ---
-# tray-icon draws a native status item on every OS: NSStatusItem (macOS),
-# libappindicator / StatusNotifierItem (Linux), Shell_NotifyIcon (Windows).
-# There is no second renderer — your windows stay GPUI everywhere.
-tray-icon = { version = "0.24", optional = true }
-alloy-signer-local = { version = "2.0.5", features = ["mnemonic"] }
+[workspace.dependencies]
+# Single-sourced versions shared across crates. deckard-contract pins to these;
+# the app and core may layer extra features on top (e.g. alloy-primitives `serde`).
 alloy-primitives = "1.6.0"
+serde = { version = "1", features = ["derive"] }
 
-[features]
-default = []
-tray = ["dep:tray-icon", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation"]
-
-# objc2 is only used to hide the macOS dock icon — pull it on macOS only, so a
-# Linux/Windows `--features tray` build never tries to compile Apple crates.
-[target.'cfg(target_os = "macos")'.dependencies]
-objc2 = { version = "0.6", optional = true }
-objc2-app-kit = { version = "0.3", optional = true }
-objc2-foundation = { version = "0.3", optional = true }
-
+# Profiles are only honoured at the workspace root, so they live here (not in the
+# app crate). These shrink the release binary: strip symbols, thin-LTO, one codegen unit.
 [profile.release]
 strip = true
 lto = "thin"
 codegen-units = 1
 
-# ---------------------------------------------------------------------------
-# `cargo bundle` config (batteries included). On macOS → Deck.app; cargo
-# bundle can also emit `deb` on Linux. Run `just bundle`.
-#   cargo install cargo-bundle
-# Drop your own 1024x1024 PNG at assets/icon.png and re-bundle to rebrand.
-# ---------------------------------------------------------------------------
-[package.metadata.bundle]
-name = "Deckard"
-identifier = "com.deckard.app"
-icon = ["assets/icon.png"]
-category = "public.app-category.finance"
-short_description = "A native, self-custodial Ethereum wallet for onchain operators."
-long_description = "Deckard is a fast, keyboard-first, self-custodial Ethereum wallet for people who live onchain. Native (macOS + Linux), trustless by construction, open source (AGPL-3.0)."
-osx_minimum_system_version = "11.0"
+# Mirror Helios's + Kohaku/Railgun's workspace patches. `[patch]` only resolves at the
+# workspace ROOT and does NOT inherit through a git dependency, so every patched git-dep
+# (helios-ethereum behind `verified-reads`; the ZK `railgun` tree behind deckard-core's
+# `shield` feature) needs its patches here or those crates fail to build.
+#   - ethereum_hashing: Helios consensus crates (verified-reads).
+#   - ruint + ark-circom: MANDATORY for the Railgun ZK tree (merkle tree / circom-compat) —
+#     copied from the proven shield spike. With `shield` off these resolve but pull nothing
+#     extra into the build.
+[patch.crates-io]
+ethereum_hashing = { git = "https://github.com/ncitron/ethereum_hashing", rev = "7ee70944ed4fabe301551da8c447e4f4ae5e6c35" }
+ruint = { git = "https://github.com/Robert-MacWha/ruint" }
+ark-circom = { git = "https://github.com/Robert-MacWha/circom-compat", branch = "release/0.6.0" }
+
+# Redirect Kohaku's own `eip-1193-provider` to a native-only fork (vendor/) that DROPS the
+# wasm32-only `js` feature. Upstream's `js` default pins `wasm-bindgen = "=0.2.108"`, which
+# collides head-on with the GPUI app's `web-sys`→`wasm-bindgen = "=0.2.122"` exact pin — two
+# exact pins can't coexist in one workspace. Deckard never builds wasm32, so the fork removes
+# `js` (and only `js`); the native API railgun uses is byte-identical. See
+# vendor/eip-1193-provider/Cargo.toml for the full rationale. This is what lets the heavy
+# `railgun` shield tree live in the app workspace behind the default-on `shield` feature.
+[patch."https://github.com/ethereum/kohaku"]
+eip-1193-provider = { path = "vendor/eip-1193-provider" }

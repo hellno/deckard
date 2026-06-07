@@ -1,0 +1,39 @@
+# Vendored, native-only fork of Kohaku's `eip-1193-provider` (git rev 618c53f), used ONLY
+# via a `[patch]` at the workspace root so the heavy `railgun` (shield) tree can coexist with
+# the GPUI app in ONE workspace.
+#
+# WHY THIS EXISTS: upstream `eip-1193-provider` has `default = ["alloy", "js"]`, and its `js`
+# feature pulls `wasm-bindgen = "=0.2.108"` (an EXACT pin from kohaku's workspace). The app's
+# GPUI stack pulls `web-sys` which pins `wasm-bindgen = "=0.2.122"` (also exact). Two exact
+# pins are irreconcilable in one workspace. `js` is wasm32-only and Deckard never builds
+# wasm32, so this fork simply DROPS the `js` feature + its wasm-bindgen deps. The native
+# surface railgun actually uses (`provider`, `tx_data`, `alloy`) is byte-identical to upstream
+# (the .rs files are copied verbatim from rev 618c53f; `js.rs` stays `#[cfg(js)]`-gated and is
+# never compiled without the feature).
+#
+# `common` is pulled from the SAME kohaku git rev so the type identities match railgun's.
+[package]
+name = "eip-1193-provider"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["rlib"]
+
+[features]
+# Drop `js` from defaults (and remove the feature entirely): wasm32-only, never built here.
+default = ["alloy"]
+alloy = ["alloy/network", "alloy/providers"]
+
+[dependencies]
+alloy = { version = "1.8", default-features = false, features = ["rpc", "rpc-types", "sol-types"] }
+async-trait = "0.1"
+# The kohaku `common` crate (MaybeSend, etc.) at the proven rev — same identity railgun uses.
+common = { git = "https://github.com/ethereum/kohaku", package = "common", rev = "618c53facd0d44cf0f01d74e0dcc18d2242351c7" }
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+
+[build-dependencies]
+cfg_aliases = "0.2.0"
