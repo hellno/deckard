@@ -10,12 +10,15 @@ live on mainnet, agent-driven (Claude Desktop via MCP), shielded via Railgun, ve
 
 ## The docs
 
-| Doc | Owns | Status |
-|---|---|---|
-| [`00-test-harness.md`](00-test-harness.md) | The **v0 baseline**: 3 local lanes + a headless agentic runner that drives the shot-list and self-asserts; mainnet fixtures; CI. | spec ✓ |
-| [`10-kohaku-shield.md`](10-kohaku-shield.md) | The **hero action**: auto-shield via Kohaku's pure-Rust `railgun` crate. **R1 resolved** (crate is standalone-consumable). | spec ✓ |
-| [`20-helios-sidecar.md`](20-helios-sidecar.md) | **Trustless reads + walkaway** via embedded Helios (`helios-ethereum` 0.11.1 as a Rust lib, git-only). **R2 proven** — runnable mainnet spike in `spikes/helios-walkaway/` (cold ≈11s, warm ≈2s, cut→failover ≤1 block). | spec ✓ + spike ✓ |
-| [`30-mcp-shape.md`](30-mcp-shape.md) | The **agent surface** (one binary = CLI + MCP server, key-less) **and the freeze-first contract**. | spec ✓ |
+> **Live build status for every track lives in [`STATUS.md`](../../STATUS.md) — the single source of truth.**
+> This page is the spec *index* (what each doc owns), not a status surface; the deep docs are the spec.
+
+| Doc | Owns |
+|---|---|
+| [`00-test-harness.md`](00-test-harness.md) | The **test substrate**: local lanes (anvil fork / Sepolia) + a headless agentic runner that drives the shot-list and self-asserts; mainnet fixtures; CI. |
+| [`10-kohaku-shield.md`](10-kohaku-shield.md) | The **hero action**: auto-shield via Kohaku's pure-Rust `railgun` crate. **R1 retired** — full shield→unshield runs from our edge, and shield is *instant* (no client proof; ZK proving is on the spend). |
+| [`20-helios-sidecar.md`](20-helios-sidecar.md) | **Trustless reads + walkaway** via embedded `helios-ethereum` 0.11.1 (git-only). **R2 proven** + verified reads **integrated** into `EthProvider`/signerd behind `verified-reads`. |
+| [`30-mcp-shape.md`](30-mcp-shape.md) | The **agent surface** (one binary = CLI + MCP server, key-less) **and the freeze-first contract**. Contract + daemon socket built; the `deckard-mcp` binary is not yet. |
 
 ## Build order (what gates what)
 
@@ -62,16 +65,18 @@ against this; the harness's `FakeModel` exercises it before any LLM is in the lo
 
 ## The two hero-beat spikes
 
-- **R1 — shield from Rust (10):** ✅ largely retired. Kohaku's `railgun` crate (v0.1.0, `rlib`) is proven
-  standalone-consumable by the repo's own `transact_utxo.rs` integration test (full shield→transfer→unshield
-  on an anvil Sepolia fork). Remaining: measure desktop proving time (is "instant" honest?) and confirm the
-  per-crate license vs the monorepo MIT.
-- **R2 — walkaway (20):** ✅ proven on mainnet. Helios has **no native multi-EL/CL failover** (one client = one
-  EL + one CL); the head is **consensus-driven and EL-independent** (served from cache), so cutting the EL keeps
-  the head live while a second synced client recovers state reads via Deckard's own supervisor (Shape A). The
-  runnable spike (`spikes/helios-walkaway/`) does this headless. **Key finding: cut the *EL* on camera, never the
-  *CL*** — a dead CL freezes the head and Helios won't self-heal (needs a rebuild against CL #2). The CL is the
-  fragile, no-SLA, least-redundant dependency; self-host or pre-stage a second. See 20 for the measured numbers.
+- **R1 — shield from Rust (10):** ✅ **retired + integrated.** Kohaku's `railgun` crate runs full
+  shield→transfer→unshield from our own dep edge (`spikes/shield-railgun/`), and the shield is now wired into
+  Deckard (key-less builder in `deckard-core` + signerd calldata-broadcast + a black-box `shield_e2e`). Proving
+  time *measured*: **shield is instant** (no client ZK proof, ~ms); ZK proving is on the *spend* (~10s cold,
+  ~halved with `parallel`) — so "instant auto-shield, prove-on-spend" is honest. Still open: railgun's per-crate
+  license (no upstream `license` field) + the `vendor/eip-1193-provider` fork — resolve before ship.
+- **R2 — walkaway (20):** ✅ proven on mainnet **+ verified reads integrated.** Helios has **no native multi-EL/CL
+  failover** (one client = one EL + one CL); the head is **consensus-driven and EL-independent** (served from
+  cache), so cutting the EL keeps the head live while a second synced client recovers state reads via Deckard's
+  own supervisor (Shape A). Both read paths (`EthProvider` + signerd) now route through Helios behind a
+  `verified-reads` feature. **Key finding: cut the *EL* on camera, never the *CL*** — a dead CL freezes the head
+  and Helios won't self-heal. The CL is the fragile, no-SLA dependency; Nimbus + dRPC are the two proven CLs.
 
 ## Acceptance = the shot list (lives in `00-test-harness.md`)
 
