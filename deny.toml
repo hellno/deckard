@@ -33,8 +33,10 @@ allow = [
 # cargo-deny rejects the `crate =` key on the action's version, switch to `name =`; verify on the
 # first local `cargo deny check licenses` run.
 exceptions = [
-    { allow = ["AGPL-3.0-or-later"], crate = "deckard" },
+    { allow = ["AGPL-3.0-or-later"], crate = "deckard-app" },
     { allow = ["AGPL-3.0-or-later"], crate = "deckard-core" },
+    { allow = ["AGPL-3.0-or-later"], crate = "deckard-contract" },
+    { allow = ["AGPL-3.0-or-later"], crate = "deckard-signerd" },
 ]
 
 [bans]
@@ -47,10 +49,11 @@ deny = [
 ]
 
 [sources]
-# Only crates.io and these trusted git origins are allowed. A typo-squatted or malicious forked git
-# dependency fails CI here. The zed-industries/* forks of font-kit/reqwest/scap/wgpu are Zed's own
-# pinned upstream patches, pulled transitively by the gpui git stack — verify this list against
-# `grep 'git+' Cargo.lock` after every `just bump-gpui` (Zed may add/retire forks).
+# Only crates.io and these trusted git origins are allowed; a typo-squatted or malicious forked git
+# dependency fails CI here. Origins: the Zed gpui stack (zed + its font-kit/reqwest/scap/wgpu forks) +
+# longbridge/gpui-component; the Helios light client (a16z) + its ethereum_hashing patch (ncitron);
+# the Railgun ZK tree (ethereum/kohaku) + its mandatory ruint/circom-compat patches (Robert-MacWha).
+# Re-derive after every `just bump-gpui` or ZK/helios bump: `grep -oE 'git\+https://[^#?\"]+' Cargo.lock | sort -u`.
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-git = [
@@ -60,4 +63,9 @@ allow-git = [
     "https://github.com/zed-industries/scap",
     "https://github.com/zed-industries/wgpu",
     "https://github.com/longbridge/gpui-component",
+    "https://github.com/a16z/helios",
+    "https://github.com/ncitron/ethereum_hashing",
+    "https://github.com/ethereum/kohaku",
+    "https://github.com/Robert-MacWha/ruint",
+    "https://github.com/Robert-MacWha/circom-compat",
 ]

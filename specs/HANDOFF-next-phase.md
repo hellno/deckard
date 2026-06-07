@@ -1,5 +1,9 @@
 # Deckard — next-phase build handoff
 
+> ⚠ **Stale snapshot.** Live build status is in [`/STATUS.md`](../STATUS.md) (single source of truth). The
+> "Built so far" / paths below predate the `crates/` workspace restructure, the encrypted keystore, the signer
+> daemon, and the Helios/shield integration. Kept for the GPUI gotchas + ground rules; use `/STATUS.md` for state.
+
 For a fresh session to pick up implementation cold. Read this + `SPEC-v0-epic.md` (backlog C1–C9) +
 the repo's `DESIGN.md`. Project memory also carries the state.
 

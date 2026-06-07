@@ -1,6 +1,10 @@
 # Epic: Deckard v0 — native self-custodial operator wallet
 
-Status: spec (pre-implementation). Source requirements: `SPEC-v0.md`. Strategy: `strategy.md`.
+> ⚠ **Live build status is in [`/STATUS.md`](../STATUS.md)** (single source of truth). The status fields in
+> this epic are the *original plan* and are now stale (C1–C3 and much of v1 are built). Use this doc for the
+> backlog/requirements, `/STATUS.md` for where things actually stand.
+
+Status: spec (pre-implementation) — **see `/STATUS.md` for actual progress.** Source requirements: `SPEC-v0.md`. Strategy: `strategy.md`.
 Target repo: fork of `hellno/deck`. License: AGPL-3.0. Chain: Ethereum mainnet only.
 
 ## Context

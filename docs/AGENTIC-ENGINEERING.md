@@ -56,16 +56,17 @@ todo      = "deny"          # a stray todo!() left on a code path panics in prod
 dbg_macro = "deny"          # dbg!(x) is debug noise — and 🔐 dbg!(seed) is a key leak
 ```
 
-Then in **both** package manifests (the root `deckard` package *and* `crates/deckard-core`):
+Then in **every member crate** under `crates/` (`deckard-app`, `deckard-core`, `deckard-contract`,
+`deckard-signerd`):
 
 ```toml
 [lints]
 workspace = true
 ```
 
-> **Gotcha (verified):** the root `Cargo.toml` is *both* a package and the workspace root, so it
-> does **not** auto-inherit — it needs its own `[lints] workspace = true` line, same as the member
-> crate.
+> **Gotcha (verified):** `[workspace.lints]` is *not* inherited automatically — each crate must opt in
+> with `[lints] workspace = true`. The root `Cargo.toml` is a **virtual** workspace manifest (no
+> `[package]`), so it carries the `[workspace.lints]` table but takes no `[lints]` line itself.
 
 **Why for an agent.** The agent now sees `clippy::all` and the deny-list in-editor and at
 `cargo check`, identical to what CI enforces — no more "looked fine locally, red in CI." `todo` /

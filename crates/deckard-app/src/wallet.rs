@@ -7,19 +7,18 @@
 use std::fs;
 use std::path::PathBuf;
 
-use directories::ProjectDirs;
-
-/// The platform config dir (`~/Library/Application Support/com.deckard.Deckard` on macOS).
+/// The platform config dir (`~/Library/Application Support/com.deckard.Deckard` on macOS),
+/// created if missing. The path itself is resolved by `deckard-core` so the app, onboarding,
+/// and the signer daemon all agree on where `vault.bin` lives.
 fn config_dir() -> Option<PathBuf> {
-    let dirs = ProjectDirs::from("com", "deckard", "Deckard")?;
-    let dir = dirs.config_dir().to_path_buf();
+    let dir = deckard_core::config_dir()?;
     fs::create_dir_all(&dir).ok()?;
     Some(dir)
 }
 
 /// Where the encrypted keystore lives.
 pub fn vault_path() -> Option<PathBuf> {
-    Some(config_dir()?.join("vault.bin"))
+    Some(config_dir()?.join(deckard_core::config::VAULT_FILE))
 }
 
 /// The legacy plaintext key from the pre-keystore build (raw 32-byte hex).
