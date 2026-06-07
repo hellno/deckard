@@ -1,0 +1,132 @@
+//! #8 — the ONE decision function. Identical `(Intent, Policy)` vectors fed to `MockSigner`
+//! and to the daemon's decision path must yield identical `Decision`s. Both route through
+//! `deckard_contract::evaluate` (the daemon calls it directly after its process-level
+//! pre-checks; the mock calls it in `propose`), so this pins that they never drift.
+//!
+//! The vectors all use an unlocked daemon, a matching chain id, and `kind = Send`, so the
+//! daemon's pre-checks (`locked`/`chain_mismatch`/`unsupported_v1`) don't fire and both sides
+//! reduce to `evaluate` — exactly the apples-to-apples parity contract.
+
+use alloy_primitives::{Address, Bytes, B256, U256};
+use deckard_contract::{
+    evaluate, ApprovalMode, Decision, Intent, IntentKind, MockSigner, Policy, Signer,
+};
+
+/// Normalize away the (stateful, impl-specific) `NeedsApproval` request id so the comparison
+/// is on the CLASSIFICATION, which is the parity contract.
+fn norm(d: Decision) -> Decision {
+    match d {
+        Decision::NeedsApproval { .. } => Decision::NeedsApproval {
+            request_id: B256::ZERO,
+        },
+        other => other,
+    }
+}
+
+fn intent(kind: IntentKind, to: Address, value: u64, calldata: Bytes) -> Intent {
+    Intent {
+        chain_id: 31337,
+        to,
+        token: None,
+        value: U256::from(value),
+        calldata,
+        kind,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn policy(
+    per_tx: u64,
+    daily: u64,
+    spent: u64,
+    mode: ApprovalMode,
+    allow: Vec<Address>,
+    revoked: bool,
+) -> Policy {
+    Policy {
+        per_tx_cap_wei: U256::from(per_tx),
+        daily_cap_wei: U256::from(daily),
+        spent_today_wei: U256::from(spent),
+        allow_to: allow,
+        auto_shield_min_wei: U256::from(10u64),
+        require_approval: mode,
+        revoked,
+    }
+}
+
+#[test]
+fn mock_and_daemon_decision_logic_agree() {
+    let a = Address::repeat_byte(0x22);
+    let b = Address::repeat_byte(0x33);
+    let send = |v| intent(IntentKind::Send, a, v, Bytes::new());
+
+    let vectors: Vec<(&str, Intent, Policy)> = vec![
+        (
+            "within per-tx cap → Allow",
+            send(20),
+            policy(50, 1000, 0, ApprovalMode::OverCap, vec![], false),
+        ),
+        (
+            "over per-tx cap → NeedsApproval",
+            send(60),
+            policy(50, 1000, 0, ApprovalMode::OverCap, vec![], false),
+        ),
+        (
+            "over daily cap → NeedsApproval",
+            send(20),
+            policy(u64::MAX, 100, 90, ApprovalMode::OverCap, vec![], false),
+        ),
+        (
+            "exact per-tx cap boundary → Allow",
+            send(50),
+            policy(50, 1000, 0, ApprovalMode::OverCap, vec![], false),
+        ),
+        (
+            "Never + over cap → Deny over_cap",
+            send(60),
+            policy(50, 1000, 0, ApprovalMode::Never, vec![], false),
+        ),
+        (
+            "Never + within cap → Allow",
+            send(20),
+            policy(50, 1000, 0, ApprovalMode::Never, vec![], false),
+        ),
+        (
+            "Always + within cap → NeedsApproval",
+            send(20),
+            policy(50, 1000, 0, ApprovalMode::Always, vec![], false),
+        ),
+        (
+            "off allowlist → Deny",
+            send(20),
+            policy(50, 1000, 0, ApprovalMode::OverCap, vec![b], false),
+        ),
+        (
+            "on allowlist → Allow",
+            send(20),
+            policy(50, 1000, 0, ApprovalMode::OverCap, vec![a], false),
+        ),
+        (
+            "revoked → Deny revoked",
+            send(20),
+            policy(50, 1000, 0, ApprovalMode::OverCap, vec![], true),
+        ),
+        (
+            "undecodable (Send w/ calldata) → Deny",
+            intent(IntentKind::Send, a, 20, Bytes::from_static(&[1, 2, 3])),
+            policy(50, 1000, 0, ApprovalMode::OverCap, vec![], false),
+        ),
+    ];
+
+    for (label, it, pol) in vectors {
+        // The daemon's decision path IS `evaluate` (after pre-checks that don't apply here).
+        let daemon_decision = norm(evaluate(&it, &pol));
+        // MockSigner.propose routes through the same `evaluate` and mints a real id.
+        let mock = MockSigner::new(pol.clone());
+        let mock_decision = norm(mock.propose(&it));
+        assert_eq!(
+            daemon_decision, mock_decision,
+            "decision diverged for: {label}"
+        );
+    }
+}

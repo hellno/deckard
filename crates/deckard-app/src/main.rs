@@ -13,6 +13,7 @@ mod receive;
 mod settings;
 mod settings_view;
 mod shell;
+mod signer;
 mod theme;
 #[cfg(feature = "tray")]
 mod tray;

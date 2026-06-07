@@ -94,7 +94,14 @@ impl Shell {
             .map(|p| !p.tokens.is_empty())
             .unwrap_or(false);
 
-        // Status sub-line: synced block, watching tag, or an error.
+        // Status sub-line: synced block, watching tag, or an error. When a read carries a
+        // non-Verified trust label, surface it: a balance is never shown as quietly trusted.
+        let trust_tag = match &self.read_status {
+            Some(deckard_core::ReadStatus::Verified) => " · verified",
+            Some(deckard_core::ReadStatus::Degraded { .. }) => " · degraded",
+            Some(deckard_core::ReadStatus::Unsynced { .. }) => " · NOT VERIFIED",
+            None => "",
+        };
         let status_line = if let Some(err) = &self.portfolio_error {
             format!("⚠ {err}")
         } else if first_sync {
@@ -105,12 +112,19 @@ impl Shell {
             } else {
                 ""
             };
-            format!("{net}synced · block {block}")
+            format!("{net}synced · block {block}{trust_tag}")
         } else {
             "Ethereum mainnet".to_string()
         };
+        // An unverified read is a soft warning (the value may not be trustless), not a hard error.
+        let unverified = matches!(
+            self.read_status,
+            Some(deckard_core::ReadStatus::Unsynced { .. })
+        );
         let status_color = if self.portfolio_error.is_some() {
             theme.danger
+        } else if unverified {
+            theme.warning
         } else {
             muted
         };

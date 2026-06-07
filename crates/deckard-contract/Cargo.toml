@@ -1,0 +1,23 @@
+[package]
+name = "deckard-contract"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+description = "Deckard's frozen wire contract: Intent / Decision / Policy, the signer-daemon RPC enums, a sync Signer trait, and an in-memory MockSigner. Zero key material. Owned by docs/build/30-mcp-shape.md."
+
+[dependencies]
+# EVM value types (Address / U256 / Bytes / B256). The `serde` feature is what lets
+# these cross the wire as JSON (MCP) and CBOR (the daemon UDS).
+alloy-primitives = { workspace = true, features = ["serde"] }
+serde = { workspace = true }
+
+[dev-dependencies]
+# Wire-format round-trip tests only — NOT a runtime dependency of the crate, so they
+# never appear in `cargo tree -p deckard-contract -e normal`. JSON is the MCP encoding,
+# CBOR (ciborium) is the daemon-socket encoding.
+serde_json = "1"
+ciborium = "0.2"
+
+# Inherit the workspace lint policy (root Cargo.toml [workspace.lints]).
+[lints]
+workspace = true
