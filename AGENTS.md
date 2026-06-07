@@ -14,7 +14,8 @@ Treat key material with care.
   keystore). **No GPUI dependency; fully unit-testable.** Most logic belongs here, not in the app.
 
 ## Commands
-- Iterate fast: `cargo check -p deckard-core` (GPUI-free — seconds, not minutes).
+- Iterate fast: `just core` — clippy + test the GPUI-free engine (`deckard-core`) in seconds, no gpui
+  build. Use while working on the engine; the full DoD still applies before done. UI work needs `just check`.
 - Lint: `just check` — clippy `-D warnings` on BOTH the default and `--features tray` configs.
 - Format: `just fmt` (`cargo fmt`); CI gates `cargo fmt --all --check`.
 - Test: `cargo test --workspace`.

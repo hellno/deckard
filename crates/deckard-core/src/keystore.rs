@@ -416,6 +416,33 @@ impl Vault {
         Self::from_bytes(&bytes)
     }
 
+    /// Parse + unlock from in-memory bytes as a SINGLE authentication step. Every failure —
+    /// malformed/truncated/tampered bytes, hostile KDF params, wrong passphrase, AEAD rejection —
+    /// collapses to the same generic [`unlock_failed`] *message*, so the unlock path is not an
+    /// error-message oracle distinguishing "wrong passphrase" from "tampered/corrupt vault".
+    ///
+    /// Scope: this equalizes the rendered error, NOT timing — a parse reject returns before Argon2,
+    /// while a wrong passphrase runs it, so failure latency still differs. That residual is accepted
+    /// deliberately: an attacker who holds the vault file can already parse it, and a desktop wallet
+    /// doesn't expose unlock latency remotely; padding every malformed-file failure with a full
+    /// Argon2 pass would cost ~1s for no real gain in this threat model.
+    ///
+    /// Use this (or [`Vault::open`]) on the unlock path; `from_bytes`/`unlock` stay available where a
+    /// specific diagnostic is intentionally wanted and is NOT attacker-facing.
+    pub fn open_bytes(bytes: &[u8], passphrase: &str) -> anyhow::Result<UnlockedVault> {
+        Self::from_bytes(bytes)
+            .and_then(|v| v.unlock(passphrase))
+            .map_err(|_| unlock_failed())
+    }
+
+    /// Read a vault file and unlock it in one step, with the same generic-error (no-oracle)
+    /// contract as [`Vault::open_bytes`]. This is what the unlock screen calls.
+    pub fn open(path: &Path, passphrase: &str) -> anyhow::Result<UnlockedVault> {
+        Self::read(path)
+            .and_then(|v| v.unlock(passphrase))
+            .map_err(|_| unlock_failed())
+    }
+
     pub fn secret_kind(&self) -> SecretKind {
         self.header.secret_kind
     }
@@ -619,6 +646,147 @@ mod tests {
     fn wrong_passphrase_fails_closed() {
         let (vault, _) = Vault::create(PW, WordCount::Twelve, KdfParams::FAST_TEST).unwrap();
         assert!(vault.unlock("wrong passphrase").is_err());
+    }
+
+    #[test]
+    fn unlock_failures_share_one_message() {
+        // Every authentication failure must surface the IDENTICAL message via the open_bytes()
+        // contract, so the unlock UI can't reveal whether the passphrase was wrong or the vault was
+        // tampered/corrupt. (Message-level only — timing is a documented, accepted residual; see
+        // Vault::open_bytes. anyhow::Error has no PartialEq, so compare rendered strings.)
+        let (vault, _) = Vault::create(PW, WordCount::Twelve, KdfParams::FAST_TEST).unwrap();
+        let good = vault.to_bytes();
+
+        // A correct passphrase still unlocks through the same path.
+        assert!(Vault::open_bytes(&good, PW).is_ok());
+
+        // `.err()` not `.unwrap_err()`: UnlockedVault is deliberately not Debug (no-leak), so
+        // unwrap_err (which would format the Ok value) won't compile — itself a guard.
+        let baseline = Vault::open_bytes(&good, "definitely the wrong passphrase")
+            .err()
+            .expect("wrong passphrase must fail to unlock")
+            .to_string();
+
+        // Tampers spanning the parser (magic/version/KDF/trailing/truncation) AND the AEAD layer —
+        // all must collapse to the same message.
+        let mut cases: Vec<Vec<u8>> = vec![
+            b"not a deckard vault".to_vec(), // bad magic
+            good[..good.len() - 1].to_vec(), // truncated
+        ];
+        let mut bad_version = good.clone();
+        bad_version[4] = 0xFF; // version byte, right after the 4-byte magic
+        cases.push(bad_version);
+        let mut bad_kdf = good.clone();
+        let m_off = 4 + 1 + 1 + VAULT_ID_LEN + 1; // m_kib: after magic+ver+kind+vault_id+kdf_id
+        bad_kdf[m_off..m_off + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        cases.push(bad_kdf);
+        let mut bad_aead = good.clone();
+        let last = bad_aead.len() - 1;
+        bad_aead[last] ^= 0x01; // flip a ciphertext/tag byte → AEAD rejects
+        cases.push(bad_aead);
+        let mut trailing = good.clone();
+        trailing.push(0x00); // trailing garbage
+        cases.push(trailing);
+
+        for (i, bad) in cases.iter().enumerate() {
+            let got = Vault::open_bytes(bad, PW)
+                .err()
+                .expect("a tampered/corrupt vault must fail to unlock")
+                .to_string();
+            assert_eq!(
+                got, baseline,
+                "case {i} produced a distinguishable unlock error"
+            );
+        }
+    }
+
+    #[test]
+    fn open_file_path_collapses_to_generic() {
+        use std::io::Write;
+        // Vault::open (the on-disk path do_unlock uses) must collapse read/size-cap/parse/AEAD
+        // failures to the same generic message as a wrong passphrase — never a distinct IO error.
+        let path = std::env::temp_dir().join("deckard-open-contract-test.bin");
+        let write = |bytes: &[u8]| {
+            let mut f = std::fs::File::create(&path).unwrap();
+            f.write_all(bytes).unwrap();
+        };
+        let open_err = || {
+            Vault::open(&path, PW)
+                .err()
+                .expect("must fail to unlock")
+                .to_string()
+        };
+
+        let (vault, _) = Vault::create(PW, WordCount::Twelve, KdfParams::FAST_TEST).unwrap();
+        write(&vault.to_bytes());
+        assert!(
+            Vault::open(&path, PW).is_ok(),
+            "a valid vault file must unlock"
+        );
+        let baseline = Vault::open(&path, "wrong passphrase")
+            .err()
+            .expect("wrong passphrase must fail")
+            .to_string();
+
+        write(b"not a deckard vault");
+        assert_eq!(open_err(), baseline, "garbage file leaked a distinct error");
+        write(&vec![0u8; 5000]); // > MAX_VAULT_BYTES (4096) → size-cap reject
+        assert_eq!(
+            open_err(),
+            baseline,
+            "oversized file leaked a distinct error"
+        );
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(open_err(), baseline, "missing file leaked a distinct error");
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    // Frozen REAL v1 vault blobs (FORMAT_VERSION 1, FAST_TEST KDF), captured once from known inputs:
+    // ENTROPY16 = the canonical 12-word "abandon…about"; ENTROPY32 = the 24-word "abandon…art";
+    // RAWKEY = 0x46*32. To regenerate after an intentional format bump, temporarily restore the
+    // gen_compat_fixtures generator (git history) and re-bake.
+    const ENTROPY16_HEX: &str = "444b5244010079a6a367eeb270d770dcf64ea3eecea801002000000100000001000000d2d7d128338ed86d7c7dd636345084a700007f1a9945fceea918f61828d5b3e4f2ea6ea7df273870ee3c02832b5966fb0a6fe0e839403d6264de00245da2de44162d03df796bd78e979470ba93c90c3998440873de456b3011a7d9135356eab7cec475ed48444e3ec3d386c0776cf238a5da200000005ebb566131a4f7c68ffdc0d6c7087b6ce3166baac57a6ce3ff408316eb90249f";
+    const ENTROPY32_HEX: &str = "444b52440101c23da1d7c70914433c40a2573da3e7330100200000010000000100000089acc8ec1a8b0a563601760609bf3d530000f8f1e8ca056fad16d8416189ea7e0f2d23f93d78bc4f5bdd6da976e6bd67bb502e354788a409a361d099f7a5a812e2dd37eeb9bd34070045b64b7820e59a10618cd3a8f496f1df57e759704f8d919604764d1c262e2b58f69d0d83c80192ff633000000033ed76cbcade5104bc27c0ae0391b2f0c44124d3c2d3c878c8f9d4a7d67811553b13e617ae10f719223a78f37e204fb4";
+    const RAWKEY_HEX: &str = "444b524401024ded6e18c437a15f07f0ec8043534b7001002000000100000001000000e2c48852b4d1e57e184ae6b73ab00011000095dc73698f21c7cfb28984a9f2da03f00ab54c722330e1f0afe4e79025b6bf37811038ccdfe9f48b7a1ce6754998e049143b30f340ebcab827cb61ec2a1e8065436187dccec035995ba5b9199d6e6340bce0e3bac70d0c32f0bf3ce94455a3a430000000caf0392f2f3b04eb0ce6b9d00c13ca62a54cf862e25248063f0bfbfaf55ba18ac08e2e325c7f1a084cdfc1a25f3c2a54";
+
+    #[test]
+    fn decode_compat_v1_fixtures() {
+        // If a future format/parser change ever stops an old on-disk vault from parsing + unlocking
+        // to the same address, that's a backward-incompatible break (lost funds) — caught here.
+        let fixtures: &[(&str, SecretKind, &str)] = &[
+            (
+                ENTROPY16_HEX,
+                SecretKind::Entropy16,
+                "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+            ),
+            (
+                ENTROPY32_HEX,
+                SecretKind::Entropy32,
+                "0xF278cF59F82eDcf871d630F28EcC8056f25C1cdb",
+            ),
+            (
+                RAWKEY_HEX,
+                SecretKind::RawKey,
+                "0x9d8A62f656a8d1615C1294fd71e9CFb3E4855A4F",
+            ),
+        ];
+        for (hex, kind, want_addr) in fixtures {
+            let bytes = unhex(hex);
+            let vault = Vault::from_bytes(&bytes).expect("v1 fixture must still parse");
+            assert_eq!(vault.secret_kind(), *kind);
+            let addr = vault
+                .unlock(PW)
+                .expect("v1 fixture must still unlock")
+                .primary_address()
+                .unwrap();
+            assert_eq!(addr.to_string(), *want_addr, "v1 fixture address drifted");
+        }
     }
 
     #[test]
