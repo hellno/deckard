@@ -6,17 +6,15 @@ Native (macOS + Linux), trustless by construction, open source.
 > Forked from the [`deck`](https://github.com/hellno/deck) GPUI starter (0BSD, which permits
 > relicensing). Now its own project: Rust + [GPUI](https://www.gpui.rs/), licensed AGPL-3.0-or-later.
 
-## Status — v0 (working today)
+## Status
 
-- **Real self-custodial wallet** via [alloy](https://github.com/alloy-rs/alloy)
-  (`alloy-signer-local`): a secp256k1 keypair, EIP-55 address, key persisted to the OS config
-  dir. No hand-rolled crypto.
-- **Portfolio** screen: address, balance, Send / Receive / Swap, holdings.
-- **Receive**: a real scannable QR plus copy-to-clipboard.
-- **Command palette** (`cmd-K`) and the amber-on-near-black design system (see `DESIGN.md`).
-- Light / dark.
+**Live build status: [`STATUS.md`](STATUS.md) — the single source of truth** (demo beats, crates, risks).
 
-Representative / not yet wired (next): live balances, Send/Swap execution, BIP-39 seed backup.
+Working today: encrypted BIP-39 keystore + onboarding, live on-chain balances (Multicall3), receive (QR),
+command palette, and the amber-on-near-black design system (`DESIGN.md`). Reads are **Helios-verified** (no
+third-party RPC trusted by default). A process-isolated signer daemon (`deckard-signerd`) holds the key and
+gates every write. The **shield** hero (auto-private via Railgun) is wired + black-box tested on an anvil fork.
+Next: receive-watcher, the agent (MCP) surface, Send/Swap UI. See `STATUS.md` for the beat-by-beat picture.
 
 ## Roadmap
 
