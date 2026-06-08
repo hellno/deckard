@@ -50,6 +50,16 @@ jobs:
       # source of truth. rustup (preinstalled on GitHub runners) auto-installs the
       # pinned version and its clippy/rustfmt components on the first cargo call.
       - uses: Swatinem/rust-cache@v2
+      # The merged dep tree (gpui + Helios/revm + the Railgun ZK tree) is large; the stock ubuntu
+      # runner (~14 GB free) runs out of disk mid-build / on the rust-cache POST step ("No space left
+      # on device"). Reclaim ~20 GB of preinstalled toolchains we never use, before anything heavy
+      # runs. Auditable inline cleanup (no third-party action); `|| true` so a missing path is benign.
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
+          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          df -h /
       # System libraries GPUI needs on Linux (X11 + Wayland + Vulkan + fonts),
       # plus GTK/appindicator + libxdo for the optional tray feature
       # (tray-icon/muda link against libxdo for menu event injection).
