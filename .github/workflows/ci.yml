@@ -1,14 +1,23 @@
 name: CI
 
-# Builds + tests the Deckard workspace on macOS *and* Linux so cross-platform stays honest.
-# (GPUI renders with Metal on macOS and Vulkan via wgpu on Linux.)
+# Right-sized cross-platform CI for the Deckard virtual workspace.
 #
-# COST: free. Standard GitHub-hosted runners (macos-latest, ubuntu-latest) are
-# free + unlimited on PUBLIC repos — the macOS 10x multiplier only burns quota
-# on PRIVATE repos. If you ever make this repo private, gate the `macos` job to
-# tags to avoid eating your minutes, e.g. add to that job:
-#     if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v')
-# (Don't switch to "*-large" runners — those are billed even on public repos.)
+# Why this shape: the GPUI app renders with Metal on macOS and wgpu/Vulkan on Linux, and the tray is
+# OS-specific (objc2 on macOS, GTK/appindicator on Linux) — THAT is what genuinely needs both OSes.
+# The headless crates (deckard-core / -contract / -signerd) are OS-independent, so we TEST them once
+# (Linux) and only BUILD + lint the app's macOS-specific path on macOS. Testing the same crypto/wire
+# logic twice buys nothing.
+#
+#   quick (fmt, ~1 min) ──┬── linux : full build + clippy + test --workspace (+ anvil/Foundry)
+#                         ├── macos : build the shipping binaries + lint the macOS-only tray path
+#                         └── cargo-deny : supply-chain gate (non-blocking)
+#
+# The `quick` gate fails cheap on the most common trivial mistake (unformatted code) before the two
+# heavy runners ever spin up.
+#
+# COST: free on PUBLIC repos (the macOS 10x multiplier only bills PRIVATE repos). If you make this
+# repo private, add to the macos job: `if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v')`.
+# Don't switch to "*-large" runners — those are billed even on public repos.
 
 on:
   push:
@@ -22,37 +31,33 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  macos:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      # No toolchain version here on purpose: rust-toolchain.toml is the single
-      # source of truth. rustup (preinstalled on GitHub runners) auto-installs the
-      # pinned version and its clippy/rustfmt components on the first cargo call.
-      - uses: Swatinem/rust-cache@v2
-      # Foundry gives the integration tests a local `anvil` to broadcast against
-      # (deckard-signerd's anvil-fork lane). The daemon tests skip gracefully if it's absent,
-      # but CI installs it so the broadcast path is actually exercised.
-      - uses: foundry-rs/foundry-toolchain@v1
-      # --locked everywhere: reproducibility lives in the committed Cargo.lock (it pins the exact
-      # git gpui/helios/railgun commits). --locked fails CI if the lock is stale, keeping it committed.
-      - run: cargo build --locked --workspace
-      - run: cargo build --locked -p deckard-app --features tray
-      - run: cargo test --locked --workspace
-      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
-      - run: cargo clippy --locked -p deckard-app --all-targets --features tray -- -D warnings
-
-  linux:
+  # Fail-fast gate: formatting is OS-independent, so check it once, fast, before the heavy builds.
+  quick:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # No toolchain version here on purpose: rust-toolchain.toml is the single
-      # source of truth. rustup (preinstalled on GitHub runners) auto-installs the
-      # pinned version and its clippy/rustfmt components on the first cargo call.
+      # rustup (preinstalled) auto-installs the rust-toolchain.toml-pinned version + rustfmt on the
+      # first cargo call. No build needed — `cargo fmt` only parses, so this is ~1 min.
+      - run: cargo fmt --all --check
+
+  # The full logic gate. Everything OS-independent (all crates' clippy + tests) runs here, once.
+  linux:
+    needs: quick
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
-      # System libraries GPUI needs on Linux (X11 + Wayland + Vulkan + fonts),
-      # plus GTK/appindicator + libxdo for the optional tray feature
-      # (tray-icon/muda link against libxdo for menu event injection).
+      # The dep tree (gpui + Helios/revm/bls + the Railgun ZK tree) overflows the stock ubuntu
+      # runner's ~14 GB and OOMs the build / cache-save. Reclaim ~20 GB of preinstalled toolchains we
+      # never use, first. (macOS runners have the headroom, so this is Linux-only.)
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
+          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          df -h /
+      # System libraries GPUI needs on Linux (X11 + Wayland + Vulkan + fonts), plus GTK/appindicator
+      # + libxdo for the optional tray feature (tray-icon/muda link against libxdo).
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -64,21 +69,39 @@ jobs:
             libfontconfig1-dev libfreetype6-dev \
             libssl-dev \
             libgtk-3-dev libayatana-appindicator3-dev libxdo-dev
-      # Foundry (anvil) for the deckard-signerd broadcast integration tests.
+      # Foundry (anvil) for the deckard-signerd broadcast integration tests. Pass GITHUB_TOKEN so the
+      # release-tag fetch is authenticated — the unauthenticated path hits a 403 API rate-limit.
       - uses: foundry-rs/foundry-toolchain@v1
-      # Formatting is OS-independent, so gate it once on the cheaper Linux runner.
-      - run: cargo fmt --all --check
+        with:
+          token: ${{ github.token }}
+      # --locked everywhere: reproducibility lives in the committed Cargo.lock (exact git pins).
       - run: cargo build --locked --workspace
       - run: cargo build --locked -p deckard-app --features tray
       - run: cargo test --locked --workspace
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo clippy --locked -p deckard-app --all-targets --features tray -- -D warnings
 
-  # Supply-chain gate (advisories / licenses / bans / sources). Config: deny.toml.
-  # Lands NON-BLOCKING (continue-on-error): promote to a required check after one green run AND
-  # after seeding deny.toml [licenses].allow from a local `cargo deny check licenses`.
+  # Cross-platform compile proof. The app (Metal renderer) + the macOS-only objc2 tray are the only
+  # things that genuinely need macOS coverage, and that's a compile/link concern, not a logic one
+  # (logic is tested on Linux). So we build the two shipping binaries and lint the macOS-only tray
+  # path — no redundant tests, and no Foundry (the anvil tests run on Linux; this also removes the
+  # GitHub-API 403 flake from the 10x-billed runner).
+  macos:
+    needs: quick
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked -p deckard-app -p deckard-signerd
+      - run: cargo build --locked -p deckard-app --features tray
+      - run: cargo clippy --locked -p deckard-app --all-targets --features tray -- -D warnings
+
+  # Supply-chain gate (advisories / licenses / bans / sources). Config: deny.toml. NON-BLOCKING
+  # (continue-on-error) until the license allow-list is seeded from a local `cargo deny check
+  # licenses` and the unmaintained-transitive advisories are triaged — then drop continue-on-error.
   # Rationale: docs/AGENTIC-ENGINEERING.md §4.
   cargo-deny:
+    needs: quick
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
