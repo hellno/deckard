@@ -75,3 +75,8 @@ directories = "5"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "sync", "rt-multi-thread"] }
+
+# Inherit the workspace lint policy (see root Cargo.toml [workspace.lints]). deckard-core also sets
+# #![forbid(unsafe_code)] in lib.rs — the security engine is a pure-safe, compile-time guarantee.
+[lints]
+workspace = true

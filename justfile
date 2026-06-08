@@ -28,8 +28,15 @@ run-tray:
 fmt:
     cargo fmt
 check:
-    cargo clippy --workspace --all-targets -- -D warnings
-    cargo clippy -p deckard-app --all-targets --features tray -- -D warnings
+    cargo clippy --locked --workspace --all-targets -- -D warnings
+    cargo clippy --locked -p deckard-app --all-targets --features tray -- -D warnings
+
+# Engine-only inner loop: checks + tests deckard-core WITHOUT building the gpui app. Use it while
+# iterating on keystore/eth/balances. (The heavy verified-reads/shield deps compile once, then it's
+# fast.) The full Definition of Done still applies before "done": `just check` + `cargo test --workspace`.
+core:
+    cargo clippy -p deckard-core --all-targets --locked -- -D warnings
+    cargo test -p deckard-core --locked
 
 # Bump the git GPUI stack to the latest upstream commits, then rebuild.
 # Reproducibility lives in Cargo.lock — commit it (and rust-toolchain.toml if you

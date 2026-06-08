@@ -114,7 +114,10 @@ impl HeliosCell {
             Ok(reader) => *guard = Some(reader),
             Err(e) => {
                 // Stays None → the read path falls back to a raw, Unsynced read.
-                eprintln!("signerd: helios bootstrap failed (reads tagged unsynced): {}", one_line(&e));
+                eprintln!(
+                    "signerd: helios bootstrap failed (reads tagged unsynced): {}",
+                    one_line(&e)
+                );
             }
         }
     }

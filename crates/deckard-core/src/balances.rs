@@ -46,7 +46,10 @@ pub struct Portfolio {
 }
 
 /// Read the full portfolio for `address` in one Multicall3 round-trip.
-pub async fn fetch_portfolio(provider: &DynProvider, address: Address) -> anyhow::Result<Portfolio> {
+pub async fn fetch_portfolio(
+    provider: &DynProvider,
+    address: Address,
+) -> anyhow::Result<Portfolio> {
     let mc = IMulticall3::new(MULTICALL3, provider);
 
     let mut calls = Vec::with_capacity(DEFAULT_TOKENS.len() + 1);
@@ -73,11 +76,19 @@ pub async fn fetch_portfolio(provider: &DynProvider, address: Address) -> anyhow
         Ok(r) if !r.is_empty() => r,
         _ => {
             let native_wei = provider.get_balance(address).await?;
-            return Ok(Portfolio { address, native_wei, tokens: Vec::new() });
+            return Ok(Portfolio {
+                address,
+                native_wei,
+                tokens: Vec::new(),
+            });
         }
     };
 
-    let native_wei = IMulticall3::getEthBalanceCall::abi_decode_returns(&results[0].returnData)?;
+    // `results` is non-empty here (guarded by the match above); `.first()` avoids raw indexing.
+    let native = results
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("multicall returned no results"))?;
+    let native_wei = IMulticall3::getEthBalanceCall::abi_decode_returns(&native.returnData)?;
 
     let mut tokens = Vec::new();
     for (t, r) in DEFAULT_TOKENS.iter().zip(results.iter().skip(1)) {
@@ -107,8 +118,8 @@ pub async fn fetch_portfolio(provider: &DynProvider, address: Address) -> anyhow
 /// `1_934_500_000_000_000_000` @ 18 decimals → `"1.9345"`. Truncates (never rounds
 /// up) to `max_frac` fractional digits and strips trailing zeros.
 pub fn format_amount(raw: U256, decimals: u8, max_frac: usize) -> String {
-    let full = alloy::primitives::utils::format_units(raw, decimals)
-        .unwrap_or_else(|_| "0".to_string());
+    let full =
+        alloy::primitives::utils::format_units(raw, decimals).unwrap_or_else(|_| "0".to_string());
     let (int_part, frac_part) = full.split_once('.').unwrap_or((full.as_str(), ""));
 
     let frac: String = frac_part.chars().take(max_frac).collect();

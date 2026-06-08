@@ -1,0 +1,71 @@
+# cargo-deny configuration — supply-chain gate. See docs/AGENTIC-ENGINEERING.md §4.
+# Run locally with: cargo install cargo-deny && cargo deny check
+# The CI job lands NON-BLOCKING (continue-on-error) first; promote it to a required check after one
+# green run AND after seeding [licenses].allow below from a real `cargo deny check licenses` run.
+
+[advisories]
+# RustSec advisory DB. Vulnerabilities and unmaintained crates are denied by default in cargo-deny
+# v2; we additionally refuse yanked crates. Add to `ignore` ONLY with a written justification.
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+# ⚠️ SEED-THEN-TIGHTEN: this is a reasonable starting superset, NOT verified against the full
+# alloy + git-gpui tree. Run `cargo deny check licenses` locally and add exactly what it reports
+# (plus [licenses.exceptions] for any single oddball) before making the CI job blocking.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "MPL-2.0",
+    "Unlicense",
+    "CC0-1.0",
+]
+# This workspace's OWN crates are AGPL-3.0-or-later (see each Cargo.toml). cargo-deny license-checks
+# first-party crates too, so allow AGPL for our crates ONLY (not the whole dependency tree). If
+# cargo-deny rejects the `crate =` key on the action's version, switch to `name =`; verify on the
+# first local `cargo deny check licenses` run.
+exceptions = [
+    { allow = ["AGPL-3.0-or-later"], crate = "deckard-app" },
+    { allow = ["AGPL-3.0-or-later"], crate = "deckard-core" },
+    { allow = ["AGPL-3.0-or-later"], crate = "deckard-contract" },
+    { allow = ["AGPL-3.0-or-later"], crate = "deckard-signerd" },
+]
+
+[bans]
+# The git gpui stack legitimately pulls duplicate versions (e.g. objc2 0.5 + 0.6), so a hard deny
+# here would be permanently red. Warn so we can see the dupes without blocking.
+multiple-versions = "warn"
+wildcards = "deny"
+deny = [
+    { crate = "openssl", reason = "prefer rustls/ring; avoid the OpenSSL CVE surface" },
+]
+
+[sources]
+# Only crates.io and these trusted git origins are allowed; a typo-squatted or malicious forked git
+# dependency fails CI here. Origins: the Zed gpui stack (zed + its font-kit/reqwest/scap/wgpu forks) +
+# longbridge/gpui-component; the Helios light client (a16z) + its ethereum_hashing patch (ncitron);
+# the Railgun ZK tree (ethereum/kohaku) + its mandatory ruint/circom-compat patches (Robert-MacWha).
+# Re-derive after every `just bump-gpui` or ZK/helios bump: `grep -oE 'git\+https://[^#?\"]+' Cargo.lock | sort -u`.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = [
+    "https://github.com/zed-industries/zed",
+    "https://github.com/zed-industries/font-kit",
+    "https://github.com/zed-industries/reqwest",
+    "https://github.com/zed-industries/scap",
+    "https://github.com/zed-industries/wgpu",
+    "https://github.com/longbridge/gpui-component",
+    "https://github.com/a16z/helios",
+    "https://github.com/ncitron/ethereum_hashing",
+    "https://github.com/ethereum/kohaku",
+    "https://github.com/Robert-MacWha/ruint",
+    "https://github.com/Robert-MacWha/circom-compat",
+]

@@ -146,12 +146,9 @@ async fn shield_e2e_privacy_property() {
     // 1. deckard-core KEY-LESS builder → Intent{kind:Shield, ...}. The shield value (raw wei)
     //    is well within the default 0.05 ETH per-tx cap, so propose → Allow directly.
     let shield_value: u128 = 1_000_000;
-    let intent = build_shield_native_intent(
-        SEPOLIA_CHAIN_ID,
-        recipient_0zk,
-        U256::from(shield_value),
-    )
-    .expect("build shield intent");
+    let intent =
+        build_shield_native_intent(SEPOLIA_CHAIN_ID, recipient_0zk, U256::from(shield_value))
+            .expect("build shield intent");
     assert_eq!(
         intent.kind,
         deckard_contract::IntentKind::Shield,

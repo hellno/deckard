@@ -1,0 +1,8 @@
+# Checked-in formatter config so diffs stay deterministic across rustfmt versions and machines.
+# Intentionally minimal: it pins the edition + width the code is already formatted to (rustfmt's
+# defaults today), so landing it is near-zero churn. Style idioms (e.g. redundant field names) are
+# left to clippy. Every key is STABLE-channel — `just fmt` runs the pinned 1.95.0 stable `cargo fmt`,
+# which silently ignores nightly-only keys (imports_granularity, group_imports), so we don't set them.
+# See docs/AGENTIC-ENGINEERING.md §3.
+edition = "2021"
+max_width = 100
