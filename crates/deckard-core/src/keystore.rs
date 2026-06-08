@@ -60,10 +60,18 @@ impl KdfParams {
     /// (~0.5–1s on Apple Silicon), and strictly harder than every surveyed wallet (which
     /// use PBKDF2 or scrypt). The header carries the params, so `/cso` can raise them and
     /// old vaults still open (upgrade-on-unlock re-seals).
-    pub const PRODUCTION: KdfParams = KdfParams { m_kib: 256 * 1024, t: 3, p: 1 };
+    pub const PRODUCTION: KdfParams = KdfParams {
+        m_kib: 256 * 1024,
+        t: 3,
+        p: 1,
+    };
     /// Fast params for tests only — NOT for real vaults.
     #[cfg(test)]
-    pub const FAST_TEST: KdfParams = KdfParams { m_kib: 8 * 1024, t: 1, p: 1 };
+    pub const FAST_TEST: KdfParams = KdfParams {
+        m_kib: 8 * 1024,
+        t: 1,
+        p: 1,
+    };
 
     fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(self.p == 1, "unsupported Argon2 parallelism");
@@ -71,7 +79,10 @@ impl KdfParams {
             (MIN_M_KIB..=MAX_M_KIB).contains(&self.m_kib),
             "Argon2 memory cost out of bounds"
         );
-        anyhow::ensure!((1..=MAX_T).contains(&self.t), "Argon2 time cost out of bounds");
+        anyhow::ensure!(
+            (1..=MAX_T).contains(&self.t),
+            "Argon2 time cost out of bounds"
+        );
         Ok(())
     }
 }
@@ -153,6 +164,7 @@ impl Header {
 
 /// The on-disk vault: header + the two ciphertexts. Carries no plaintext secret.
 #[derive(Clone)]
+#[must_use]
 pub struct Vault {
     header: Header,
     wrapped_dek: [u8; WRAPPED_DEK_LEN],
@@ -175,13 +187,21 @@ impl Vault {
         OsRng.fill_bytes(&mut entropy);
 
         let phrase = entropy_to_phrase(&entropy)?;
-        let kind = if n == 16 { SecretKind::Entropy16 } else { SecretKind::Entropy32 };
+        let kind = if n == 16 {
+            SecretKind::Entropy16
+        } else {
+            SecretKind::Entropy32
+        };
         let vault = Self::seal(kind, &entropy, passphrase, kdf)?;
         Ok((vault, phrase))
     }
 
     /// Import an existing BIP-39 phrase (checksum-validated).
-    pub fn import_mnemonic(phrase: &str, passphrase: &str, kdf: KdfParams) -> anyhow::Result<Vault> {
+    pub fn import_mnemonic(
+        phrase: &str,
+        passphrase: &str,
+        kdf: KdfParams,
+    ) -> anyhow::Result<Vault> {
         let mnemonic = bip39::Mnemonic::parse(phrase.trim())
             .map_err(|_| anyhow::anyhow!("invalid recovery phrase"))?;
         let entropy = Zeroizing::new(mnemonic.to_entropy());
@@ -200,7 +220,8 @@ impl Vault {
     /// bytes are a valid secp256k1 scalar — so we never persist an unusable vault.
     pub fn import_raw_key(hex: &str, passphrase: &str, kdf: KdfParams) -> anyhow::Result<Vault> {
         let key = parse_exact_32(hex)?;
-        PrivateKeySigner::from_slice(&key).map_err(|_| anyhow::anyhow!("not a valid private key"))?;
+        PrivateKeySigner::from_slice(&key)
+            .map_err(|_| anyhow::anyhow!("not a valid private key"))?;
         Self::seal(SecretKind::RawKey, &key, passphrase, kdf)
     }
 
@@ -248,7 +269,11 @@ impl Vault {
         let payload_aad = [AAD_PAYLOAD, &core, &wrapped_dek].concat();
         let ct_entropy = aead_encrypt(dek.as_slice(), &entropy_nonce, secret, &payload_aad)?;
 
-        Ok(Vault { header, wrapped_dek, ct_entropy })
+        Ok(Vault {
+            header,
+            wrapped_dek,
+            ct_entropy,
+        })
     }
 
     /// Decrypt the vault with `passphrase`, yielding an in-memory unlocked wallet.
@@ -261,23 +286,39 @@ impl Vault {
         let kek = derive_kek(passphrase.as_bytes(), &self.header.salt, &self.header.kdf)?;
         let wrap_aad = [AAD_WRAP, &core].concat();
         let dek = Zeroizing::new(
-            aead_decrypt(kek.as_slice(), &self.header.wrap_nonce, &self.wrapped_dek, &wrap_aad)
-                .map_err(|_| unlock_failed())?,
+            aead_decrypt(
+                kek.as_slice(),
+                &self.header.wrap_nonce,
+                &self.wrapped_dek,
+                &wrap_aad,
+            )
+            .map_err(|_| unlock_failed())?,
         );
 
         let payload_aad = [AAD_PAYLOAD, &core, &self.wrapped_dek].concat();
         let secret = Zeroizing::new(
-            aead_decrypt(dek.as_slice(), &self.header.entropy_nonce, &self.ct_entropy, &payload_aad)
-                .map_err(|_| unlock_failed())?,
+            aead_decrypt(
+                dek.as_slice(),
+                &self.header.entropy_nonce,
+                &self.ct_entropy,
+                &payload_aad,
+            )
+            .map_err(|_| unlock_failed())?,
         );
 
-        Ok(UnlockedVault { kind: self.header.secret_kind, secret })
+        Ok(UnlockedVault {
+            kind: self.header.secret_kind,
+            secret,
+        })
     }
 
     /// Serialize to the on-disk byte format.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut b = self.header.core_bytes();
         b.extend_from_slice(&self.wrapped_dek);
+        // ct_entropy is bounded by MAX_CT_ENTROPY (1024) at both seal and parse time (and `read`
+        // caps the whole file at MAX_VAULT_BYTES), so this cast can never truncate — to_bytes stays
+        // infallible by construction.
         b.extend_from_slice(&(self.ct_entropy.len() as u32).to_le_bytes());
         b.extend_from_slice(&self.ct_entropy);
         b
@@ -292,7 +333,11 @@ impl Vault {
         let mut vault_id = [0u8; VAULT_ID_LEN];
         vault_id.copy_from_slice(r.take(VAULT_ID_LEN)?);
         anyhow::ensure!(r.u8()? == KDF_ARGON2ID, "unsupported KDF");
-        let kdf = KdfParams { m_kib: r.u32()?, t: r.u32()?, p: r.u32()? };
+        let kdf = KdfParams {
+            m_kib: r.u32()?,
+            t: r.u32()?,
+            p: r.u32()?,
+        };
         kdf.validate()?; // cap-check BEFORE deriving anything
         let mut salt = [0u8; SALT_LEN];
         salt.copy_from_slice(r.take(SALT_LEN)?);
@@ -363,9 +408,39 @@ impl Vault {
     /// reading it into memory (a hostile multi-GB `vault.bin` can't OOM us).
     pub fn read(path: &Path) -> anyhow::Result<Vault> {
         let meta = std::fs::metadata(path)?;
-        anyhow::ensure!(meta.len() <= MAX_VAULT_BYTES, "vault file is implausibly large");
+        anyhow::ensure!(
+            meta.len() <= MAX_VAULT_BYTES,
+            "vault file is implausibly large"
+        );
         let bytes = std::fs::read(path)?;
         Self::from_bytes(&bytes)
+    }
+
+    /// Parse + unlock from in-memory bytes as a SINGLE authentication step. Every failure —
+    /// malformed/truncated/tampered bytes, hostile KDF params, wrong passphrase, AEAD rejection —
+    /// collapses to the same generic [`unlock_failed`] *message*, so the unlock path is not an
+    /// error-message oracle distinguishing "wrong passphrase" from "tampered/corrupt vault".
+    ///
+    /// Scope: this equalizes the rendered error, NOT timing — a parse reject returns before Argon2,
+    /// while a wrong passphrase runs it, so failure latency still differs. That residual is accepted
+    /// deliberately: an attacker who holds the vault file can already parse it, and a desktop wallet
+    /// doesn't expose unlock latency remotely; padding every malformed-file failure with a full
+    /// Argon2 pass would cost ~1s for no real gain in this threat model.
+    ///
+    /// Use this (or [`Vault::open`]) on the unlock path; `from_bytes`/`unlock` stay available where a
+    /// specific diagnostic is intentionally wanted and is NOT attacker-facing.
+    pub fn open_bytes(bytes: &[u8], passphrase: &str) -> anyhow::Result<UnlockedVault> {
+        Self::from_bytes(bytes)
+            .and_then(|v| v.unlock(passphrase))
+            .map_err(|_| unlock_failed())
+    }
+
+    /// Read a vault file and unlock it in one step, with the same generic-error (no-oracle)
+    /// contract as [`Vault::open_bytes`]. This is what the unlock screen calls.
+    pub fn open(path: &Path, passphrase: &str) -> anyhow::Result<UnlockedVault> {
+        Self::read(path)
+            .and_then(|v| v.unlock(passphrase))
+            .map_err(|_| unlock_failed())
     }
 
     pub fn secret_kind(&self) -> SecretKind {
@@ -375,6 +450,7 @@ impl Vault {
 
 /// An unlocked wallet held in memory only while the app is unlocked. Drops zeroize the
 /// secret. The alloy signer is reconstructed transiently per call and never stored.
+#[must_use]
 pub struct UnlockedVault {
     kind: SecretKind,
     secret: Zeroizing<Vec<u8>>, // entropy (16/32) or a raw 32-byte key
@@ -411,14 +487,21 @@ impl UnlockedVault {
 
     /// The recovery phrase, for the gated reveal flow. Errors for raw-key imports.
     pub fn reveal_phrase(&self) -> anyhow::Result<Zeroizing<String>> {
-        anyhow::ensure!(self.kind.has_phrase(), "imported raw key has no recovery phrase");
+        anyhow::ensure!(
+            self.kind.has_phrase(),
+            "imported raw key has no recovery phrase"
+        );
         entropy_to_phrase(&self.secret)
     }
 }
 
 // --- crypto helpers ---
 
-fn derive_kek(passphrase: &[u8], salt: &[u8], kdf: &KdfParams) -> anyhow::Result<Zeroizing<[u8; 32]>> {
+fn derive_kek(
+    passphrase: &[u8],
+    salt: &[u8],
+    kdf: &KdfParams,
+) -> anyhow::Result<Zeroizing<[u8; 32]>> {
     let params = Params::new(kdf.m_kib, kdf.t, kdf.p, Some(32))
         .map_err(|e| anyhow::anyhow!("argon2 params: {e}"))?;
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
@@ -429,7 +512,12 @@ fn derive_kek(passphrase: &[u8], salt: &[u8], kdf: &KdfParams) -> anyhow::Result
     Ok(kek)
 }
 
-fn aead_encrypt(key: &[u8], nonce: &[u8; NONCE_LEN], msg: &[u8], aad: &[u8]) -> anyhow::Result<Vec<u8>> {
+fn aead_encrypt(
+    key: &[u8],
+    nonce: &[u8; NONCE_LEN],
+    msg: &[u8],
+    aad: &[u8],
+) -> anyhow::Result<Vec<u8>> {
     anyhow::ensure!(key.len() == 32, "bad AEAD key length");
     let cipher = XChaCha20Poly1305::new(Key::from_slice(key));
     cipher
@@ -437,7 +525,12 @@ fn aead_encrypt(key: &[u8], nonce: &[u8; NONCE_LEN], msg: &[u8], aad: &[u8]) -> 
         .map_err(|_| anyhow::anyhow!("encryption failed"))
 }
 
-fn aead_decrypt(key: &[u8], nonce: &[u8; NONCE_LEN], ct: &[u8], aad: &[u8]) -> anyhow::Result<Vec<u8>> {
+fn aead_decrypt(
+    key: &[u8],
+    nonce: &[u8; NONCE_LEN],
+    ct: &[u8],
+    aad: &[u8],
+) -> anyhow::Result<Vec<u8>> {
     anyhow::ensure!(key.len() == 32, "bad AEAD key length");
     let cipher = XChaCha20Poly1305::new(Key::from_slice(key));
     cipher
@@ -471,11 +564,16 @@ fn entropy_to_phrase(entropy: &[u8]) -> anyhow::Result<Zeroizing<String>> {
 /// Parse a hex private key that MUST be exactly 32 bytes (64 hex chars, optional `0x`).
 fn parse_exact_32(hex: &str) -> anyhow::Result<Zeroizing<Vec<u8>>> {
     let h = hex.trim().strip_prefix("0x").unwrap_or(hex.trim());
-    anyhow::ensure!(h.len() == 64, "private key must be exactly 32 bytes (64 hex chars)");
+    anyhow::ensure!(
+        h.len() == 64,
+        "private key must be exactly 32 bytes (64 hex chars)"
+    );
     let mut out = Zeroizing::new(vec![0u8; 32]);
-    for (i, chunk) in h.as_bytes().chunks(2).enumerate() {
+    // h.len() == 64 (checked above) → exactly 32 two-char chunks, matching out's 32 slots.
+    // iter_mut().zip() avoids raw indexing (clippy::indexing_slicing).
+    for (slot, chunk) in out.iter_mut().zip(h.as_bytes().chunks(2)) {
         let s = std::str::from_utf8(chunk).map_err(|_| anyhow::anyhow!("invalid hex"))?;
-        out[i] = u8::from_str_radix(s, 16).map_err(|_| anyhow::anyhow!("invalid hex"))?;
+        *slot = u8::from_str_radix(s, 16).map_err(|_| anyhow::anyhow!("invalid hex"))?;
     }
     Ok(out)
 }
@@ -490,18 +588,31 @@ impl<'a> Reader<'a> {
         Self { buf, pos: 0 }
     }
     fn take(&mut self, n: usize) -> anyhow::Result<&'a [u8]> {
-        let end = self.pos.checked_add(n).filter(|e| *e <= self.buf.len());
-        let end = end.ok_or_else(|| anyhow::anyhow!("vault truncated"))?;
-        let s = &self.buf[self.pos..end];
+        let end = self
+            .pos
+            .checked_add(n)
+            .filter(|e| *e <= self.buf.len())
+            .ok_or_else(|| anyhow::anyhow!("vault truncated"))?;
+        // `.get(range)` instead of `self.buf[pos..end]`: bounds-checked, no raw slice indexing.
+        let s = self
+            .buf
+            .get(self.pos..end)
+            .ok_or_else(|| anyhow::anyhow!("vault truncated"))?;
         self.pos = end;
         Ok(s)
     }
     fn u8(&mut self) -> anyhow::Result<u8> {
-        Ok(self.take(1)?[0])
+        self.take(1)?
+            .first()
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("vault truncated"))
     }
     fn u32(&mut self) -> anyhow::Result<u32> {
-        let b = self.take(4)?;
-        Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        let b: [u8; 4] = self
+            .take(4)?
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("vault truncated"))?;
+        Ok(u32::from_le_bytes(b))
     }
     /// Assert the whole buffer was consumed (no trailing bytes).
     fn finish(&self) -> anyhow::Result<()> {
@@ -535,6 +646,147 @@ mod tests {
     fn wrong_passphrase_fails_closed() {
         let (vault, _) = Vault::create(PW, WordCount::Twelve, KdfParams::FAST_TEST).unwrap();
         assert!(vault.unlock("wrong passphrase").is_err());
+    }
+
+    #[test]
+    fn unlock_failures_share_one_message() {
+        // Every authentication failure must surface the IDENTICAL message via the open_bytes()
+        // contract, so the unlock UI can't reveal whether the passphrase was wrong or the vault was
+        // tampered/corrupt. (Message-level only — timing is a documented, accepted residual; see
+        // Vault::open_bytes. anyhow::Error has no PartialEq, so compare rendered strings.)
+        let (vault, _) = Vault::create(PW, WordCount::Twelve, KdfParams::FAST_TEST).unwrap();
+        let good = vault.to_bytes();
+
+        // A correct passphrase still unlocks through the same path.
+        assert!(Vault::open_bytes(&good, PW).is_ok());
+
+        // `.err()` not `.unwrap_err()`: UnlockedVault is deliberately not Debug (no-leak), so
+        // unwrap_err (which would format the Ok value) won't compile — itself a guard.
+        let baseline = Vault::open_bytes(&good, "definitely the wrong passphrase")
+            .err()
+            .expect("wrong passphrase must fail to unlock")
+            .to_string();
+
+        // Tampers spanning the parser (magic/version/KDF/trailing/truncation) AND the AEAD layer —
+        // all must collapse to the same message.
+        let mut cases: Vec<Vec<u8>> = vec![
+            b"not a deckard vault".to_vec(), // bad magic
+            good[..good.len() - 1].to_vec(), // truncated
+        ];
+        let mut bad_version = good.clone();
+        bad_version[4] = 0xFF; // version byte, right after the 4-byte magic
+        cases.push(bad_version);
+        let mut bad_kdf = good.clone();
+        let m_off = 4 + 1 + 1 + VAULT_ID_LEN + 1; // m_kib: after magic+ver+kind+vault_id+kdf_id
+        bad_kdf[m_off..m_off + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        cases.push(bad_kdf);
+        let mut bad_aead = good.clone();
+        let last = bad_aead.len() - 1;
+        bad_aead[last] ^= 0x01; // flip a ciphertext/tag byte → AEAD rejects
+        cases.push(bad_aead);
+        let mut trailing = good.clone();
+        trailing.push(0x00); // trailing garbage
+        cases.push(trailing);
+
+        for (i, bad) in cases.iter().enumerate() {
+            let got = Vault::open_bytes(bad, PW)
+                .err()
+                .expect("a tampered/corrupt vault must fail to unlock")
+                .to_string();
+            assert_eq!(
+                got, baseline,
+                "case {i} produced a distinguishable unlock error"
+            );
+        }
+    }
+
+    #[test]
+    fn open_file_path_collapses_to_generic() {
+        use std::io::Write;
+        // Vault::open (the on-disk path do_unlock uses) must collapse read/size-cap/parse/AEAD
+        // failures to the same generic message as a wrong passphrase — never a distinct IO error.
+        let path = std::env::temp_dir().join("deckard-open-contract-test.bin");
+        let write = |bytes: &[u8]| {
+            let mut f = std::fs::File::create(&path).unwrap();
+            f.write_all(bytes).unwrap();
+        };
+        let open_err = || {
+            Vault::open(&path, PW)
+                .err()
+                .expect("must fail to unlock")
+                .to_string()
+        };
+
+        let (vault, _) = Vault::create(PW, WordCount::Twelve, KdfParams::FAST_TEST).unwrap();
+        write(&vault.to_bytes());
+        assert!(
+            Vault::open(&path, PW).is_ok(),
+            "a valid vault file must unlock"
+        );
+        let baseline = Vault::open(&path, "wrong passphrase")
+            .err()
+            .expect("wrong passphrase must fail")
+            .to_string();
+
+        write(b"not a deckard vault");
+        assert_eq!(open_err(), baseline, "garbage file leaked a distinct error");
+        write(&vec![0u8; 5000]); // > MAX_VAULT_BYTES (4096) → size-cap reject
+        assert_eq!(
+            open_err(),
+            baseline,
+            "oversized file leaked a distinct error"
+        );
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(open_err(), baseline, "missing file leaked a distinct error");
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    // Frozen REAL v1 vault blobs (FORMAT_VERSION 1, FAST_TEST KDF), captured once from known inputs:
+    // ENTROPY16 = the canonical 12-word "abandon…about"; ENTROPY32 = the 24-word "abandon…art";
+    // RAWKEY = 0x46*32. To regenerate after an intentional format bump, temporarily restore the
+    // gen_compat_fixtures generator (git history) and re-bake.
+    const ENTROPY16_HEX: &str = "444b5244010079a6a367eeb270d770dcf64ea3eecea801002000000100000001000000d2d7d128338ed86d7c7dd636345084a700007f1a9945fceea918f61828d5b3e4f2ea6ea7df273870ee3c02832b5966fb0a6fe0e839403d6264de00245da2de44162d03df796bd78e979470ba93c90c3998440873de456b3011a7d9135356eab7cec475ed48444e3ec3d386c0776cf238a5da200000005ebb566131a4f7c68ffdc0d6c7087b6ce3166baac57a6ce3ff408316eb90249f";
+    const ENTROPY32_HEX: &str = "444b52440101c23da1d7c70914433c40a2573da3e7330100200000010000000100000089acc8ec1a8b0a563601760609bf3d530000f8f1e8ca056fad16d8416189ea7e0f2d23f93d78bc4f5bdd6da976e6bd67bb502e354788a409a361d099f7a5a812e2dd37eeb9bd34070045b64b7820e59a10618cd3a8f496f1df57e759704f8d919604764d1c262e2b58f69d0d83c80192ff633000000033ed76cbcade5104bc27c0ae0391b2f0c44124d3c2d3c878c8f9d4a7d67811553b13e617ae10f719223a78f37e204fb4";
+    const RAWKEY_HEX: &str = "444b524401024ded6e18c437a15f07f0ec8043534b7001002000000100000001000000e2c48852b4d1e57e184ae6b73ab00011000095dc73698f21c7cfb28984a9f2da03f00ab54c722330e1f0afe4e79025b6bf37811038ccdfe9f48b7a1ce6754998e049143b30f340ebcab827cb61ec2a1e8065436187dccec035995ba5b9199d6e6340bce0e3bac70d0c32f0bf3ce94455a3a430000000caf0392f2f3b04eb0ce6b9d00c13ca62a54cf862e25248063f0bfbfaf55ba18ac08e2e325c7f1a084cdfc1a25f3c2a54";
+
+    #[test]
+    fn decode_compat_v1_fixtures() {
+        // If a future format/parser change ever stops an old on-disk vault from parsing + unlocking
+        // to the same address, that's a backward-incompatible break (lost funds) — caught here.
+        let fixtures: &[(&str, SecretKind, &str)] = &[
+            (
+                ENTROPY16_HEX,
+                SecretKind::Entropy16,
+                "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+            ),
+            (
+                ENTROPY32_HEX,
+                SecretKind::Entropy32,
+                "0xF278cF59F82eDcf871d630F28EcC8056f25C1cdb",
+            ),
+            (
+                RAWKEY_HEX,
+                SecretKind::RawKey,
+                "0x9d8A62f656a8d1615C1294fd71e9CFb3E4855A4F",
+            ),
+        ];
+        for (hex, kind, want_addr) in fixtures {
+            let bytes = unhex(hex);
+            let vault = Vault::from_bytes(&bytes).expect("v1 fixture must still parse");
+            assert_eq!(vault.secret_kind(), *kind);
+            let addr = vault
+                .unlock(PW)
+                .expect("v1 fixture must still unlock")
+                .primary_address()
+                .unwrap();
+            assert_eq!(addr.to_string(), *want_addr, "v1 fixture address drifted");
+        }
     }
 
     #[test]
@@ -583,7 +835,10 @@ mod tests {
         let (vault, _) = Vault::create(PW, WordCount::Twelve, KdfParams::FAST_TEST).unwrap();
         let mut bytes = vault.to_bytes();
         bytes.push(0x00); // one extra byte
-        assert!(Vault::from_bytes(&bytes).is_err(), "trailing garbage must be rejected");
+        assert!(
+            Vault::from_bytes(&bytes).is_err(),
+            "trailing garbage must be rejected"
+        );
     }
 
     #[test]
@@ -594,7 +849,10 @@ mod tests {
         // +m(4)+t(4)+p(4)+salt(16) = offset 51.
         let off = 4 + 1 + 1 + VAULT_ID_LEN + 1 + 4 + 4 + 4 + SALT_LEN;
         bytes[off] = 1;
-        assert!(Vault::from_bytes(&bytes).is_err(), "non-zero BIP-39 flag must be rejected");
+        assert!(
+            Vault::from_bytes(&bytes).is_err(),
+            "non-zero BIP-39 flag must be rejected"
+        );
     }
 
     #[test]
@@ -613,7 +871,10 @@ mod tests {
         let ct_actual = bytes.len(); // we'll just corrupt the declared length to huge
         let len_pos = ct_actual - vault.ct_entropy.len() - 4;
         bytes[len_pos..len_pos + 4].copy_from_slice(&u32::MAX.to_le_bytes());
-        assert!(Vault::from_bytes(&bytes).is_err(), "absurd ct length must be rejected");
+        assert!(
+            Vault::from_bytes(&bytes).is_err(),
+            "absurd ct length must be rejected"
+        );
     }
 
     #[test]
@@ -623,6 +884,9 @@ mod tests {
         // m_kib lives right after magic(4)+ver(1)+kind(1)+vault_id(16)+kdf_id(1) = offset 23.
         let off = 4 + 1 + 1 + VAULT_ID_LEN + 1;
         bytes[off..off + 4].copy_from_slice(&u32::MAX.to_le_bytes());
-        assert!(Vault::from_bytes(&bytes).is_err(), "absurd m_kib must be rejected");
+        assert!(
+            Vault::from_bytes(&bytes).is_err(),
+            "absurd m_kib must be rejected"
+        );
     }
 }

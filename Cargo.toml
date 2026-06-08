@@ -17,6 +17,18 @@ members = [
 ]
 default-members = ["crates/deckard-app"]
 
+# Lint policy lives in the manifest (not just CI flags) so rust-analyzer and `cargo check` surface
+# the exact same rules CI enforces. Every member opts in via `[lints] workspace = true`.
+# Rationale + the deliberately-rejected lints: docs/AGENTIC-ENGINEERING.md §1.
+[workspace.lints.rust]
+unused_must_use = "deny" # an ignored Result from a fallible crypto/IO call is a silent bug
+unsafe_code = "deny"     # deny (not forbid): leaves a reviewed escape hatch if objc2 ever needs raw unsafe
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 } # priority = -1 is required on a lint *group*
+todo = "deny"                           # a stray todo!() left on a code path panics in production
+dbg_macro = "deny"                      # debug noise — and dbg!(seed) is a key leak
+
 [workspace.dependencies]
 # Single-sourced versions shared across crates. deckard-contract pins to these;
 # the app and core may layer extra features on top (e.g. alloy-primitives `serde`).

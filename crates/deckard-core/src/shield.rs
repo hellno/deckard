@@ -65,14 +65,17 @@ pub fn build_shield_native_intent(
         "shield_native produced {} txs, expected exactly 1",
         txs.len()
     );
-    // Safe: just asserted len == 1.
-    let tx = txs.pop().expect("len checked == 1");
+    // `ensure!` above guarantees exactly one tx, so this never errors — propagate rather than
+    // panic (deckard-core forbids unwrap/expect/panic in non-test code).
+    let tx = txs
+        .pop()
+        .ok_or_else(|| anyhow!("shield: tx set empty after length check"))?;
 
     Ok(Intent {
         chain_id,
-        to: tx.to,        // RelayAdapt contract
-        token: None,      // native shield; the value rides as msg.value
-        value: tx.value,  // == the gross native total (wei); contract deducts the fee
+        to: tx.to,         // RelayAdapt contract
+        token: None,       // native shield; the value rides as msg.value
+        value: tx.value,   // == the gross native total (wei); contract deducts the fee
         calldata: tx.data, // RelayAdapt.multicall(wrapBase + shield)
         kind: IntentKind::Shield,
     })
@@ -100,8 +103,14 @@ mod tests {
 
         assert_eq!(intent.kind, IntentKind::Shield);
         assert_eq!(intent.token, None, "native shield carries no token");
-        assert_eq!(intent.value, value, "calldata carries the GROSS (pre-fee) value");
-        assert!(!intent.calldata.is_empty(), "shield calldata must be present");
+        assert_eq!(
+            intent.value, value,
+            "calldata carries the GROSS (pre-fee) value"
+        );
+        assert!(
+            !intent.calldata.is_empty(),
+            "shield calldata must be present"
+        );
         assert_eq!(
             intent.to, chain.relay_adapt_contract,
             "native shield targets the RelayAdapt contract"

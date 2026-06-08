@@ -17,3 +17,7 @@ serde = { workspace = true }
 # CBOR (ciborium) is the daemon-socket encoding.
 serde_json = "1"
 ciborium = "0.2"
+
+# Inherit the workspace lint policy (root Cargo.toml [workspace.lints]).
+[lints]
+workspace = true

@@ -90,3 +90,7 @@ category = "public.app-category.finance"
 short_description = "A native, self-custodial Ethereum wallet for onchain operators."
 long_description = "Deckard is a fast, keyboard-first, self-custodial Ethereum wallet for people who live onchain. Native (macOS + Linux), trustless by construction, open source (AGPL-3.0)."
 osx_minimum_system_version = "11.0"
+
+# Inherit the workspace lint policy (root Cargo.toml [workspace.lints]).
+[lints]
+workspace = true

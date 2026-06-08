@@ -1,0 +1,35 @@
+# Project-wide clippy configuration. See docs/AGENTIC-ENGINEERING.md §2.
+
+# Keep clippy's API suggestions within what the pinned toolchain supports.
+msrv = "1.95.0"
+
+# These pair with deckard-core's crate-level restriction lints (unwrap_used/expect_used/panic, denied
+# in its lib.rs): production code must not unwrap/expect/panic, but test code may freely. Without these
+# keys the deny would also fire inside #[cfg(test)].
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true # tamper tests index byte offsets on purpose
+
+# Crypto / Ethereum jargon that would otherwise trip clippy::doc_markdown. ".." keeps clippy's
+# built-in default identifier list (GitHub, OAuth, ...) and extends it.
+doc-valid-idents = [
+    "..",
+    "BIP-39",
+    "BIP-32",
+    "EIP-1559",
+    "ERC-20",
+    "XChaCha20",
+    "Argon2id",
+    "ChaCha20-Poly1305",
+    "secp256k1",
+    "keccak",
+    "Multicall3",
+]
+
+# Wallet-specific footguns, banned by construction (both are unused today, so zero migration cost).
+disallowed-methods = [
+    { path = "std::mem::forget", reason = "skips Drop, so skips zeroize scrubbing of key material; use drop()" },
+    { path = "core::mem::forget", reason = "same as std::mem::forget (re-export) — skips zeroize scrubbing; use drop()" },
+    { path = "rand::thread_rng", reason = "use OsRng for anything key-derived (keystore.rs already does)" },
+]

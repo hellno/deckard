@@ -102,7 +102,9 @@ impl Shell {
 
         let name_control = Input::new(&self.name_input).w(px(220.0)).into_any_element();
         let rpc_control = Input::new(&self.rpc_input).w(px(260.0)).into_any_element();
-        let watch_control = Input::new(&self.watch_input).w(px(260.0)).into_any_element();
+        let watch_control = Input::new(&self.watch_input)
+            .w(px(260.0))
+            .into_any_element();
 
         let launch_control = Switch::new("launch-min")
             .checked(self.settings.launch_minimized)
