@@ -20,11 +20,10 @@ use gpui_component::{
     v_flex, ActiveTheme, Disableable, Icon, IconName,
 };
 
-use deckard_contract::Intent;
 use deckard_core::U256;
 
 use crate::money::money;
-use crate::shell::{Shell, Surface, SHIELD_HOLD};
+use crate::shell::{Shell, ShieldProposal, Surface, SHIELD_HOLD};
 use crate::theme;
 
 /// The Railgun shield fee, 25 bps (0.25%) — matches `deckard_core::shield`'s on-chain
@@ -50,8 +49,8 @@ impl Shell {
                 .render_shield_done(tx.to_string(), cx)
                 .into_any_element();
         }
-        if let Some((intent, _)) = self.shield_proposal.clone() {
-            return self.render_shield_review(intent, cx).into_any_element();
+        if let Some(proposal) = self.shield_proposal.clone() {
+            return self.render_shield_review(proposal, cx).into_any_element();
         }
         self.render_shield_compose(cx).into_any_element()
     }
@@ -63,6 +62,15 @@ impl Shell {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
         let busy = self.shield_busy;
+
+        // Validity drives the Review button's disabled state (DESIGN: disable a primary
+        // action on incomplete/invalid input). Re-evaluated live via the input subscriptions.
+        let amount_raw = self.shield_amount.read(cx).value().to_string();
+        let recipient_raw = self.shield_recipient.read(cx).value().to_string();
+        let can_review = crate::signer::parse_eth_to_wei(&amount_raw)
+            .map(|w| w > U256::ZERO)
+            .unwrap_or(false)
+            && !recipient_raw.trim().is_empty();
 
         self.shield_shell(
             v_flex()
@@ -96,7 +104,7 @@ impl Shell {
                             Button::new("shield-review")
                                 .primary()
                                 .label(if busy { "Reviewing…" } else { "Review deposit" })
-                                .disabled(busy)
+                                .disabled(busy || !can_review)
                                 .on_click(cx.listener(|this, _, _, cx| this.review_shield(cx))),
                         )
                         .child(
@@ -120,7 +128,11 @@ impl Shell {
 
     /// Review: the clear-signing card (amount / recipient / fee / net) + the three honesty
     /// lines + a deliberate hold-to-confirm. `intent` carries the gross (pre-fee) value.
-    fn render_shield_review(&self, intent: Intent, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_shield_review(
+        &self,
+        proposal: ShieldProposal,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let theme = cx.theme();
         let fg = theme.foreground;
         let muted = theme.muted_foreground;
@@ -128,10 +140,12 @@ impl Shell {
         let surface = theme.secondary;
         let mono = theme.mono_font_family.clone();
 
-        let gross = intent.value;
+        // Render from the proposal SNAPSHOT — the amount + recipient that are actually inside
+        // the signed intent — never the live input (which the user could have since edited).
+        let gross = proposal.intent.value;
         let fee = shield_fee(gross);
         let net = gross.saturating_sub(fee);
-        let recipient = self.shield_recipient.read(cx).value().to_string();
+        let recipient = proposal.recipient.clone();
 
         // One key/value row: label left (muted), value right (mono-for-money or mono text).
         let kv_money = |label: &'static str, wei: U256| {
