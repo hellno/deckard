@@ -12,8 +12,6 @@ use directories::ProjectDirs;
 use gpui_component::ThemeMode;
 use serde::{Deserialize, Serialize};
 
-use crate::theme::Accent;
-
 // Reverse-DNS used for the config dir. Matches the bundle identifier
 // (`com.deckard.app`) and the wallet keystore dir, so settings + keystore share one
 // location. (qualifier, organization, application)
@@ -45,7 +43,6 @@ impl ThemeModePref {
 #[serde(default)]
 pub struct Settings {
     pub theme_mode: ThemeModePref,
-    pub accent: Accent,
     pub display_name: String,
     pub launch_minimized: bool,
     /// Custom Ethereum RPC URL (bring-your-own-RPC). Empty = the bundled default.
@@ -54,17 +51,26 @@ pub struct Settings {
     /// A read-only address or ENS name to view instead of the active wallet. Empty =
     /// show the wallet. Lets an operator watch any address (e.g. `vitalik.eth`).
     pub watch_address: String,
+    /// Privacy mask: replace every money figure with fixed-length bullets. Unlike the
+    /// seed reveal (momentary, default-hidden), the mask is **persisted-once-on** — a
+    /// stated preference that survives relaunch. Default OFF.
+    pub mask_balances: bool,
+    /// macOS screen-capture block (NSWindow sharingType = none) tied to the mask. Opt-in,
+    /// **default OFF** — for a demo recording it stays off, or the capture itself is
+    /// blocked. Only takes effect in a `--features tray` macOS build (reuses that dep).
+    pub capture_block: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             theme_mode: ThemeModePref::Dark,
-            accent: Accent::default(),
             display_name: String::new(),
             launch_minimized: false,
             rpc_url: String::new(),
             watch_address: String::new(),
+            mask_balances: false,
+            capture_block: false,
         }
     }
 }

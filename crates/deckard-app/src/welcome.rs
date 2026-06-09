@@ -3,15 +3,33 @@
 //! live over Multicall3 (`deckard-core`). Renders instantly from the last cached
 //! snapshot; the only loading state is the very first sync.
 
-use gpui::{div, px, Context, FontWeight, IntoElement, ParentElement, Styled};
+use gpui::prelude::FluentBuilder;
+use gpui::{
+    div, px, relative, Context, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement,
+    SharedString, StatefulInteractiveElement, Styled,
+};
 use gpui_component::{
     button::{Button, ButtonVariants},
     h_flex, v_flex, ActiveTheme, Disableable, IconName,
 };
 
-use deckard_core::format_amount;
+use deckard_core::U256;
 
-use crate::shell::{Route, Shell};
+use crate::money::money;
+use crate::shell::{Shell, Surface};
+use crate::shell_chrome::agent_squircle;
+use crate::theme;
+
+/// One row in the holdings table. Carries the raw balance (not a pre-formatted
+/// string) so the amount column can render mono-for-money with dimmed decimals.
+struct Holding {
+    mark: String,
+    name: String,
+    symbol: String,
+    raw: U256,
+    decimals: u8,
+    max_frac: usize,
+}
 
 /// The primary modifier label, per platform (⌘ on macOS, "Ctrl " elsewhere).
 #[cfg(target_os = "macos")]
@@ -29,13 +47,17 @@ fn short_addr(a: &str) -> String {
 }
 
 impl Shell {
-    pub fn render_welcome(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The selected wallet's home — a left-anchored, scrollable main pane:
+    /// wallet-name H1 + address subtitle, the balance hero, Send/Receive/Swap,
+    /// then live holdings. The synced/trust status line lives in the bottom
+    /// status strip (`shell_chrome.rs`), not here.
+    pub fn render_wallet_home(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let fg = theme.foreground;
         let muted = theme.muted_foreground;
         let border = theme.border;
         let surface = theme.secondary;
-        let accent = theme.primary;
+        let mono: SharedString = theme.mono_font_family.clone();
 
         // A small bordered key-hint chip, e.g. ⌘K.
         let chip = move |keys: String, label: String| {
@@ -62,30 +84,33 @@ impl Shell {
         let account_pill = short_addr(&addr_str);
         let first_sync = self.portfolio_loading && self.portfolio.is_none();
 
-        let native_str = self
-            .portfolio
-            .as_ref()
-            .map(|p| format_amount(p.native_wei, 18, 4))
-            .unwrap_or_else(|| "—".to_string());
+        // The native ETH balance for the hero — `None` until the first sync lands.
+        let native_wei = self.portfolio.as_ref().map(|p| p.native_wei);
 
-        // Holdings rows: ETH first, then each non-zero listed token.
-        let mut holdings: Vec<(String, String, String, String)> = Vec::new();
+        // Holdings rows: ETH first, then each listed token. Each row carries the
+        // raw value + decimals + frac so the amount column renders mono-for-money
+        // (dimmed decimals) rather than a single-color string.
+        let mut holdings: Vec<Holding> = Vec::new();
         if let Some(p) = &self.portfolio {
-            holdings.push((
-                "Ξ".into(),
-                "Ethereum".into(),
-                "ETH".into(),
-                format_amount(p.native_wei, 18, 4),
-            ));
+            holdings.push(Holding {
+                mark: "Ξ".into(),
+                name: "Ethereum".into(),
+                symbol: "ETH".into(),
+                raw: p.native_wei,
+                decimals: 18,
+                max_frac: 4,
+            });
             for t in &p.tokens {
                 let frac = if t.decimals <= 6 { 2 } else { 4 };
                 let mark = t.symbol.chars().next().unwrap_or('•').to_string();
-                holdings.push((
+                holdings.push(Holding {
                     mark,
-                    t.name.to_string(),
-                    t.symbol.to_string(),
-                    format_amount(t.raw, t.decimals, frac),
-                ));
+                    name: t.name.to_string(),
+                    symbol: t.symbol.to_string(),
+                    raw: t.raw,
+                    decimals: t.decimals,
+                    max_frac: frac,
+                });
             }
         }
         let has_tokens = self
@@ -94,117 +119,91 @@ impl Shell {
             .map(|p| !p.tokens.is_empty())
             .unwrap_or(false);
 
-        // Status sub-line: synced block, watching tag, or an error. When a read carries a
-        // non-Verified trust label, surface it: a balance is never shown as quietly trusted.
-        let trust_tag = match &self.read_status {
-            Some(deckard_core::ReadStatus::Verified) => " · verified",
-            Some(deckard_core::ReadStatus::Degraded { .. }) => " · degraded",
-            Some(deckard_core::ReadStatus::Unsynced { .. }) => " · NOT VERIFIED",
-            None => "",
-        };
-        let status_line = if let Some(err) = &self.portfolio_error {
-            format!("⚠ {err}")
-        } else if first_sync {
-            "Syncing over Ethereum…".to_string()
-        } else if let Some(block) = self.synced_block {
-            let net = if self.viewing_watch {
-                "watching · "
-            } else {
-                ""
-            };
-            format!("{net}synced · block {block}{trust_tag}")
+        // Wallet identity for the header: a desaturated, tinted-neutral square
+        // (DESIGN rule 4 — identity squares avoid the warm/amber band).
+        let id_square = theme::identity_square(theme.is_dark());
+        let wallet_name = if self.viewing_watch {
+            "Watched account".to_string()
         } else {
-            "Ethereum mainnet".to_string()
-        };
-        // An unverified read is a soft warning (the value may not be trustless), not a hard error.
-        let unverified = matches!(
-            self.read_status,
-            Some(deckard_core::ReadStatus::Unsynced { .. })
-        );
-        let status_color = if self.portfolio_error.is_some() {
-            theme.danger
-        } else if unverified {
-            theme.warning
-        } else {
-            muted
+            "Personal".to_string()
         };
 
         div()
-            .flex_1()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
+            .size_full()
+            .p_8()
+            // TODO(scroll): restore a scrollable main pane via a Stateful
+            // `div().id(..).overflow_y_scroll()` (the agent draft mis-ordered
+            // gpui-component's `overflow_y_scrollbar`). Content is short for now.
             .child(
                 v_flex()
-                    .w(px(460.0))
+                    .items_start()
+                    .max_w(px(680.0))
                     .gap_6()
-                    // Header: section label + account pill + refresh.
+                    // Page header (DESIGN §Page header): identity square + wallet-name
+                    // H1 (text.primary, weight 600 — NEVER cyan) + a muted mono,
+                    // middle-truncated address subtitle.
                     .child(
                         h_flex()
                             .w_full()
                             .items_center()
                             .justify_between()
-                            .child(div().text_sm().text_color(muted).child("Portfolio"))
                             .child(
                                 h_flex()
                                     .items_center()
-                                    .gap_2()
+                                    .gap_3()
+                                    .child(div().size(px(28.0)).rounded(px(6.0)).bg(id_square))
                                     .child(
-                                        div()
-                                            .px_2p5()
-                                            .py_1()
-                                            .rounded_full()
-                                            .border_1()
-                                            .border_color(if self.viewing_watch {
-                                                accent
-                                            } else {
-                                                border
-                                            })
-                                            .bg(surface)
-                                            .text_xs()
-                                            .text_color(fg)
-                                            .child(account_pill),
-                                    )
-                                    .child(
-                                        Button::new("refresh")
-                                            .ghost()
-                                            .icon(IconName::Replace)
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.refresh_portfolio(cx)
-                                            })),
+                                        v_flex()
+                                            .gap_0p5()
+                                            .child(
+                                                div()
+                                                    .text_xl()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(fg)
+                                                    .child(wallet_name),
+                                            )
+                                            .child(
+                                                div()
+                                                    .font_family(mono.clone())
+                                                    .text_xs()
+                                                    .text_color(muted)
+                                                    .child(account_pill),
+                                            ),
+                                    ),
+                            )
+                            .child(
+                                Button::new("refresh")
+                                    .ghost()
+                                    .icon(IconName::Replace)
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.refresh_portfolio(cx)),
                                     ),
                             ),
                     )
-                    // Total: native ETH balance + status sub-line.
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(
-                                h_flex()
-                                    .items_baseline()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .text_3xl()
-                                            .font_weight(FontWeight::BOLD)
-                                            .text_color(fg)
-                                            .child(native_str),
-                                    )
-                                    .child(div().text_lg().text_color(muted).child("ETH")),
-                            )
-                            .child(div().text_sm().text_color(status_color).child(status_line)),
-                    )
-                    // Primary actions. Send + Swap are gated to the next release (Chunk 4,
-                    // testnet-first), so they're shown disabled rather than inert-but-active.
+                    // Balance hero: the merged Total (public + private), a Private/Public
+                    // allocation bar, and the composition lines (Wave 2 T10).
+                    .child(self.render_shielded_hero(native_wei, cx))
+                    // Primary actions. Shield (the privacy hero) is the one live, primary
+                    // CTA; Send + Swap are gated to the next release (Chunk 4, testnet-first)
+                    // and shown disabled rather than inert-but-active.
                     .child(
                         h_flex()
                             .w_full()
                             .gap_2()
-                            .child(Button::new("send").primary().label("Send").disabled(true))
+                            // Shield signs from YOUR wallet, so it's disabled while viewing a
+                            // watched read-only account (don't show a funds-moving action in a
+                            // someone-else's-address context).
+                            .child(
+                                Button::new("shield")
+                                    .primary()
+                                    .label("Shield")
+                                    .disabled(self.viewing_watch)
+                                    .on_click(cx.listener(|this, _, _, cx| this.open_shield(cx))),
+                            )
                             .child(Button::new("receive").ghost().label("Receive").on_click(
-                                cx.listener(|this, _, _, cx| this.navigate(Route::Receive, cx)),
+                                cx.listener(|this, _, _, cx| this.open(Surface::Receive, cx)),
                             ))
+                            .child(Button::new("send").ghost().label("Send").disabled(true))
                             .child(Button::new("swap").ghost().label("Swap").disabled(true)),
                     )
                     .child(
@@ -227,17 +226,156 @@ impl Shell {
             )
     }
 
+    /// The merged Total hero (Wave 2 T10): `Total = public + private` when both are known, a
+    /// Private/Public allocation bar (Private first, neutral shield tone — off the actor axis),
+    /// and the composition lines. While the private sync runs the total stays the known public
+    /// (never `public + 0`) and the private line reads "syncing…". Clicking the Total masks it.
+    fn render_shielded_hero(
+        &self,
+        native_wei: Option<U256>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme();
+        let fg = theme.foreground;
+        let muted = theme.muted_foreground;
+        let border = theme.border;
+        let mono: SharedString = theme.mono_font_family.clone();
+        let masked = self.mask;
+        let is_dark = theme.is_dark();
+        let public_tone = theme::identity_square(is_dark);
+        let shield_tone = theme::shield(is_dark);
+
+        let snap = self.shielded.as_ref().map(|h| h.snapshot());
+        let private_wei = snap.as_ref().and_then(|s| s.shielded_wei);
+        let syncing = snap.as_ref().map(|s| s.syncing).unwrap_or(false);
+        let public = native_wei;
+
+        // Total: sum only when the private side is known; never `public + 0` while syncing.
+        let total = match (public, private_wei) {
+            (Some(p), Some(s)) => Some(p.saturating_add(s)),
+            (Some(p), None) => Some(p),
+            _ => None,
+        };
+
+        let hero = div()
+            .id("balance-hero")
+            .cursor_pointer()
+            .text_3xl()
+            .font_weight(FontWeight::SEMIBOLD)
+            .map(|el| match total {
+                Some(wei) => el.child(money(
+                    wei,
+                    18,
+                    4,
+                    Some("ETH"),
+                    masked,
+                    mono.clone(),
+                    fg,
+                    muted,
+                )),
+                None => el.font_family(mono.clone()).text_color(muted).child("—"),
+            })
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_mask(cx)));
+
+        // No balance yet (first sync): just the placeholder hero.
+        let Some(pub_wei) = public else {
+            return v_flex().w_full().gap_3().child(hero).into_any_element();
+        };
+
+        // A real Private/Public split once the private side is known, else a single Public bar.
+        let bar = match private_wei {
+            Some(priv_wei) => {
+                let total_wei = pub_wei.saturating_add(priv_wei);
+                allocation_bar(
+                    vec![
+                        AllocSegment {
+                            label: "Private".into(),
+                            fraction: fraction(priv_wei, total_wei),
+                            tone: shield_tone,
+                        },
+                        AllocSegment {
+                            label: "Public".into(),
+                            fraction: fraction(pub_wei, total_wei),
+                            tone: public_tone,
+                        },
+                    ],
+                    masked,
+                    border,
+                    muted,
+                    fg,
+                )
+            }
+            None => allocation_bar(
+                vec![AllocSegment {
+                    label: "Public".into(),
+                    fraction: 1.0,
+                    tone: public_tone,
+                }],
+                masked,
+                border,
+                muted,
+                fg,
+            ),
+        };
+
+        // Label the hero honestly: a real Total once private is known, otherwise public-only
+        // (so the big figure is never read as "public + 0" while the private side syncs).
+        let caption = match (private_wei, snap.is_some()) {
+            (Some(_), _) => "Total",
+            (None, true) => "Public · private balance still syncing",
+            (None, false) => "",
+        };
+
+        v_flex()
+            .w_full()
+            .gap_3()
+            .child(hero)
+            .children((!caption.is_empty()).then(|| div().text_xs().text_color(muted).child(caption)))
+            .child(bar)
+            .child(
+                v_flex()
+                    .w_full()
+                    .gap_1()
+                    .child(composition_line(
+                        "Private",
+                        shield_tone,
+                        private_wei,
+                        syncing,
+                        masked,
+                        mono.clone(),
+                        fg,
+                        muted,
+                    ))
+                    .child(composition_line(
+                        "Public",
+                        public_tone,
+                        Some(pub_wei),
+                        false,
+                        masked,
+                        mono.clone(),
+                        fg,
+                        muted,
+                    )),
+            )
+            .child(div().text_xs().text_color(muted).child(
+                "Private is WETH-equivalent, net of the 0.25% fee, and synced over raw RPC (not independently verified).",
+            ))
+            .into_any_element()
+    }
+
     /// The holdings region: skeleton on first sync, empty-state when nothing held,
     /// otherwise the live rows plus the listed-tokens-only caveat.
     fn render_holdings(
         &self,
         first_sync: bool,
         has_tokens: bool,
-        holdings: Vec<(String, String, String, String)>,
+        holdings: Vec<Holding>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
+        let mono: SharedString = theme.mono_font_family.clone();
+        let masked = self.mask;
 
         let mut col = v_flex().w_full().gap_2();
 
@@ -279,17 +417,21 @@ impl Shell {
                 .into_any_element();
         }
 
-        for (mark, name, symbol, amount) in holdings {
+        for h in holdings {
             col = col.child(render_row(
                 theme.foreground,
                 theme.muted_foreground,
                 theme.border,
                 theme.secondary,
                 theme.muted,
-                mark,
-                name,
-                symbol,
-                amount,
+                h.mark,
+                h.name,
+                h.symbol,
+                h.raw,
+                h.decimals,
+                h.max_frac,
+                masked,
+                mono.clone(),
             ));
         }
         if !has_tokens {
@@ -311,6 +453,323 @@ impl Shell {
         }
         col.into_any_element()
     }
+
+    /// Project home — the aggregate-of-one for the demo's single project: the
+    /// wallet's balance plus a one-line composition (1 wallet · 1 agent). Real
+    /// multi-wallet aggregation is fast-follow.
+    pub fn render_project_home(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let fg = theme.foreground;
+        let muted = theme.muted_foreground;
+        let border = theme.border;
+        let mono: SharedString = theme.mono_font_family.clone();
+        let id_square = theme::identity_square(theme.is_dark());
+        let masked = self.mask;
+
+        let native_wei = self.portfolio.as_ref().map(|p| p.native_wei);
+
+        div()
+            .size_full()
+            .p_8()
+            // TODO(scroll): restore a scrollable main pane via a Stateful
+            // `div().id(..).overflow_y_scroll()` (the agent draft mis-ordered
+            // gpui-component's `overflow_y_scrollbar`). Content is short for now.
+            .child(
+                v_flex()
+                    .items_start()
+                    .max_w(px(680.0))
+                    .gap_6()
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_3()
+                            .child(div().size(px(28.0)).rounded(px(6.0)).bg(id_square))
+                            .child(
+                                div()
+                                    .text_xl()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(fg)
+                                    .child("Personal"),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .id("project-balance-hero")
+                                    .cursor_pointer()
+                                    .text_3xl()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .map(|el| match native_wei {
+                                        Some(wei) => el.child(money(
+                                            wei,
+                                            18,
+                                            4,
+                                            Some("ETH"),
+                                            masked,
+                                            mono.clone(),
+                                            fg,
+                                            muted,
+                                        )),
+                                        None => el
+                                            .font_family(mono.clone())
+                                            .text_color(muted)
+                                            .child("—"),
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| this.toggle_mask(cx))),
+                            )
+                            .children(native_wei.map(|_| {
+                                allocation_bar(
+                                    vec![AllocSegment {
+                                        label: "Public".into(),
+                                        fraction: 1.0,
+                                        tone: id_square,
+                                    }],
+                                    masked,
+                                    border,
+                                    muted,
+                                    fg,
+                                )
+                            })),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(muted)
+                            .child("1 wallet · 1 agent"),
+                    ),
+            )
+    }
+
+    /// Agent home — a static, demo-scoped policy-card placeholder (DESIGN §Policy
+    /// card): 2-column label/value pairs grouped by whitespace in one faint frame,
+    /// no interior grid lines. Agent "Atlas" is the openly-narrated manual stand-in
+    /// for v1 (real Claude-Desktop-via-MCP is fast-follow), so the values are
+    /// static. The agent identity (cyan) lives only on the squircle glyph.
+    pub fn render_agent_home(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let fg = theme.foreground;
+        let muted = theme.muted_foreground;
+        let border = theme.border;
+        let surface = theme.secondary;
+        let mono: SharedString = theme.mono_font_family.clone();
+        let is_dark = theme.is_dark();
+        let agent = theme::agent(is_dark);
+        let agent_tint = theme::agent_tint(is_dark);
+
+        // One policy row: label left (muted), value right (mono, primary). No
+        // per-row hairline — grouping is whitespace.
+        let mono_for_row = mono.clone();
+        let policy_row = move |label: &'static str, value: &'static str| {
+            h_flex()
+                .w_full()
+                .justify_between()
+                .items_center()
+                .py_1p5()
+                .child(div().text_sm().text_color(muted).child(label))
+                .child(
+                    div()
+                        .font_family(mono_for_row.clone())
+                        .text_sm()
+                        .text_color(fg)
+                        .child(value),
+                )
+        };
+
+        div()
+            .size_full()
+            .p_8()
+            // TODO(scroll): restore a scrollable main pane via a Stateful
+            // `div().id(..).overflow_y_scroll()` (the agent draft mis-ordered
+            // gpui-component's `overflow_y_scrollbar`). Content is short for now.
+            .child(
+                v_flex()
+                    .items_start()
+                    .max_w(px(680.0))
+                    .gap_6()
+                    // Header: cyan squircle monogram (the ONLY cyan on the surface,
+                    // breathing while Atlas acts) + agent name H1 (text.primary, NEVER cyan).
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_3()
+                            .child(agent_squircle(
+                                px(28.0),
+                                px(6.0),
+                                self.agent_acting,
+                                agent,
+                                agent_tint,
+                                "agent-pulse-home",
+                            ))
+                            .child(
+                                v_flex()
+                                    .gap_0p5()
+                                    .child(
+                                        div()
+                                            .text_xl()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(fg)
+                                            .child("Atlas"),
+                                    )
+                                    .child(div().text_xs().text_color(muted).child(
+                                        if self.agent_acting {
+                                            "Delegated agent · acting now"
+                                        } else {
+                                            "Delegated agent · idle"
+                                        },
+                                    )),
+                            ),
+                    )
+                    // Policy card: one faint frame, no interior grid lines.
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .gap_0()
+                            .p_4()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(border)
+                            .bg(surface)
+                            .child(policy_row("Per-transaction cap", "0.10 ETH"))
+                            .child(policy_row("Period budget", "1.00 ETH / week"))
+                            .child(policy_row("Allowed assets", "ETH"))
+                            .child(policy_row("Session key", "expires in 6d"))
+                            .child(policy_row("Autonomy", "act < $50 · ask above")),
+                    )
+                    // Demo control: narrate Atlas "acting" to show the one ambient motion
+                    // (the breathing squircle). Real activity arrives with the MCP agent.
+                    .child(
+                        Button::new("toggle-agent-acting")
+                            .ghost()
+                            .label(if self.agent_acting {
+                                "Stop activity (demo)"
+                            } else {
+                                "Simulate activity (demo)"
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_agent_acting(cx))),
+                    )
+                    .child(
+                        div().text_xs().text_color(muted).child(
+                            "Atlas is a manual stand-in for the demo. Controls land with MCP.",
+                        ),
+                    ),
+            )
+    }
+}
+
+/// One segment of the [`allocation_bar`]: a label, its share of the whole (0..=1),
+/// and a low-chroma tone. Wave 2 feeds it Private/Public; v1 passes a single Public.
+struct AllocSegment {
+    label: SharedString,
+    fraction: f32,
+    tone: Hsla,
+}
+
+/// A thin Splits-style allocation bar (DESIGN §Balance hero): low-chroma tonal
+/// segments (never amber, rule 5) over a neutral track, each non-zero segment kept
+/// ≥3px wide so it stays visible, with a small legend below. When `masked`, the
+/// composition is itself private — the bar collapses to one flat neutral track with no
+/// legend (part of what the privacy mask hides).
+fn allocation_bar(
+    segments: Vec<AllocSegment>,
+    masked: bool,
+    track: Hsla,
+    muted: Hsla,
+    fg: Hsla,
+) -> impl IntoElement {
+    // Masked → a single flat neutral bar, no segments, no legend.
+    if masked {
+        return div()
+            .w_full()
+            .h(px(8.0))
+            .rounded(px(3.0))
+            .bg(track)
+            .into_any_element();
+    }
+
+    // The tonal bar: each segment a fraction of the width, ≥3px, clipped to the rounding.
+    let mut bar = h_flex()
+        .w_full()
+        .h(px(8.0))
+        .rounded(px(3.0))
+        .bg(track)
+        .overflow_hidden();
+    for seg in &segments {
+        let frac = seg.fraction.clamp(0.0, 1.0);
+        // A zero-value segment is omitted — the ≥3px minimum is only for a NON-zero share
+        // (DESIGN §Balance hero), so an empty Private slice never shows a phantom sliver.
+        if frac <= 0.0 {
+            continue;
+        }
+        bar = bar.child(
+            div()
+                .h_full()
+                .flex_shrink_0()
+                .min_w(px(3.0))
+                .w(relative(frac))
+                .bg(seg.tone),
+        );
+    }
+
+    // The legend: a tone chip + label + percentage per segment.
+    let mut legend = h_flex().gap_4();
+    for seg in &segments {
+        let pct = (seg.fraction.clamp(0.0, 1.0) * 100.0).round() as u32;
+        legend = legend.child(
+            h_flex()
+                .items_center()
+                .gap_1p5()
+                .child(div().size(px(8.0)).rounded(px(2.0)).bg(seg.tone))
+                .child(div().text_xs().text_color(fg).child(seg.label.clone()))
+                .child(div().text_xs().text_color(muted).child(format!("{pct}%"))),
+        );
+    }
+
+    v_flex()
+        .w_full()
+        .gap_2()
+        .child(bar)
+        .child(legend)
+        .into_any_element()
+}
+
+/// `part / total` as a 0..=1 fraction, via integer (bps) math — f32 only at the edge so a
+/// huge `U256` can't lose precision in the ratio. Zero `total` → 0.
+fn fraction(part: U256, total: U256) -> f32 {
+    if total.is_zero() {
+        return 0.0;
+    }
+    let bps = (part.saturating_mul(U256::from(10_000u64)) / total).min(U256::from(10_000u64));
+    let bps: u64 = bps.try_into().unwrap_or(0);
+    bps as f32 / 10_000.0
+}
+
+/// One composition line: a tone chip + label + the (maskable) amount, or "syncing…" while the
+/// private side hasn't landed (never a fake zero).
+#[allow(clippy::too_many_arguments)]
+fn composition_line(
+    label: &'static str,
+    tone: Hsla,
+    wei: Option<U256>,
+    syncing: bool,
+    masked: bool,
+    mono: SharedString,
+    fg: Hsla,
+    muted: Hsla,
+) -> impl IntoElement {
+    h_flex()
+        .w_full()
+        .items_center()
+        .gap_2()
+        .child(div().size(px(8.0)).rounded(px(2.0)).bg(tone))
+        .child(div().flex_1().text_xs().text_color(muted).child(label))
+        .child(div().text_xs().map(|el| match wei {
+            Some(w) => el.child(money(w, 18, 4, Some("ETH"), masked, mono, fg, muted)),
+            None if syncing => el.text_color(muted).child("syncing…"),
+            None => el.text_color(muted).child("—"),
+        }))
 }
 
 /// A shimmer-free skeleton placeholder row for the first-sync state.
@@ -341,12 +800,16 @@ fn render_row(
     fg: gpui::Hsla,
     muted: gpui::Hsla,
     border: gpui::Hsla,
-    surface: gpui::Hsla,
+    _surface: gpui::Hsla,
     mark_bg: gpui::Hsla,
     mark: String,
     name: String,
     symbol: String,
-    amount: String,
+    raw: U256,
+    decimals: u8,
+    max_frac: usize,
+    masked: bool,
+    mono: SharedString,
 ) -> impl IntoElement {
     h_flex()
         .w_full()
@@ -354,10 +817,10 @@ fn render_row(
         .justify_between()
         .px_4()
         .py_3()
-        .rounded_lg()
-        .border_1()
+        // DESIGN §Holdings table: tight rows, hairline row separators only —
+        // no per-row card frame, no fill.
+        .border_b_1()
         .border_color(border)
-        .bg(surface)
         .child(
             h_flex()
                 .items_center()
@@ -365,7 +828,9 @@ fn render_row(
                 .child(
                     div()
                         .size(px(34.0))
-                        .rounded_full()
+                        // DESIGN §Radii: a desaturated token SQUARE (6px), not a
+                        // round identicon (round is reserved for the human principal).
+                        .rounded(px(6.0))
                         .bg(mark_bg)
                         .flex()
                         .items_center()
@@ -391,11 +856,7 @@ fn render_row(
                         .child(div().text_xs().text_color(muted).child(symbol)),
                 ),
         )
-        .child(
-            div()
-                .text_sm()
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(fg)
-                .child(amount),
-        )
+        .child(div().text_sm().child(money(
+            raw, decimals, max_frac, None, masked, mono, fg, muted,
+        )))
 }

@@ -7,12 +7,16 @@
 //! Fork checklist: rename the crate in `Cargo.toml`, change `APP_NAME` and the
 //! bundle identifier, swap `assets/icon.png`, then start editing the views.
 
+mod capture;
+mod money;
 mod onboarding;
 mod palette;
 mod receive;
 mod settings;
 mod settings_view;
 mod shell;
+mod shell_chrome;
+mod shield_view;
 mod signer;
 mod theme;
 #[cfg(feature = "tray")]
@@ -43,7 +47,8 @@ gpui::actions!(
         ToggleTheme,
         NewItem,
         GoBack,
-        TogglePalette
+        TogglePalette,
+        ToggleMask
     ]
 );
 
@@ -58,11 +63,33 @@ fn main() {
             // 1. Bring up gpui-component (themes, fonts, icon assets, input system).
             gpui_component::init(cx);
 
+            // 1b. Register the bundled offline fonts (no web-font CDN). The theme
+            //     sets the family names ("General Sans" / "JetBrains Mono"); GPUI
+            //     silently falls back to the system font until the files exist, so
+            //     the family-name config alone is safe to ship now.
+            //
+            // TODO(fonts): a human must drop the licensed font files into
+            //   crates/deckard-app/assets/fonts/ (see that dir's README.md), then
+            //   uncomment the block below to embed + register them. Do NOT
+            //   uncomment before the files exist — `include_bytes!` of a missing
+            //   path is a compile error.
+            //
+            // use std::borrow::Cow;
+            // cx.text_system()
+            //     .add_fonts(vec![
+            //         Cow::Borrowed(include_bytes!("../assets/fonts/GeneralSans-Regular.otf").as_slice()),
+            //         Cow::Borrowed(include_bytes!("../assets/fonts/GeneralSans-Medium.otf").as_slice()),
+            //         Cow::Borrowed(include_bytes!("../assets/fonts/GeneralSans-Semibold.otf").as_slice()),
+            //         Cow::Borrowed(include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf").as_slice()),
+            //         Cow::Borrowed(include_bytes!("../assets/fonts/JetBrainsMono-Medium.ttf").as_slice()),
+            //     ])
+            //     // reason: bundled fonts are a build-time invariant; a failure here
+            //     // is a packaging bug we want to surface loudly at startup.
+            //     .expect("bundled fonts failed to register");
+
             // 2. Load persisted preferences and install the refined theme from them.
             let settings = Settings::load();
-            #[cfg(feature = "tray")]
-            let accent = settings.accent;
-            theme::install(cx, settings.accent, settings.theme_mode.to_gpui());
+            theme::install(cx, settings.theme_mode.to_gpui());
 
             // 3. Keyboard shortcuts. `secondary` = ⌘ on macOS, Ctrl on Linux /
             //    Windows — so these are portable. Context `None` = global.
@@ -73,6 +100,7 @@ fn main() {
                 KeyBinding::new("secondary-shift-d", ToggleTheme, None),
                 KeyBinding::new("secondary-[", GoBack, None),
                 KeyBinding::new("secondary-k", TogglePalette, None),
+                KeyBinding::new("secondary-shift-m", ToggleMask, None),
             ]);
 
             // 4. Global action handlers. View-local actions (NewItem, OpenSettings,
@@ -138,9 +166,9 @@ fn main() {
             .expect("failed to open window");
 
             // Optional: native menu-bar tray icon + dock hiding (`--features tray`).
-            // The tray icon uses the saved accent and restyles live when changed.
+            // The tray icon uses a fixed brand color.
             #[cfg(feature = "tray")]
-            tray::install(cx, accent);
+            tray::install(cx);
 
             cx.activate(true);
         });

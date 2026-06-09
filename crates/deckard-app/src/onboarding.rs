@@ -373,7 +373,7 @@ impl Shell {
             .child(
                 div()
                     .text_2xl()
-                    .font_weight(FontWeight::BOLD)
+                    .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.foreground)
                     .child(title.to_string()),
             )
