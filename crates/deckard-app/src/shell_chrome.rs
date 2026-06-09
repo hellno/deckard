@@ -227,9 +227,10 @@ impl Shell {
                                 "agent-pulse-sidebar",
                             ))
                             .child(div().flex_1().text_sm().text_color(fg).child("Atlas"))
-                            // Status dot: cyan while acting, neutral when idle.
+                            // Status dot: a neutral brightness lift while acting (the cyan
+                            // breathing squircle is the sole cyan surface — DESIGN actor model).
                             .child(div().size(px(6.0)).rounded_full().bg(if self.agent_acting {
-                                agent
+                                fg
                             } else {
                                 muted
                             })),

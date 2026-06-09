@@ -235,10 +235,14 @@ impl Shell {
                         h_flex()
                             .w_full()
                             .gap_2()
+                            // Shield signs from YOUR wallet, so it's disabled while viewing a
+                            // watched read-only account (don't show a funds-moving action in a
+                            // someone-else's-address context).
                             .child(
                                 Button::new("shield")
                                     .primary()
                                     .label("Shield")
+                                    .disabled(self.viewing_watch)
                                     .on_click(cx.listener(|this, _, _, cx| this.open_shield(cx))),
                             )
                             .child(Button::new("receive").ghost().label("Receive").on_click(
