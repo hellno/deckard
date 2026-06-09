@@ -105,7 +105,11 @@ impl Shell {
                                     .flex_shrink_0(),
                             )
                             .child(
+                                // Bound + flex the text so the warning wraps inside the card
+                                // instead of being clipped at the right edge.
                                 div()
+                                    .flex_1()
+                                    .min_w_0()
                                     .text_xs()
                                     .text_color(fg)
                                     .child("Only send Ethereum-network assets to this address. Funds sent on the wrong network may be lost."),
