@@ -8,7 +8,7 @@ use gpui::{
 };
 use gpui_component::{v_flex, ActiveTheme};
 
-use crate::shell::{Route, Shell};
+use crate::shell::{Selection, Shell, Surface};
 
 impl Shell {
     pub fn render_palette(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -64,20 +64,21 @@ impl Shell {
                         row("cmd-portfolio", "Go to Portfolio", "").on_click(cx.listener(
                             |this, _, _, cx| {
                                 this.palette_open = false;
-                                this.navigate(Route::Welcome, cx);
+                                this.select(Selection::Wallet, cx);
+                                this.open(Surface::Home, cx);
                             },
                         )),
                     )
                     .child(row("cmd-receive", "Receive", "").on_click(cx.listener(
                         |this, _, _, cx| {
                             this.palette_open = false;
-                            this.navigate(Route::Receive, cx);
+                            this.open(Surface::Receive, cx);
                         },
                     )))
                     .child(row("cmd-settings", "Settings", "⌘,").on_click(cx.listener(
                         |this, _, _, cx| {
                             this.palette_open = false;
-                            this.navigate(Route::Settings, cx);
+                            this.open(Surface::Settings, cx);
                         },
                     )))
                     .child(row("cmd-copy", "Copy address", "").on_click(cx.listener(

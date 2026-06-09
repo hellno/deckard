@@ -5,11 +5,12 @@
 use gpui::{div, px, rgb, ClipboardItem, Context, FontWeight, IntoElement, ParentElement, Styled};
 use gpui_component::{
     button::{Button, ButtonVariants},
-    h_flex, v_flex, ActiveTheme,
+    h_flex, v_flex, ActiveTheme, Icon, IconName,
 };
 use qrcode::{Color, QrCode};
 
-use crate::shell::{Route, Shell};
+use crate::shell::{Shell, Surface};
+use crate::theme;
 
 impl Shell {
     pub fn render_receive(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -18,6 +19,9 @@ impl Shell {
         let muted = theme.muted_foreground;
         let border = theme.border;
         let surface = theme.secondary;
+
+        let is_dark = theme.is_dark();
+        let amber = theme::amber(is_dark);
 
         let address = self.wallet_address_string();
 
@@ -81,6 +85,32 @@ impl Shell {
                             .text_color(fg)
                             .child(address),
                     )
+                    // Network warning — the one caution moment (DESIGN §236): a
+                    // neutral surface with a 2px amber LEFT keyline + amber icon/text.
+                    // Not a filled warm block; the risk word carries the emphasis.
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .items_start()
+                            .gap_2()
+                            .px_3()
+                            .py_2p5()
+                            .rounded_lg()
+                            .bg(surface)
+                            .border_l_2()
+                            .border_color(amber)
+                            .child(
+                                Icon::new(IconName::TriangleAlert)
+                                    .text_color(amber)
+                                    .flex_shrink_0(),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(fg)
+                                    .child("Only send Ethereum-network assets to this address. Funds sent on the wrong network may be lost."),
+                            ),
+                    )
                     .child(
                         h_flex()
                             .gap_2()
@@ -95,7 +125,7 @@ impl Shell {
                                     })),
                             )
                             .child(Button::new("receive-back").ghost().label("Back").on_click(
-                                cx.listener(|this, _, _, cx| this.navigate(Route::Welcome, cx)),
+                                cx.listener(|this, _, _, cx| this.open(Surface::Home, cx)),
                             )),
                     ),
             )

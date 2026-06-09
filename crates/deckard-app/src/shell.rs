@@ -9,10 +9,9 @@ use gpui::{
     IntoElement, ParentElement, Render, Styled, Window,
 };
 use gpui_component::{
-    button::{Button, ButtonVariants},
     h_flex,
     input::{InputEvent, InputState},
-    v_flex, ActiveTheme, IconName, TitleBar,
+    v_flex, ActiveTheme, TitleBar,
 };
 
 use deckard_core::{Address, EthProvider, KdfParams, Portfolio, ReadStatus, Vault, WordCount};
@@ -22,7 +21,7 @@ use deckard_signerd::SignerClient;
 
 use crate::settings::{Settings, ThemeModePref};
 use crate::signer::{self, AppSigner};
-use crate::theme::{self, Accent};
+use crate::theme;
 use crate::wallet;
 use crate::{GoBack, NewItem, OpenSettings, TogglePalette, ToggleTheme, APP_NAME};
 
@@ -52,9 +51,22 @@ fn write_then_unlock(
     signer::address_or_error(outcome)
 }
 
+/// What the sidebar tree selects — the contextual-view driver. The home surface
+/// renders differently per selection (wallet / project / agent). Demo scope is a
+/// single project, wallet, and agent (see deckard-demo-ux-locked.md).
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Route {
-    Welcome,
+pub enum Selection {
+    Project,
+    Wallet,
+    Agent,
+}
+
+/// Transient full-pane surfaces opened FROM a selection. `Home` = the contextual
+/// view for the current `Selection`; `Receive`/`Settings` are actions, not nav
+/// destinations (DESIGN §Information architecture).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Surface {
+    Home,
     Receive,
     Settings,
 }
@@ -81,7 +93,10 @@ pub enum AuthStep {
 
 pub struct Shell {
     pub focus_handle: FocusHandle,
-    pub route: Route,
+    /// Which sidebar entity is selected (drives the Home contextual view).
+    pub selection: Selection,
+    /// The active full-pane surface (Home = the selection's contextual view).
+    pub surface: Surface,
     pub settings: Settings,
     pub name_input: Entity<InputState>,
     pub rpc_input: Entity<InputState>,
@@ -274,7 +289,8 @@ impl Shell {
 
         Self {
             focus_handle,
-            route: Route::Welcome,
+            selection: Selection::Wallet,
+            surface: Surface::Home,
             settings,
             name_input,
             rpc_input,
@@ -643,7 +659,8 @@ impl Shell {
         self.wallet_address = Some(address);
         self.auth = AuthStep::Ready;
         self.auth_error = None;
-        self.route = Route::Welcome;
+        self.selection = Selection::Wallet;
+        self.surface = Surface::Home;
         self.retarget(cx);
     }
 
@@ -803,24 +820,22 @@ impl Shell {
         self.retarget(cx);
     }
 
-    pub fn navigate(&mut self, route: Route, cx: &mut Context<Self>) {
-        self.route = route;
+    /// Select a sidebar entity: switch the selection and reset to its Home view.
+    pub fn select(&mut self, sel: Selection, cx: &mut Context<Self>) {
+        self.selection = sel;
+        self.surface = Surface::Home;
         cx.notify();
     }
 
-    /// Re-install the theme from the current settings (accent + mode).
+    /// Open a full-pane surface (Home / Receive / Settings) over the current selection.
+    pub fn open(&mut self, surface: Surface, cx: &mut Context<Self>) {
+        self.surface = surface;
+        cx.notify();
+    }
+
+    /// Re-install the theme from the current settings (mode).
     fn apply_theme(&self, cx: &mut Context<Self>) {
-        theme::install(cx, self.settings.accent, self.settings.theme_mode.to_gpui());
-    }
-
-    pub fn set_accent(&mut self, accent: Accent, cx: &mut Context<Self>) {
-        self.settings.accent = accent;
-        self.settings.save();
-        self.apply_theme(cx);
-        // Keep the menu-bar tray icon (if running) in sync with the accent.
-        #[cfg(feature = "tray")]
-        crate::tray::set_accent(cx, accent);
-        cx.notify();
+        theme::install(cx, self.settings.theme_mode.to_gpui());
     }
 
     pub fn set_mode(&mut self, mode: ThemeModePref, cx: &mut Context<Self>) {
@@ -846,12 +861,13 @@ impl Shell {
     }
 
     fn on_open_settings(&mut self, _: &OpenSettings, _: &mut Window, cx: &mut Context<Self>) {
-        self.navigate(Route::Settings, cx);
+        self.open(Surface::Settings, cx);
     }
 
     fn on_go_back(&mut self, _: &GoBack, _: &mut Window, cx: &mut Context<Self>) {
-        if self.route != Route::Welcome {
-            self.navigate(Route::Welcome, cx);
+        // Back = leave any action surface and return to the selection's Home view.
+        if self.surface != Surface::Home {
+            self.open(Surface::Home, cx);
         }
     }
 
@@ -864,61 +880,16 @@ impl Shell {
         cx.notify();
     }
 
+    /// A bare macOS title bar: just the traffic-light inset + the app name. Its old
+    /// settings/theme controls now live in the breadcrumb (`shell_chrome.rs`).
     fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
-        let is_settings = self.route == Route::Settings;
-        let theme_icon = if self.settings.theme_mode == ThemeModePref::Dark {
-            IconName::Sun
-        } else {
-            IconName::Moon
-        };
-
         TitleBar::new().child(
-            h_flex()
-                .w_full()
-                .items_center()
-                .justify_between()
-                .child(
-                    h_flex()
-                        .items_center()
-                        .gap_2()
-                        .children(is_settings.then(|| {
-                            Button::new("back")
-                                .ghost()
-                                .icon(IconName::ChevronLeft)
-                                .on_click(
-                                    cx.listener(|this, _, _, cx| this.navigate(Route::Welcome, cx)),
-                                )
-                        }))
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(muted)
-                                .child(if is_settings { "Settings" } else { APP_NAME }),
-                        ),
-                )
-                .child(
-                    h_flex()
-                        .items_center()
-                        .gap_1()
-                        .children((!is_settings).then(|| {
-                            Button::new("open-settings")
-                                .ghost()
-                                .icon(IconName::Settings)
-                                .on_click(
-                                    cx.listener(|this, _, _, cx| {
-                                        this.navigate(Route::Settings, cx)
-                                    }),
-                                )
-                        }))
-                        .child(
-                            Button::new("toggle-theme")
-                                .ghost()
-                                .icon(theme_icon)
-                                .on_click(cx.listener(|this, _, _, cx| this.toggle_mode(cx))),
-                        ),
-                ),
+            div()
+                .text_sm()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(muted)
+                .child(APP_NAME),
         )
     }
 }
@@ -934,17 +905,33 @@ impl Render for Shell {
         let background = cx.theme().background;
 
         let body = if self.auth == AuthStep::Ready {
-            // The unlocked app: full title bar + routes + command palette.
+            // The unlocked app: macOS title bar above the two-pane shell grid
+            // (sidebar | [breadcrumb / content / status strip]) + command palette.
             let title_bar = self.render_title_bar(cx);
-            let content = match self.route {
-                Route::Welcome => self.render_welcome(cx).into_any_element(),
-                Route::Receive => self.render_receive(cx).into_any_element(),
-                Route::Settings => self.render_settings(window, cx).into_any_element(),
+            let content = match (self.selection, self.surface) {
+                (_, Surface::Settings) => self.render_settings(window, cx).into_any_element(),
+                (_, Surface::Receive) => self.render_receive(cx).into_any_element(),
+                (Selection::Wallet, Surface::Home) => {
+                    self.render_wallet_home(cx).into_any_element()
+                }
+                (Selection::Project, Surface::Home) => {
+                    self.render_project_home(cx).into_any_element()
+                }
+                (Selection::Agent, Surface::Home) => self.render_agent_home(cx).into_any_element(),
             };
             v_flex()
                 .size_full()
                 .child(title_bar)
-                .child(content)
+                .child(
+                    h_flex().size_full().child(self.render_sidebar(cx)).child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(self.render_breadcrumb(cx))
+                            .child(div().flex_1().min_h_0().child(content))
+                            .child(self.render_status_strip(cx)),
+                    ),
+                )
                 .children(self.palette_open.then(|| self.render_palette(cx)))
                 .into_any_element()
         } else {
