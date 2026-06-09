@@ -9,16 +9,19 @@
 //! is reserved for Receive's keyline + focus rings; cyan appears ONLY on the agent
 //! squircle glyph.
 
+use std::time::Duration;
+
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, Context, FontWeight, InteractiveElement, IntoElement, ParentElement,
-    StatefulInteractiveElement, Styled,
+    div, pulsating_between, px, Animation, AnimationExt, AnyElement, Context, FontWeight, Hsla,
+    InteractiveElement, IntoElement, ParentElement, Pixels, StatefulInteractiveElement, Styled,
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
     h_flex, v_flex, ActiveTheme, Icon, IconName, Sizable,
 };
 
+use crate::money::mask_money;
 use crate::settings::ThemeModePref;
 use crate::shell::{Selection, Shell, Surface};
 use crate::theme;
@@ -29,6 +32,50 @@ fn short_addr(a: &str) -> String {
         format!("{}…{}", &a[..6], &a[a.len() - 4..])
     } else {
         a.to_string()
+    }
+}
+
+/// The agent's cyan squircle monogram — the ONE cyan surface (DESIGN §Actor model): a
+/// rounded square (NEVER `rounded_full`) with the "A" monogram. When `acting`, its cyan
+/// keyline breathes on the sanctioned ~1.2s pulse — the single ambient motion in the
+/// whole app, shown only while the agent is mid-action (everywhere else renders
+/// instantly). Shared by the sidebar row and the agent-home header. `id` must be unique
+/// per live instance so GPUI keys the animation state correctly.
+pub(crate) fn agent_squircle(
+    size: Pixels,
+    radius: Pixels,
+    acting: bool,
+    agent: Hsla,
+    agent_tint: Hsla,
+    id: &'static str,
+) -> AnyElement {
+    let base = div()
+        .size(size)
+        .rounded(radius)
+        .bg(agent_tint)
+        .border_1()
+        .border_color(agent)
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(agent)
+                .child("A"),
+        );
+    if acting {
+        base.with_animation(
+            id,
+            Animation::new(Duration::from_millis(1200))
+                .repeat()
+                .with_easing(pulsating_between(0.35, 1.0)),
+            move |el, delta| el.border_color(agent.alpha(delta)),
+        )
+        .into_any_element()
+    } else {
+        base.into_any_element()
     }
 }
 
@@ -71,7 +118,7 @@ impl Shell {
         let balance = self
             .portfolio
             .as_ref()
-            .map(|p| deckard_core::format_amount(p.native_wei, 18, 4))
+            .map(|p| mask_money(self.mask, &deckard_core::format_amount(p.native_wei, 18, 4)))
             .unwrap_or_else(|| "—".to_string());
 
         // A tiny uppercase section label (10px, +letterspacing per DESIGN typography).
@@ -169,30 +216,22 @@ impl Shell {
                             .w_full()
                             .items_center()
                             .gap_2()
-                            // The cyan squircle monogram — the ONE cyan surface, a
-                            // rounded square (~6px), NEVER rounded_full.
-                            .child(
-                                div()
-                                    .size(px(16.0))
-                                    .rounded(px(5.0))
-                                    .bg(agent_tint)
-                                    .border_1()
-                                    .border_color(agent)
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child(
-                                        div()
-                                            .text_color(agent)
-                                            .child("A")
-                                            .text_xs()
-                                            .font_weight(FontWeight::SEMIBOLD),
-                                    ),
-                            )
+                            // The cyan squircle monogram — breathes when Atlas is acting.
+                            .child(agent_squircle(
+                                px(16.0),
+                                px(5.0),
+                                self.agent_acting,
+                                agent,
+                                agent_tint,
+                                "agent-pulse-sidebar",
+                            ))
                             .child(div().flex_1().text_sm().text_color(fg).child("Atlas"))
-                            // Idle status dot (neutral; the agent's "currently acting"
-                            // pulse is a fast-follow).
-                            .child(div().size(px(6.0)).rounded_full().bg(muted)),
+                            // Status dot: cyan while acting, neutral when idle.
+                            .child(div().size(px(6.0)).rounded_full().bg(if self.agent_acting {
+                                agent
+                            } else {
+                                muted
+                            })),
                     )
                     .on_click(cx.listener(|this, _, _, cx| this.select(Selection::Agent, cx))),
             )
@@ -234,6 +273,12 @@ impl Shell {
             IconName::Sun
         } else {
             IconName::Moon
+        };
+        // The eye glyph reflects current state: slashed eye = balances hidden.
+        let mask_icon = if self.mask {
+            IconName::EyeOff
+        } else {
+            IconName::Eye
         };
 
         h_flex()
@@ -277,6 +322,14 @@ impl Shell {
                                 this.palette_open = !this.palette_open;
                                 cx.notify();
                             })),
+                    )
+                    .child(
+                        // Eye glyph → toggle the privacy mask (⌘⇧M / click-the-Total /
+                        // palette all route to the same `toggle_mask`).
+                        Button::new("toggle-mask")
+                            .ghost()
+                            .icon(mask_icon)
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_mask(cx))),
                     )
                     .child(
                         Button::new("toggle-theme")

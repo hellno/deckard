@@ -23,7 +23,7 @@ use crate::settings::{Settings, ThemeModePref};
 use crate::signer::{self, AppSigner};
 use crate::theme;
 use crate::wallet;
-use crate::{GoBack, NewItem, OpenSettings, TogglePalette, ToggleTheme, APP_NAME};
+use crate::{GoBack, NewItem, OpenSettings, ToggleMask, TogglePalette, ToggleTheme, APP_NAME};
 
 /// The chain the supervised daemon signs for. v1 is mainnet-first (the default RPC is
 /// mainnet); multi-chain app config that re-points both the reader and the daemon is a
@@ -103,6 +103,17 @@ pub struct Shell {
     pub watch_input: Entity<InputState>,
     pub created: usize,
     pub palette_open: bool,
+    /// Privacy mask: when true, every money surface renders fixed bullets instead of a
+    /// figure (DESIGN §Trust). Initialised from `Settings.mask_balances` and persisted on
+    /// every toggle — the inverse of the seed reveal's momentary, default-hidden model.
+    pub mask: bool,
+    /// Demo stand-in for "Atlas is currently acting": drives the one sanctioned ambient
+    /// motion (the ~1.2s breathing pulse on the agent squircle). Not persisted — it's a
+    /// narrated demo toggle, since the real MCP agent is a fast-follow.
+    pub agent_acting: bool,
+    /// The capture-block state last pushed to the OS, so `render` only re-issues the
+    /// native `setSharingType` call when `capture_block && mask` actually changes.
+    capture_applied: bool,
 
     // --- auth / keystore (Chunk 3) ---
     pub auth: AuthStep,
@@ -287,6 +298,9 @@ impl Shell {
         // same RPC the app reads from.
         let signer = AppSigner::launch(current_rpc.clone(), DAEMON_CHAIN_ID);
 
+        // The mask is a persisted preference (default off); seed it from settings.
+        let mask = settings.mask_balances;
+
         Self {
             focus_handle,
             selection: Selection::Wallet,
@@ -297,6 +311,9 @@ impl Shell {
             watch_input,
             created: 0,
             palette_open: false,
+            mask,
+            agent_acting: false,
+            capture_applied: false,
             auth,
             auth_error: None,
             auth_busy: false,
@@ -833,6 +850,30 @@ impl Shell {
         cx.notify();
     }
 
+    /// Set the privacy mask to an explicit value (the Settings switch), persisting it.
+    pub fn set_mask(&mut self, masked: bool, cx: &mut Context<Self>) {
+        if self.mask == masked {
+            return;
+        }
+        self.mask = masked;
+        self.settings.mask_balances = masked;
+        self.settings.save();
+        cx.notify();
+    }
+
+    /// Toggle the privacy mask (the ⌘⇧M action, the eye glyph, the click-the-Total
+    /// gesture, and the palette row all route here). Persists the new state.
+    pub fn toggle_mask(&mut self, cx: &mut Context<Self>) {
+        self.set_mask(!self.mask, cx);
+    }
+
+    /// Flip the demo "agent currently acting" state (the breathing-pulse driver). Not
+    /// persisted — Atlas is an openly-narrated manual stand-in for v1.
+    pub fn toggle_agent_acting(&mut self, cx: &mut Context<Self>) {
+        self.agent_acting = !self.agent_acting;
+        cx.notify();
+    }
+
     /// Re-install the theme from the current settings (mode).
     fn apply_theme(&self, cx: &mut Context<Self>) {
         theme::install(cx, self.settings.theme_mode.to_gpui());
@@ -880,6 +921,21 @@ impl Shell {
         cx.notify();
     }
 
+    fn on_toggle_mask(&mut self, _: &ToggleMask, _: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_mask(cx);
+    }
+
+    /// Push the capture-block state to the OS when `capture_block && mask` changes.
+    /// Called once per `render`; the change-guard makes it a no-op on most frames. On a
+    /// non-macOS or non-`tray` build `apply_capture_block` is itself an inert no-op.
+    fn sync_capture_block(&mut self) {
+        let desired = self.settings.capture_block && self.mask;
+        if desired != self.capture_applied {
+            crate::capture::apply_capture_block(desired);
+            self.capture_applied = desired;
+        }
+    }
+
     /// A bare macOS title bar: just the traffic-light inset + the app name. Its old
     /// settings/theme controls now live in the breadcrumb (`shell_chrome.rs`).
     fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -903,6 +959,10 @@ impl Focusable for Shell {
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let background = cx.theme().background;
+
+        // Keep the OS capture-block in sync with `capture_block && mask` (no-op unless it
+        // changed, and a no-op entirely off a macOS `--features tray` build).
+        self.sync_capture_block();
 
         let body = if self.auth == AuthStep::Ready {
             // The unlocked app: macOS title bar above the two-pane shell grid
@@ -958,6 +1018,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::on_go_back))
             .on_action(cx.listener(Self::on_toggle_theme))
             .on_action(cx.listener(Self::on_toggle_palette))
+            .on_action(cx.listener(Self::on_toggle_mask))
             .child(body)
     }
 }

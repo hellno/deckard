@@ -4,7 +4,10 @@
 //! snapshot; the only loading state is the very first sync.
 
 use gpui::prelude::FluentBuilder;
-use gpui::{div, px, Context, FontWeight, IntoElement, ParentElement, SharedString, Styled};
+use gpui::{
+    div, px, relative, Context, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement,
+    SharedString, StatefulInteractiveElement, Styled,
+};
 use gpui_component::{
     button::{Button, ButtonVariants},
     h_flex, v_flex, ActiveTheme, Disableable, IconName,
@@ -14,6 +17,7 @@ use deckard_core::U256;
 
 use crate::money::money;
 use crate::shell::{Shell, Surface};
+use crate::shell_chrome::agent_squircle;
 use crate::theme;
 
 /// One row in the holdings table. Carries the raw balance (not a pre-formatted
@@ -54,6 +58,7 @@ impl Shell {
         let border = theme.border;
         let surface = theme.secondary;
         let mono: SharedString = theme.mono_font_family.clone();
+        let masked = self.mask;
 
         // A small bordered key-hint chip, e.g. ⌘K.
         let chip = move |keys: String, label: String| {
@@ -176,24 +181,53 @@ impl Shell {
                                     ),
                             ),
                     )
-                    // Balance hero: native ETH balance (mono-for-money, dimmed
-                    // decimals + ticker, weight 600 not 700).
-                    .child(v_flex().gap_1().child(
-                        div().text_3xl().font_weight(FontWeight::SEMIBOLD).map(
-                            |el| match native_wei {
-                                Some(wei) => el.child(money(
-                                    wei,
-                                    18,
-                                    4,
-                                    Some("ETH"),
-                                    mono.clone(),
-                                    fg,
+                    // Balance hero: the click-to-hide Total (mono-for-money, dimmed
+                    // decimals, weight 600) over a thin Splits-style allocation bar.
+                    // Clicking the Total toggles the privacy mask (one of its triggers).
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .id("balance-hero")
+                                    .cursor_pointer()
+                                    .text_3xl()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .map(|el| match native_wei {
+                                        Some(wei) => el.child(money(
+                                            wei,
+                                            18,
+                                            4,
+                                            Some("ETH"),
+                                            masked,
+                                            mono.clone(),
+                                            fg,
+                                            muted,
+                                        )),
+                                        None => el
+                                            .font_family(mono.clone())
+                                            .text_color(muted)
+                                            .child("—"),
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| this.toggle_mask(cx))),
+                            )
+                            .children(native_wei.map(|_| {
+                                // v1: the whole balance is public; the bar is one segment
+                                // (Wave 2 splits it into Private/Public). Flattens when masked.
+                                allocation_bar(
+                                    vec![AllocSegment {
+                                        label: "Public".into(),
+                                        fraction: 1.0,
+                                        tone: id_square,
+                                    }],
+                                    masked,
+                                    border,
                                     muted,
-                                )),
-                                None => el.font_family(mono.clone()).text_color(muted).child("—"),
-                            },
-                        ),
-                    ))
+                                    fg,
+                                )
+                            })),
+                    )
                     // Primary actions. Send + Swap are gated to the next release (Chunk 4,
                     // testnet-first), so they're shown disabled rather than inert-but-active.
                     .child(
@@ -238,6 +272,7 @@ impl Shell {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
         let mono: SharedString = theme.mono_font_family.clone();
+        let masked = self.mask;
 
         let mut col = v_flex().w_full().gap_2();
 
@@ -292,6 +327,7 @@ impl Shell {
                 h.raw,
                 h.decimals,
                 h.max_frac,
+                masked,
                 mono.clone(),
             ));
         }
@@ -322,8 +358,10 @@ impl Shell {
         let theme = cx.theme();
         let fg = theme.foreground;
         let muted = theme.muted_foreground;
+        let border = theme.border;
         let mono: SharedString = theme.mono_font_family.clone();
         let id_square = theme::identity_square(theme.is_dark());
+        let masked = self.mask;
 
         let native_wei = self.portfolio.as_ref().map(|p| p.native_wei);
 
@@ -352,20 +390,46 @@ impl Shell {
                             ),
                     )
                     .child(
-                        div().text_3xl().font_weight(FontWeight::SEMIBOLD).map(
-                            |el| match native_wei {
-                                Some(wei) => el.child(money(
-                                    wei,
-                                    18,
-                                    4,
-                                    Some("ETH"),
-                                    mono.clone(),
-                                    fg,
+                        v_flex()
+                            .w_full()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .id("project-balance-hero")
+                                    .cursor_pointer()
+                                    .text_3xl()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .map(|el| match native_wei {
+                                        Some(wei) => el.child(money(
+                                            wei,
+                                            18,
+                                            4,
+                                            Some("ETH"),
+                                            masked,
+                                            mono.clone(),
+                                            fg,
+                                            muted,
+                                        )),
+                                        None => el
+                                            .font_family(mono.clone())
+                                            .text_color(muted)
+                                            .child("—"),
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| this.toggle_mask(cx))),
+                            )
+                            .children(native_wei.map(|_| {
+                                allocation_bar(
+                                    vec![AllocSegment {
+                                        label: "Public".into(),
+                                        fraction: 1.0,
+                                        tone: id_square,
+                                    }],
+                                    masked,
+                                    border,
                                     muted,
-                                )),
-                                None => el.font_family(mono.clone()).text_color(muted).child("—"),
-                            },
-                        ),
+                                    fg,
+                                )
+                            })),
                     )
                     .child(
                         div()
@@ -422,30 +486,20 @@ impl Shell {
                     .items_start()
                     .max_w(px(680.0))
                     .gap_6()
-                    // Header: cyan squircle monogram (the ONLY cyan on the surface) +
-                    // agent name H1 (text.primary, NEVER cyan).
+                    // Header: cyan squircle monogram (the ONLY cyan on the surface,
+                    // breathing while Atlas acts) + agent name H1 (text.primary, NEVER cyan).
                     .child(
                         h_flex()
                             .items_center()
                             .gap_3()
-                            .child(
-                                div()
-                                    .size(px(28.0))
-                                    .rounded(px(6.0))
-                                    .bg(agent_tint)
-                                    .border_1()
-                                    .border_color(agent)
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(agent)
-                                            .child("A"),
-                                    ),
-                            )
+                            .child(agent_squircle(
+                                px(28.0),
+                                px(6.0),
+                                self.agent_acting,
+                                agent,
+                                agent_tint,
+                                "agent-pulse-home",
+                            ))
                             .child(
                                 v_flex()
                                     .gap_0p5()
@@ -456,12 +510,13 @@ impl Shell {
                                             .text_color(fg)
                                             .child("Atlas"),
                                     )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(muted)
-                                            .child("Delegated agent · idle"),
-                                    ),
+                                    .child(div().text_xs().text_color(muted).child(
+                                        if self.agent_acting {
+                                            "Delegated agent · acting now"
+                                        } else {
+                                            "Delegated agent · idle"
+                                        },
+                                    )),
                             ),
                     )
                     // Policy card: one faint frame, no interior grid lines.
@@ -480,6 +535,18 @@ impl Shell {
                             .child(policy_row("Session key", "expires in 6d"))
                             .child(policy_row("Autonomy", "act < $50 · ask above")),
                     )
+                    // Demo control: narrate Atlas "acting" to show the one ambient motion
+                    // (the breathing squircle). Real activity arrives with the MCP agent.
+                    .child(
+                        Button::new("toggle-agent-acting")
+                            .ghost()
+                            .label(if self.agent_acting {
+                                "Stop activity (demo)"
+                            } else {
+                                "Simulate activity (demo)"
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_agent_acting(cx))),
+                    )
                     .child(
                         div().text_xs().text_color(muted).child(
                             "Atlas is a manual stand-in for the demo. Controls land with MCP.",
@@ -487,6 +554,77 @@ impl Shell {
                     ),
             )
     }
+}
+
+/// One segment of the [`allocation_bar`]: a label, its share of the whole (0..=1),
+/// and a low-chroma tone. Wave 2 feeds it Private/Public; v1 passes a single Public.
+struct AllocSegment {
+    label: SharedString,
+    fraction: f32,
+    tone: Hsla,
+}
+
+/// A thin Splits-style allocation bar (DESIGN §Balance hero): low-chroma tonal
+/// segments (never amber, rule 5) over a neutral track, each non-zero segment kept
+/// ≥3px wide so it stays visible, with a small legend below. When `masked`, the
+/// composition is itself private — the bar collapses to one flat neutral track with no
+/// legend (part of what the privacy mask hides).
+fn allocation_bar(
+    segments: Vec<AllocSegment>,
+    masked: bool,
+    track: Hsla,
+    muted: Hsla,
+    fg: Hsla,
+) -> impl IntoElement {
+    // Masked → a single flat neutral bar, no segments, no legend.
+    if masked {
+        return div()
+            .w_full()
+            .h(px(8.0))
+            .rounded(px(3.0))
+            .bg(track)
+            .into_any_element();
+    }
+
+    // The tonal bar: each segment a fraction of the width, ≥3px, clipped to the rounding.
+    let mut bar = h_flex()
+        .w_full()
+        .h(px(8.0))
+        .rounded(px(3.0))
+        .bg(track)
+        .overflow_hidden();
+    for seg in &segments {
+        let frac = seg.fraction.clamp(0.0, 1.0);
+        bar = bar.child(
+            div()
+                .h_full()
+                .flex_shrink_0()
+                .min_w(px(3.0))
+                .w(relative(frac))
+                .bg(seg.tone),
+        );
+    }
+
+    // The legend: a tone chip + label + percentage per segment.
+    let mut legend = h_flex().gap_4();
+    for seg in &segments {
+        let pct = (seg.fraction.clamp(0.0, 1.0) * 100.0).round() as u32;
+        legend = legend.child(
+            h_flex()
+                .items_center()
+                .gap_1p5()
+                .child(div().size(px(8.0)).rounded(px(2.0)).bg(seg.tone))
+                .child(div().text_xs().text_color(fg).child(seg.label.clone()))
+                .child(div().text_xs().text_color(muted).child(format!("{pct}%"))),
+        );
+    }
+
+    v_flex()
+        .w_full()
+        .gap_2()
+        .child(bar)
+        .child(legend)
+        .into_any_element()
 }
 
 /// A shimmer-free skeleton placeholder row for the first-sync state.
@@ -525,6 +663,7 @@ fn render_row(
     raw: U256,
     decimals: u8,
     max_frac: usize,
+    masked: bool,
     mono: SharedString,
 ) -> impl IntoElement {
     h_flex()
@@ -572,9 +711,7 @@ fn render_row(
                         .child(div().text_xs().text_color(muted).child(symbol)),
                 ),
         )
-        .child(
-            div()
-                .text_sm()
-                .child(money(raw, decimals, max_frac, None, mono, fg, muted)),
-        )
+        .child(div().text_sm().child(money(
+            raw, decimals, max_frac, None, masked, mono, fg, muted,
+        )))
 }

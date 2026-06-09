@@ -98,6 +98,36 @@ impl Shell {
                             },
                         )),
                     )
+                    .child(
+                        row(
+                            "cmd-mask",
+                            if self.mask {
+                                "Show balances"
+                            } else {
+                                "Mask balances"
+                            },
+                            "⌘⇧M",
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.palette_open = false;
+                            this.toggle_mask(cx);
+                        })),
+                    )
+                    .child(
+                        row(
+                            "cmd-agent-acting",
+                            if self.agent_acting {
+                                "Stop agent activity (demo)"
+                            } else {
+                                "Simulate agent activity (demo)"
+                            },
+                            "",
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.palette_open = false;
+                            this.toggle_agent_acting(cx);
+                        })),
+                    )
                     .child(row("cmd-lock", "Lock wallet", "").on_click(cx.listener(
                         |this, _, _, cx| {
                             this.palette_open = false;
