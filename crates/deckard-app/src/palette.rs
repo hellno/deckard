@@ -75,6 +75,14 @@ impl Shell {
                             this.open(Surface::Receive, cx);
                         },
                     )))
+                    .child(
+                        row("cmd-shield", "Shield to private", "").on_click(cx.listener(
+                            |this, _, _, cx| {
+                                this.palette_open = false;
+                                this.open_shield(cx);
+                            },
+                        )),
+                    )
                     .child(row("cmd-settings", "Settings", "⌘,").on_click(cx.listener(
                         |this, _, _, cx| {
                             this.palette_open = false;

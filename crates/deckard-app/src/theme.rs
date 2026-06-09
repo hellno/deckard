@@ -31,12 +31,9 @@ pub fn amber(dark: bool) -> Hsla {
     hex(if dark { "#F2A43B" } else { "#A8650C" })
 }
 
-/// Amber at low alpha — the hold-to-confirm sweep wash + future amber washes.
-/// `rgba(242,164,59,.14)` dark; the deepened light amber at the same alpha.
-// reason: consumed by the T5 shield hold-to-confirm amber fill-sweep; the
-// caution banner correctly uses a NEUTRAL surface + keyline (DESIGN rule 7), not
-// a tint fill, so this helper has no consumer until the sweep lands.
-#[allow(dead_code)]
+/// Amber at low alpha — the T5 shield hold-to-confirm fill-sweep wash.
+/// `rgba(242,164,59,.14)` dark; the deepened light amber at the same alpha. (The caution
+/// banner correctly uses a NEUTRAL surface + keyline per DESIGN rule 7, not a tint fill.)
 pub fn amber_tint(dark: bool) -> Hsla {
     amber(dark).opacity(0.14)
 }
@@ -59,6 +56,15 @@ pub fn agent_tint(dark: bool) -> Hsla {
 /// status). A cool slate-neutral, distinct from both amber and cyan.
 pub fn identity_square(dark: bool) -> Hsla {
     hex(if dark { "#3A4250" } else { "#A7AEBA" })
+}
+
+/// The **shield / private** tone — a neutral, LOW-chroma cool slate for the private
+/// (shielded) balance segment + the shield glyph. Deliberately NOT cyan and NOT amber:
+/// privacy sits *off* the actor axis (cyan = agent, amber = human), so the shield mark
+/// never reads as an actor signal (deckard-demo-ux-locked + DESIGN §Color). A touch
+/// cooler/dimmer than `identity_square` so the two neutrals stay distinguishable.
+pub fn shield(dark: bool) -> Hsla {
+    hex(if dark { "#33424C" } else { "#94A2AC" })
 }
 
 /// Install (or re-install) the refined theme, then apply `mode`. Call once at
