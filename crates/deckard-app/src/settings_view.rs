@@ -37,7 +37,11 @@ impl Shell {
                 .items_center()
                 .justify_between()
                 .child(
+                    // Bound the text column so a long description wraps instead of widening
+                    // the row past the card and shoving the control off the right edge.
                     v_flex()
+                        .flex_1()
+                        .min_w_0()
                         .gap_0p5()
                         .child(
                             div()
