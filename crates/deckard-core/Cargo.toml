@@ -17,7 +17,7 @@ verified-reads = ["dep:helios-ethereum"]
 # can be skipped. When OFF, `build_shield_native_intent` returns "shield unavailable
 # (feature off)" — never a fake success. Pulls `rand_09` because railgun pins rand 0.9
 # while core's own `rand` stays 0.8.
-shield = ["dep:railgun", "dep:rand_09"]
+shield = ["dep:railgun", "dep:rand_09", "dep:hmac", "dep:sha2"]
 
 [dependencies]
 # The frozen wire contract — only for the shared `ReadStatus` trust label attached
@@ -51,6 +51,12 @@ railgun = { git = "https://github.com/ethereum/kohaku", package = "railgun", rev
 # (below) is 0.8 (RustCrypto-aligned), so the 0.9 crate is aliased `rand_09` and pulled only
 # with the `shield` feature.
 rand_09 = { package = "rand", version = "0.9", optional = true }
+# SLIP-0010 ed25519 derivation for the Railgun 0zk keys (railgun_keys.rs): HMAC-SHA512 only.
+# Audited RustCrypto primitives, the same family as argon2/chacha20poly1305/bip39 above, and
+# already present transitively (bip39's pbkdf2 pulls them) — these add only the direct edges.
+# Gated with `shield` since the derivation feeds the railgun key types.
+hmac = { version = "0.12", optional = true }
+sha2 = { version = "0.10", optional = true }
 
 # A single background tokio runtime owns all network; the GUI thread never makes
 # a network call. `rt` (current-thread) only — no multi-thread worker pool needed.
