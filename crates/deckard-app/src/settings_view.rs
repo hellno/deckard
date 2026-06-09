@@ -93,12 +93,42 @@ impl Shell {
             }))
             .into_any_element();
 
+        // Privacy: the mask is security-relevant, so its switch is allowed to read amber
+        // (DESIGN §Toggle). It mirrors `self.mask` (the live, persisted state).
+        let mask_control = Switch::new("mask-balances")
+            .checked(self.mask)
+            .on_click(cx.listener(|this, checked: &bool, _, cx| this.set_mask(*checked, cx)))
+            .into_any_element();
+        let capture_control = Switch::new("capture-block")
+            .checked(self.settings.capture_block)
+            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                this.settings.capture_block = *checked;
+                this.settings.save();
+                cx.notify();
+            }))
+            .into_any_element();
+
         v_flex().flex_1().items_center().p_8().child(
             v_flex()
                 .w(px(540.0))
                 .gap_6()
                 .child(section_label("Appearance", muted))
                 .child(card().child(row("Theme", "Light or dark interface", theme_control)))
+                .child(section_label("Privacy", muted))
+                .child(
+                    card()
+                        .child(row(
+                            "Mask balances",
+                            "Hide every balance behind fixed bullets — persists until you turn it off (⌘⇧M, or click the Total)",
+                            mask_control,
+                        ))
+                        .child(divider(border))
+                        .child(row(
+                            "Block screen capture",
+                            "While masked, remove Deckard's windows from screen recordings (macOS, tray build) — off for demos",
+                            capture_control,
+                        )),
+                )
                 .child(section_label("Network", muted))
                 .child(
                     card()

@@ -51,6 +51,14 @@ pub struct Settings {
     /// A read-only address or ENS name to view instead of the active wallet. Empty =
     /// show the wallet. Lets an operator watch any address (e.g. `vitalik.eth`).
     pub watch_address: String,
+    /// Privacy mask: replace every money figure with fixed-length bullets. Unlike the
+    /// seed reveal (momentary, default-hidden), the mask is **persisted-once-on** — a
+    /// stated preference that survives relaunch. Default OFF.
+    pub mask_balances: bool,
+    /// macOS screen-capture block (NSWindow sharingType = none) tied to the mask. Opt-in,
+    /// **default OFF** — for a demo recording it stays off, or the capture itself is
+    /// blocked. Only takes effect in a `--features tray` macOS build (reuses that dep).
+    pub capture_block: bool,
 }
 
 impl Default for Settings {
@@ -61,6 +69,8 @@ impl Default for Settings {
             launch_minimized: false,
             rpc_url: String::new(),
             watch_address: String::new(),
+            mask_balances: false,
+            capture_block: false,
         }
     }
 }

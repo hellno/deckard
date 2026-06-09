@@ -7,6 +7,7 @@
 //! Fork checklist: rename the crate in `Cargo.toml`, change `APP_NAME` and the
 //! bundle identifier, swap `assets/icon.png`, then start editing the views.
 
+mod capture;
 mod money;
 mod onboarding;
 mod palette;
@@ -45,7 +46,8 @@ gpui::actions!(
         ToggleTheme,
         NewItem,
         GoBack,
-        TogglePalette
+        TogglePalette,
+        ToggleMask
     ]
 );
 
@@ -97,6 +99,7 @@ fn main() {
                 KeyBinding::new("secondary-shift-d", ToggleTheme, None),
                 KeyBinding::new("secondary-[", GoBack, None),
                 KeyBinding::new("secondary-k", TogglePalette, None),
+                KeyBinding::new("secondary-shift-m", ToggleMask, None),
             ]);
 
             // 4. Global action handlers. View-local actions (NewItem, OpenSettings,

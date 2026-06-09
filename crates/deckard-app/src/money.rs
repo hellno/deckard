@@ -16,18 +16,47 @@ use gpui_component::h_flex;
 
 use deckard_core::U256;
 
+/// The fixed-length privacy mask: **always six bullets**, never `real.len()`, so a
+/// masked figure leaks neither its value nor its digit count (the magnitude-safe rule,
+/// per MetaMask's `SensitiveText`). One glyph for every money surface.
+pub const MASK_BULLETS: &str = "••••••";
+
+/// String-level mask for callers that render a plain balance string rather than the
+/// `money()` spans (e.g. the sidebar wallet balance). Fixed six bullets when masked.
+pub fn mask_money(masked: bool, real: &str) -> String {
+    if masked {
+        MASK_BULLETS.to_string()
+    } else {
+        real.to_string()
+    }
+}
+
 /// Render an asset amount as mono spans: integer in `primary`, decimals + ticker
 /// dimmed to `dim` by color only. `unit` is the trailing ticker (e.g. `"ETH"`),
-/// or `None` for a bare number. `mono` is `cx.theme().mono_font_family`.
+/// or `None` for a bare number. `mono` is `cx.theme().mono_font_family`. When
+/// `masked`, renders the fixed [`MASK_BULLETS`] in `dim` instead (no value, no unit).
+#[allow(clippy::too_many_arguments)]
 pub fn money(
     raw: U256,
     decimals: u8,
     max_frac: usize,
     unit: Option<&str>,
+    masked: bool,
     mono: SharedString,
     primary: Hsla,
     dim: Hsla,
 ) -> impl IntoElement {
+    if masked {
+        // Magnitude-safe: a single dimmed bullet span, no decimals, no ticker.
+        return spans(
+            MASK_BULLETS.to_string(),
+            String::new(),
+            None,
+            mono,
+            dim,
+            dim,
+        );
+    }
     let s = deckard_core::format_amount(raw, decimals, max_frac);
     let (int_part, frac) = split_amount(&s);
     spans(int_part, frac, unit, mono, primary, dim)
@@ -37,15 +66,26 @@ pub fn money(
 /// decimals dimmed to `dim`. Zero renders `"$0"` (no `.00`, no `$0.0k`).
 // reason: consumed by the Wave-2 shielded-balance / fiat view (Total + Private/
 // Public lines carry `$`); kept now as the companion to `money`.
-#[allow(dead_code)]
+#[allow(dead_code, clippy::too_many_arguments)]
 pub fn usd(
     raw: U256,
     decimals: u8,
     max_frac: usize,
+    masked: bool,
     mono: SharedString,
     primary: Hsla,
     dim: Hsla,
 ) -> impl IntoElement {
+    if masked {
+        return spans(
+            MASK_BULLETS.to_string(),
+            String::new(),
+            None,
+            mono,
+            dim,
+            dim,
+        );
+    }
     let s = deckard_core::format_amount(raw, decimals, max_frac);
     let (int_part, frac) = split_amount(&s);
     spans(format!("${int_part}"), frac, None, mono, primary, dim)
