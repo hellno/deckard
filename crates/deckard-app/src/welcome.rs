@@ -318,10 +318,19 @@ impl Shell {
             ),
         };
 
+        // Label the hero honestly: a real Total once private is known, otherwise public-only
+        // (so the big figure is never read as "public + 0" while the private side syncs).
+        let caption = match (private_wei, snap.is_some()) {
+            (Some(_), _) => "Total",
+            (None, true) => "Public · private balance still syncing",
+            (None, false) => "",
+        };
+
         v_flex()
             .w_full()
             .gap_3()
             .child(hero)
+            .children((!caption.is_empty()).then(|| div().text_xs().text_color(muted).child(caption)))
             .child(bar)
             .child(
                 v_flex()
@@ -348,12 +357,9 @@ impl Shell {
                         muted,
                     )),
             )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(muted)
-                    .child("Private is WETH-equivalent, net of the 0.25% shield fee."),
-            )
+            .child(div().text_xs().text_color(muted).child(
+                "Private is WETH-equivalent, net of the 0.25% fee, and synced over raw RPC (not independently verified).",
+            ))
             .into_any_element()
     }
 
@@ -692,6 +698,11 @@ fn allocation_bar(
         .overflow_hidden();
     for seg in &segments {
         let frac = seg.fraction.clamp(0.0, 1.0);
+        // A zero-value segment is omitted — the ≥3px minimum is only for a NON-zero share
+        // (DESIGN §Balance hero), so an empty Private slice never shows a phantom sliver.
+        if frac <= 0.0 {
+            continue;
+        }
         bar = bar.child(
             div()
                 .h_full()

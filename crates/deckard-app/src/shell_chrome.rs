@@ -390,15 +390,33 @@ impl Shell {
         // An active shield's lifecycle (the "where's my money?" reassurance line). The glyph
         // token maps to a small colored dot: amber in-flight, success done, danger failed.
         let shield_chip = self.shield_status.as_ref().map(|st| {
-            let color = match st.glyph() {
+            let token = st.glyph();
+            let color = match token {
                 "check-filled" => theme.success,
                 "x-ring" => theme.danger,
                 _ => theme::amber(theme.is_dark()),
             };
+            // DESIGN status-as-glyph: filled check / x-ring from the icon kit; pending has no
+            // clock icon in the kit, so it's a small amber dot.
+            let glyph = match token {
+                "check-filled" => Icon::new(IconName::CircleCheck)
+                    .text_color(color)
+                    .small()
+                    .into_any_element(),
+                "x-ring" => Icon::new(IconName::CircleX)
+                    .text_color(color)
+                    .small()
+                    .into_any_element(),
+                _ => div()
+                    .size(px(6.0))
+                    .rounded_full()
+                    .bg(color)
+                    .into_any_element(),
+            };
             h_flex()
                 .items_center()
                 .gap_1p5()
-                .child(div().size(px(6.0)).rounded_full().bg(color))
+                .child(glyph)
                 .child(div().text_color(color).child(st.to_string()))
         });
 

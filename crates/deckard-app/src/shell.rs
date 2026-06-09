@@ -205,6 +205,12 @@ pub struct Shell {
     recipient_autofilled: bool,
     /// The active shield's lifecycle, surfaced in the status strip (None when idle).
     pub shield_status: Option<ShieldStatus>,
+    /// Bumped on every unlock/lock so a slow grant fetch from a prior session can't install a
+    /// stale handle/address after the wallet locked or a different wallet unlocked.
+    auth_epoch: u64,
+    /// Set on lock so the next Ready render clears the shield inputs (which a listener can't —
+    /// `set_value` needs a `Window`), preventing a prior wallet's 0zk recipient from lingering.
+    pending_shield_clear: bool,
 
     // --- auth / keystore (Chunk 3) ---
     pub auth: AuthStep,
@@ -441,6 +447,8 @@ impl Shell {
             railgun_address: None,
             recipient_autofilled: false,
             shield_status: None,
+            auth_epoch: 0,
+            pending_shield_clear: false,
             auth,
             auth_error: None,
             auth_busy: false,
@@ -520,6 +528,10 @@ impl Shell {
         self.railgun_address = None;
         self.recipient_autofilled = false;
         self.shield_status = None;
+        // Invalidate any in-flight grant fetch and clear shield inputs on the next render.
+        self.auth_epoch = self.auth_epoch.wrapping_add(1);
+        self.pending_shield_clear = true;
+        self.reset_shield();
         self.auth = AuthStep::Unlock;
         self.palette_open = false;
         cx.notify();
@@ -810,6 +822,7 @@ impl Shell {
         self.auth_error = None;
         self.selection = Selection::Wallet;
         self.surface = Surface::Home;
+        self.auth_epoch = self.auth_epoch.wrapping_add(1);
         self.retarget(cx);
         self.kick_railgun_grant(cx);
     }
@@ -819,19 +832,29 @@ impl Shell {
     /// and start watching it. If the daemon refuses (locked / gate failed), there's simply no
     /// shielded UI — honest, never a fabricated private balance.
     fn kick_railgun_grant(&mut self, cx: &mut Context<Self>) {
+        // Belt-and-suspenders: the daemon already gates the grant on the derivation KAT, but
+        // never show a shielded balance unless the app independently re-verifies it too.
+        if !deckard_core::known_answer_ok() {
+            return;
+        }
         let client = self.signer.client();
         let chain_id = SHIELD_CHAIN_ID;
         let rpc = self.settings.effective_rpc();
+        let epoch = self.auth_epoch;
         let task =
             cx.background_spawn(async move { client.railgun_view_grant_blocking(chain_id, 0) });
         cx.spawn(async move |this, cx| {
             let grant = task.await;
             this.update(cx, |this, cx| {
+                // Drop a reply for a session that has since locked / re-unlocked.
+                if this.auth_epoch != epoch || this.auth != AuthStep::Ready {
+                    return;
+                }
                 if let Ok(grant) = grant {
                     this.railgun_address = Some(grant.address.clone());
                     this.recipient_autofilled = false;
                     this.shielded = Some(ShieldedHandle::spawn(rpc, chain_id, grant));
-                    this.watch_shielded_sync(cx);
+                    this.watch_shielded_sync(false, cx);
                 }
                 cx.notify();
             })
@@ -840,35 +863,49 @@ impl Shell {
         .detach();
     }
 
-    /// Poll the shielded snapshot while a sync runs so the UI reflects progress + completion
-    /// (the actor's cached state isn't a GPUI entity, so we tick it). Caps the poll so a hung
-    /// sync can't loop forever. When a post-shield sync settles, advance `ShieldStatus`.
-    fn watch_shielded_sync(&self, cx: &mut Context<Self>) {
+    /// Poll the shielded snapshot while a sync runs so the UI reflects progress (the actor's
+    /// cached state isn't a GPUI entity, so we tick it). Capped so a hung sync can't loop
+    /// forever. With `drive_lifecycle`, once the sync SETTLES it advances `ShieldStatus`
+    /// honestly: a clean synced balance → `PrivateSpendable(wei)`, a sync error → `Failed`, a
+    /// timeout → stays in-flight (never claims "spendable" with a fabricated zero).
+    fn watch_shielded_sync(&self, drive_lifecycle: bool, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
+            let mut timed_out = true;
             for _ in 0..90 {
                 cx.background_executor().timer(Duration::from_secs(2)).await;
                 let syncing = this.update(cx, |this, cx| {
                     cx.notify();
                     this.shielded.as_ref().is_some_and(|h| h.snapshot().syncing)
                 });
-                if !matches!(syncing, Ok(true)) {
-                    break;
+                match syncing {
+                    Ok(true) => continue,
+                    Ok(false) => {
+                        timed_out = false;
+                        break;
+                    }
+                    Err(_) => return, // the view is gone
                 }
             }
-            // Sync settled: if this was the post-shield sync, the note is now visible.
+            if !drive_lifecycle || timed_out {
+                return; // an initial/refresh watch, or a hung sync — don't touch the lifecycle
+            }
             this.update(cx, |this, cx| {
-                if matches!(
-                    this.shield_status,
-                    Some(ShieldStatus::SyncingPrivate { .. })
-                ) {
-                    let wei = this
-                        .shielded
-                        .as_ref()
-                        .and_then(|h| h.snapshot().shielded_wei)
-                        .unwrap_or(U256::ZERO);
-                    this.shield_status = Some(ShieldStatus::PrivateSpendable { shielded_wei: wei });
-                    cx.notify();
+                // Only advance an in-flight shield, and only on a real settled result.
+                if !matches!(this.shield_status, Some(ShieldStatus::Sending)) {
+                    return;
                 }
+                let snap = this.shielded.as_ref().map(|h| h.snapshot());
+                this.shield_status = match snap {
+                    Some(s) if s.error.is_some() => Some(ShieldStatus::Failed {
+                        reason: s.error.unwrap_or_default(),
+                    }),
+                    Some(s) => match s.shielded_wei {
+                        Some(wei) => Some(ShieldStatus::PrivateSpendable { shielded_wei: wei }),
+                        None => return, // settled without a value — leave it in-flight
+                    },
+                    None => return,
+                };
+                cx.notify();
             })
             .ok();
         })
@@ -1029,6 +1066,12 @@ impl Shell {
         self.current_rpc = url.clone();
         self.eth = EthProvider::spawn(url);
         self.retarget(cx);
+        // Re-point the shielded sync at the new RPC too (drops the old worker, clears stale
+        // private state) so public and private reads can't diverge across endpoints.
+        if self.auth == AuthStep::Ready {
+            self.shielded = None;
+            self.kick_railgun_grant(cx);
+        }
     }
 
     /// Select a sidebar entity: switch the selection and reset to its Home view.
@@ -1204,13 +1247,14 @@ impl Shell {
                 match res {
                     Ok(ExecuteResult::Broadcast { tx_hash }) => {
                         this.shield_tx = Some(tx_hash);
-                        // The deposit is on its way to a private note; re-sync to surface it
-                        // and drive the lifecycle (SyncingPrivate → PrivateSpendable).
-                        this.shield_status = Some(ShieldStatus::SyncingPrivate { tx_hash });
+                        // Just broadcast — honestly `Sending` (we don't track confirmations).
+                        // The re-sync surfaces the note; the watcher then settles to
+                        // PrivateSpendable (or Failed), never a fabricated "spendable $0".
+                        this.shield_status = Some(ShieldStatus::Sending);
                         if let Some(h) = &this.shielded {
                             h.resync();
                         }
-                        this.watch_shielded_sync(cx);
+                        this.watch_shielded_sync(true, cx);
                     }
                     Ok(ExecuteResult::Denied { reason }) => {
                         this.shield_error =
@@ -1317,9 +1361,17 @@ impl Shell {
         self.toggle_mask(cx);
     }
 
-    /// Pre-fill the shield recipient with the user's own 0zk address once the grant arrives
-    /// (the user can still edit it). Runs from `render`, the only place with a `Window`.
-    fn autofill_shield_recipient(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Clear a prior session's shield inputs once after lock, then pre-fill the recipient with
+    /// the user's own 0zk address once the grant arrives (still editable). Runs from `render`,
+    /// the only place with a `Window` for `set_value`.
+    fn prepare_shield_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending_shield_clear {
+            self.pending_shield_clear = false;
+            self.shield_amount
+                .update(cx, |i, cx| i.set_value("", window, cx));
+            self.shield_recipient
+                .update(cx, |i, cx| i.set_value("", window, cx));
+        }
         if self.recipient_autofilled {
             return;
         }
@@ -1373,7 +1425,7 @@ impl Render for Shell {
         let body = if self.auth == AuthStep::Ready {
             // The unlocked app: macOS title bar above the two-pane shell grid
             // (sidebar | [breadcrumb / content / status strip]) + command palette.
-            self.autofill_shield_recipient(window, cx);
+            self.prepare_shield_inputs(window, cx);
             let title_bar = self.render_title_bar(cx);
             let content = match (self.selection, self.surface) {
                 (_, Surface::Settings) => self.render_settings(window, cx).into_any_element(),
