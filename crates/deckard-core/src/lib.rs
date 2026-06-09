@@ -44,6 +44,9 @@ pub mod railgun_keys;
 /// `build_shield_native_intent` stub below returns a clear error (never a fake success).
 #[cfg(feature = "shield")]
 pub mod shield;
+/// Read-only Railgun shielded-balance sync actor (Wave-2 T9). Gated behind `shield`.
+#[cfg(feature = "shield")]
+pub mod shielded;
 pub mod tokens;
 
 pub use balances::{fetch_portfolio, format_amount, Portfolio, TokenBalance};
@@ -63,6 +66,8 @@ pub use shield::{build_shield_native_intent, RailgunAddress};
 pub use railgun_keys::{
     known_answer_ok, railgun_address_from_entropy, railgun_keys_from_entropy, RailgunKeys,
 };
+#[cfg(feature = "shield")]
+pub use shielded::{ShieldedHandle, ShieldedSnapshot};
 pub use tokens::{TokenInfo, DEFAULT_TOKENS};
 
 /// Feature-off stub: when `shield` is compiled out, the symbol still exists so the daemon

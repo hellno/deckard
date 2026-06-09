@@ -58,7 +58,6 @@ impl Shell {
         let border = theme.border;
         let surface = theme.secondary;
         let mono: SharedString = theme.mono_font_family.clone();
-        let masked = self.mask;
 
         // A small bordered key-hint chip, e.g. ⌘K.
         let chip = move |keys: String, label: String| {
@@ -181,53 +180,9 @@ impl Shell {
                                     ),
                             ),
                     )
-                    // Balance hero: the click-to-hide Total (mono-for-money, dimmed
-                    // decimals, weight 600) over a thin Splits-style allocation bar.
-                    // Clicking the Total toggles the privacy mask (one of its triggers).
-                    .child(
-                        v_flex()
-                            .w_full()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .id("balance-hero")
-                                    .cursor_pointer()
-                                    .text_3xl()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .map(|el| match native_wei {
-                                        Some(wei) => el.child(money(
-                                            wei,
-                                            18,
-                                            4,
-                                            Some("ETH"),
-                                            masked,
-                                            mono.clone(),
-                                            fg,
-                                            muted,
-                                        )),
-                                        None => el
-                                            .font_family(mono.clone())
-                                            .text_color(muted)
-                                            .child("—"),
-                                    })
-                                    .on_click(cx.listener(|this, _, _, cx| this.toggle_mask(cx))),
-                            )
-                            .children(native_wei.map(|_| {
-                                // v1: the whole balance is public; the bar is one segment
-                                // (Wave 2 splits it into Private/Public). Flattens when masked.
-                                allocation_bar(
-                                    vec![AllocSegment {
-                                        label: "Public".into(),
-                                        fraction: 1.0,
-                                        tone: id_square,
-                                    }],
-                                    masked,
-                                    border,
-                                    muted,
-                                    fg,
-                                )
-                            })),
-                    )
+                    // Balance hero: the merged Total (public + private), a Private/Public
+                    // allocation bar, and the composition lines (Wave 2 T10).
+                    .child(self.render_shielded_hero(native_wei, cx))
                     // Primary actions. Shield (the privacy hero) is the one live, primary
                     // CTA; Send + Swap are gated to the next release (Chunk 4, testnet-first)
                     // and shown disabled rather than inert-but-active.
@@ -269,6 +224,137 @@ impl Shell {
                             .child(chip(format!("{MOD},"), "Settings".into())),
                     ),
             )
+    }
+
+    /// The merged Total hero (Wave 2 T10): `Total = public + private` when both are known, a
+    /// Private/Public allocation bar (Private first, neutral shield tone — off the actor axis),
+    /// and the composition lines. While the private sync runs the total stays the known public
+    /// (never `public + 0`) and the private line reads "syncing…". Clicking the Total masks it.
+    fn render_shielded_hero(
+        &self,
+        native_wei: Option<U256>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme();
+        let fg = theme.foreground;
+        let muted = theme.muted_foreground;
+        let border = theme.border;
+        let mono: SharedString = theme.mono_font_family.clone();
+        let masked = self.mask;
+        let is_dark = theme.is_dark();
+        let public_tone = theme::identity_square(is_dark);
+        let shield_tone = theme::shield(is_dark);
+
+        let snap = self.shielded.as_ref().map(|h| h.snapshot());
+        let private_wei = snap.as_ref().and_then(|s| s.shielded_wei);
+        let syncing = snap.as_ref().map(|s| s.syncing).unwrap_or(false);
+        let public = native_wei;
+
+        // Total: sum only when the private side is known; never `public + 0` while syncing.
+        let total = match (public, private_wei) {
+            (Some(p), Some(s)) => Some(p.saturating_add(s)),
+            (Some(p), None) => Some(p),
+            _ => None,
+        };
+
+        let hero = div()
+            .id("balance-hero")
+            .cursor_pointer()
+            .text_3xl()
+            .font_weight(FontWeight::SEMIBOLD)
+            .map(|el| match total {
+                Some(wei) => el.child(money(
+                    wei,
+                    18,
+                    4,
+                    Some("ETH"),
+                    masked,
+                    mono.clone(),
+                    fg,
+                    muted,
+                )),
+                None => el.font_family(mono.clone()).text_color(muted).child("—"),
+            })
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_mask(cx)));
+
+        // No balance yet (first sync): just the placeholder hero.
+        let Some(pub_wei) = public else {
+            return v_flex().w_full().gap_3().child(hero).into_any_element();
+        };
+
+        // A real Private/Public split once the private side is known, else a single Public bar.
+        let bar = match private_wei {
+            Some(priv_wei) => {
+                let total_wei = pub_wei.saturating_add(priv_wei);
+                allocation_bar(
+                    vec![
+                        AllocSegment {
+                            label: "Private".into(),
+                            fraction: fraction(priv_wei, total_wei),
+                            tone: shield_tone,
+                        },
+                        AllocSegment {
+                            label: "Public".into(),
+                            fraction: fraction(pub_wei, total_wei),
+                            tone: public_tone,
+                        },
+                    ],
+                    masked,
+                    border,
+                    muted,
+                    fg,
+                )
+            }
+            None => allocation_bar(
+                vec![AllocSegment {
+                    label: "Public".into(),
+                    fraction: 1.0,
+                    tone: public_tone,
+                }],
+                masked,
+                border,
+                muted,
+                fg,
+            ),
+        };
+
+        v_flex()
+            .w_full()
+            .gap_3()
+            .child(hero)
+            .child(bar)
+            .child(
+                v_flex()
+                    .w_full()
+                    .gap_1()
+                    .child(composition_line(
+                        "Private",
+                        shield_tone,
+                        private_wei,
+                        syncing,
+                        masked,
+                        mono.clone(),
+                        fg,
+                        muted,
+                    ))
+                    .child(composition_line(
+                        "Public",
+                        public_tone,
+                        Some(pub_wei),
+                        false,
+                        masked,
+                        mono.clone(),
+                        fg,
+                        muted,
+                    )),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child("Private is WETH-equivalent, net of the 0.25% shield fee."),
+            )
+            .into_any_element()
     }
 
     /// The holdings region: skeleton on first sync, empty-state when nothing held,
@@ -636,6 +722,43 @@ fn allocation_bar(
         .child(bar)
         .child(legend)
         .into_any_element()
+}
+
+/// `part / total` as a 0..=1 fraction, via integer (bps) math — f32 only at the edge so a
+/// huge `U256` can't lose precision in the ratio. Zero `total` → 0.
+fn fraction(part: U256, total: U256) -> f32 {
+    if total.is_zero() {
+        return 0.0;
+    }
+    let bps = (part.saturating_mul(U256::from(10_000u64)) / total).min(U256::from(10_000u64));
+    let bps: u64 = bps.try_into().unwrap_or(0);
+    bps as f32 / 10_000.0
+}
+
+/// One composition line: a tone chip + label + the (maskable) amount, or "syncing…" while the
+/// private side hasn't landed (never a fake zero).
+#[allow(clippy::too_many_arguments)]
+fn composition_line(
+    label: &'static str,
+    tone: Hsla,
+    wei: Option<U256>,
+    syncing: bool,
+    masked: bool,
+    mono: SharedString,
+    fg: Hsla,
+    muted: Hsla,
+) -> impl IntoElement {
+    h_flex()
+        .w_full()
+        .items_center()
+        .gap_2()
+        .child(div().size(px(8.0)).rounded(px(2.0)).bg(tone))
+        .child(div().flex_1().text_xs().text_color(muted).child(label))
+        .child(div().text_xs().map(|el| match wei {
+            Some(w) => el.child(money(w, 18, 4, Some("ETH"), masked, mono, fg, muted)),
+            None if syncing => el.text_color(muted).child("syncing…"),
+            None => el.text_color(muted).child("—"),
+        }))
 }
 
 /// A shimmer-free skeleton placeholder row for the first-sync state.

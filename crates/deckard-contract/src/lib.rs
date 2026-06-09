@@ -37,7 +37,8 @@ pub use mock::MockSigner;
 pub use policy::{evaluate, ApprovalMode, Policy};
 pub use read_status::ReadStatus;
 pub use rpc::{
-    ApprovalStatus, BalanceReport, ExecuteResult, SignerRequest, SignerResponse, UnlockOutcome,
+    ApprovalStatus, BalanceReport, ExecuteResult, RailgunViewGrant, SignerRequest, SignerResponse,
+    UnlockOutcome,
 };
 pub use shield_status::ShieldStatus;
 pub use signer::Signer;

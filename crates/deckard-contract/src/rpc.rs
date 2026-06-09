@@ -43,6 +43,10 @@ pub enum SignerRequest {
     Address,
     /// → [`BalanceReport`].
     Balance { shielded: bool },
+    /// Export the read-only Railgun view grant (0zk address + viewing key) for shielded-balance
+    /// sync → [`SignerResponse::RailgunView`]. The daemon refuses unless it's unlocked AND the
+    /// derivation known-answer test passes (no grant from an unverified derivation).
+    RailgunViewGrant { chain_id: u64, index: u32 },
 }
 
 /// `deckard-signerd` → `deckard-mcp`. One variant per request shape.
@@ -58,6 +62,27 @@ pub enum SignerResponse {
     Policy(Policy),
     Address(Address),
     Balance(BalanceReport),
+    /// Reply to `RailgunViewGrant`, or a `Decision::Deny` when locked / the gate fails.
+    RailgunView(RailgunViewGrant),
+}
+
+/// A read-only Railgun grant: the 0zk `address` + the `viewing_key` (hex). NOT the spending
+/// key — the app can SEE private balances but cannot spend them (spending stays in the
+/// daemon). The viewing key reveals private note history, so it's a secret: `Debug` is
+/// redacted and callers must treat it accordingly.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct RailgunViewGrant {
+    pub address: String,
+    pub viewing_key: String,
+}
+
+impl core::fmt::Debug for RailgunViewGrant {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("RailgunViewGrant")
+            .field("address", &self.address)
+            .field("viewing_key", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Outcome of `Unlock`. Carries the wallet address on success — never any key material,
