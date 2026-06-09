@@ -3933,9 +3933,11 @@ dependencies = [
  "directories",
  "flume",
  "helios-ethereum",
+ "hmac",
  "railgun",
  "rand 0.8.6",
  "rand 0.9.4",
+ "sha2 0.10.9",
  "tokio",
  "zeroize",
 ]

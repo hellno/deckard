@@ -493,6 +493,35 @@ impl UnlockedVault {
         );
         entropy_to_phrase(&self.secret)
     }
+
+    /// The wallet's own Railgun **0zk address** for account `index` on `chain_id` — the shield
+    /// auto-fill recipient and the source of the viewing key. Derived from the same BIP-39
+    /// entropy as `account_signer` (the seed never leaves core). Errors for a raw-key import
+    /// (it has no mnemonic). Gated with `shield` since it leans on the railgun key types; the
+    /// derivation itself is KAT-verified in [`crate::railgun_keys`].
+    #[cfg(feature = "shield")]
+    pub fn railgun_address(&self, chain_id: u64, index: u32) -> anyhow::Result<String> {
+        anyhow::ensure!(
+            self.kind.has_phrase(),
+            "imported raw key has no Railgun 0zk address"
+        );
+        crate::railgun_keys::railgun_address_from_entropy(&self.secret, chain_id, index)
+    }
+
+    /// The read-only view grant `(0zk address, viewing-key hex)` for shielded-balance sync.
+    /// The spending key is never exported. Errors for a raw-key import.
+    #[cfg(feature = "shield")]
+    pub fn railgun_view_grant(
+        &self,
+        chain_id: u64,
+        index: u32,
+    ) -> anyhow::Result<(String, String)> {
+        anyhow::ensure!(
+            self.kind.has_phrase(),
+            "imported raw key has no Railgun keys"
+        );
+        crate::railgun_keys::railgun_view_grant_from_entropy(&self.secret, chain_id, index)
+    }
 }
 
 // --- crypto helpers ---

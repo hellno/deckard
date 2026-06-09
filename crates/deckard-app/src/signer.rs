@@ -7,7 +7,7 @@
 //! The keystore is only ever touched in-process by *onboarding* (to write `vault.bin`), never
 //! to sign.
 
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Address, B256, U256};
 use deckard_contract::{Decision, ExecuteResult, Intent, RequestId, UnlockOutcome};
 use deckard_signerd::{DaemonSupervisor, SignerClient};
 
@@ -83,6 +83,57 @@ pub fn send_blocking(client: &SignerClient, intent: &Intent) -> anyhow::Result<S
             }
         }
     }
+}
+
+/// Build a key-less Railgun **shield** intent from a free-text `0zk…` recipient (T5). Parses
+/// the recipient into a [`RailgunAddress`](deckard_core::RailgunAddress) — surfacing a clear
+/// error on a malformed address rather than building junk calldata — then wraps
+/// `deckard_core::build_shield_native_intent`. Pure + synchronous (a native shield does NO
+/// client-side ZK proof; it only encrypts the note + ABI-encodes), so the caller runs it on a
+/// background thread purely to keep the propose round-trip off the UI thread. Own-address
+/// auto-fill (replacing the free-text recipient) is Wave 2.
+pub fn build_shield_intent(
+    chain_id: u64,
+    recipient_0zk: &str,
+    value_wei: U256,
+) -> anyhow::Result<Intent> {
+    let recipient: deckard_core::RailgunAddress = recipient_0zk
+        .trim()
+        .parse()
+        .map_err(|e| anyhow::anyhow!("not a valid 0zk address: {e}"))?;
+    deckard_core::build_shield_native_intent(chain_id, recipient, value_wei)
+}
+
+/// Parse a decimal ETH amount (`"0.05"`, `"1"`, `"1.234"`) into wei. Pure + total: rejects
+/// empties, signs, non-digits, a second dot, and >18 fractional places, so the shield amount
+/// field never builds a wrong-magnitude intent. Returns a short, user-facing error string.
+pub fn parse_eth_to_wei(input: &str) -> Result<U256, String> {
+    let s = input.trim();
+    if s.is_empty() {
+        return Err("Enter an amount".into());
+    }
+    let (int_part, frac_part) = match s.split_once('.') {
+        Some((i, f)) => (i, f),
+        None => (s, ""),
+    };
+    if int_part.is_empty() && frac_part.is_empty() {
+        return Err("Enter a valid amount like 0.05".into());
+    }
+    let all_digits = |p: &str| p.bytes().all(|b| b.is_ascii_digit());
+    if !all_digits(int_part) || !all_digits(frac_part) {
+        return Err("Amount must be a number like 0.05".into());
+    }
+    if frac_part.len() > 18 {
+        return Err("Too many decimal places (max 18 for ETH)".into());
+    }
+    // Concatenate the integer part with the fractional part right-padded to 18 digits → wei.
+    let mut digits = String::with_capacity(int_part.len() + 18);
+    digits.push_str(if int_part.is_empty() { "0" } else { int_part });
+    digits.push_str(frac_part);
+    for _ in frac_part.len()..18 {
+        digits.push('0');
+    }
+    U256::from_str_radix(&digits, 10).map_err(|_| "Amount is too large".into())
 }
 
 /// Interpret an [`UnlockOutcome`] into either the wallet address or a user-facing error.
@@ -183,6 +234,39 @@ mod tests {
 
         server.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_eth_to_wei_handles_decimals_and_rejects_junk() {
+        // Whole + fractional ETH parse to exact wei.
+        assert_eq!(parse_eth_to_wei("1").unwrap(), U256::from(10u128.pow(18)));
+        assert_eq!(
+            parse_eth_to_wei("0.05").unwrap(),
+            U256::from(50_000_000_000_000_000u128)
+        );
+        assert_eq!(
+            parse_eth_to_wei(" 1.234 ").unwrap(),
+            U256::from(1_234_000_000_000_000_000u128)
+        );
+        assert_eq!(parse_eth_to_wei("0").unwrap(), U256::ZERO);
+        // Full 18-place precision survives.
+        assert_eq!(
+            parse_eth_to_wei("0.000000000000000001").unwrap(),
+            U256::from(1u64)
+        );
+        // Junk is rejected, never silently coerced to a wrong magnitude.
+        for bad in [
+            "",
+            " ",
+            ".",
+            "abc",
+            "-1",
+            "1.2.3",
+            "1,5",
+            "0.1234567890123456789",
+        ] {
+            assert!(parse_eth_to_wei(bad).is_err(), "{bad:?} must be rejected");
+        }
     }
 
     #[test]

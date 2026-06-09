@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 use tokio::net::UnixStream;
 
 use deckard_contract::{
-    Decision, ExecuteResult, Intent, RequestId, SignerRequest, SignerResponse, UnlockOutcome,
+    ApprovalStatus, Decision, ExecuteResult, Intent, RailgunViewGrant, RequestId, SignerRequest,
+    SignerResponse, UnlockOutcome,
 };
 
 use crate::frame;
@@ -109,6 +110,62 @@ impl SignerClient {
         match self.request_blocking(&SignerRequest::Lock)? {
             SignerResponse::Ack => Ok(()),
             other => Err(unexpected("Lock", other)),
+        }
+    }
+
+    /// Blocking [`propose`](Self::propose) — policy check, no signing, for callers
+    /// without a tokio runtime (the app's GUI background thread).
+    pub fn propose_blocking(&self, intent: &Intent) -> anyhow::Result<Decision> {
+        match self.request_blocking(&SignerRequest::Propose {
+            intent: intent.clone(),
+        })? {
+            SignerResponse::Decision(d) => Ok(d),
+            other => Err(unexpected("Propose", other)),
+        }
+    }
+
+    /// Blocking [`execute`](Self::execute) — sign + broadcast (or denial).
+    pub fn execute_blocking(&self, request_id: RequestId) -> anyhow::Result<ExecuteResult> {
+        match self.request_blocking(&SignerRequest::Execute { request_id })? {
+            SignerResponse::Execute(r) => Ok(r),
+            other => Err(unexpected("Execute", other)),
+        }
+    }
+
+    /// Blocking resolve: close a `NeedsApproval` loop by flipping its `Pending` record
+    /// to `Allowed` (`approved: true`) or `Denied` (`approved: false`).
+    pub fn resolve_blocking(&self, request_id: RequestId, approved: bool) -> anyhow::Result<()> {
+        match self.request_blocking(&SignerRequest::Resolve {
+            request_id,
+            approved,
+        })? {
+            SignerResponse::Ack => Ok(()),
+            other => Err(unexpected("Resolve", other)),
+        }
+    }
+
+    /// Blocking: fetch the read-only Railgun view grant (0zk address + viewing key) for
+    /// shielded-balance sync. A locked daemon or a failed derivation gate comes back as a
+    /// `Decision::Deny`, surfaced here as an error.
+    pub fn railgun_view_grant_blocking(
+        &self,
+        chain_id: u64,
+        index: u32,
+    ) -> anyhow::Result<RailgunViewGrant> {
+        match self.request_blocking(&SignerRequest::RailgunViewGrant { chain_id, index })? {
+            SignerResponse::RailgunView(grant) => Ok(grant),
+            SignerResponse::Decision(Decision::Deny { reason }) => {
+                anyhow::bail!("railgun view grant denied: {reason}")
+            }
+            other => Err(unexpected("RailgunViewGrant", other)),
+        }
+    }
+
+    /// Blocking poll of an approval loop → its current [`ApprovalStatus`].
+    pub fn status_blocking(&self, request_id: RequestId) -> anyhow::Result<ApprovalStatus> {
+        match self.request_blocking(&SignerRequest::Status { request_id })? {
+            SignerResponse::Status(s) => Ok(s),
+            other => Err(unexpected("Status", other)),
         }
     }
 

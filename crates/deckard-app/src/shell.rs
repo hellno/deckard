@@ -4,38 +4,83 @@
 //! `settings_view.rs` as `impl Shell` methods (Rust lets you split an inherent
 //! impl across modules), so this file stays focused on state + navigation.
 
+use std::time::Duration;
+
 use gpui::{
     div, App, AppContext, Context, Entity, FocusHandle, Focusable, FontWeight, InteractiveElement,
     IntoElement, ParentElement, Render, Styled, Window,
 };
 use gpui_component::{
-    button::{Button, ButtonVariants},
     h_flex,
     input::{InputEvent, InputState},
-    v_flex, ActiveTheme, IconName, TitleBar,
+    v_flex, ActiveTheme, TitleBar,
 };
 
-use deckard_core::{Address, EthProvider, KdfParams, Portfolio, ReadStatus, Vault, WordCount};
+use alloy_primitives::B256;
+use deckard_contract::{Decision, ExecuteResult, Intent, RequestId, ShieldStatus};
+use deckard_core::{
+    Address, EthProvider, KdfParams, Portfolio, ReadStatus, ShieldedHandle, Vault, WordCount, U256,
+};
 use zeroize::Zeroizing;
 
 use deckard_signerd::SignerClient;
 
 use crate::settings::{Settings, ThemeModePref};
 use crate::signer::{self, AppSigner};
-use crate::theme::{self, Accent};
+use crate::theme;
 use crate::wallet;
-use crate::{GoBack, NewItem, OpenSettings, TogglePalette, ToggleTheme, APP_NAME};
+use crate::{GoBack, NewItem, OpenSettings, ToggleMask, TogglePalette, ToggleTheme, APP_NAME};
 
 /// The chain the supervised daemon signs for. v1 is mainnet-first (the default RPC is
 /// mainnet); multi-chain app config that re-points both the reader and the daemon is a
 /// fast-follow.
 const DAEMON_CHAIN_ID: u64 = 1;
 
+/// The chain a **shield** deposit targets (T5 config seam, decision D1). It MUST equal the
+/// daemon's chain or `propose` denies `chain_mismatch` — so it defaults to
+/// [`DAEMON_CHAIN_ID`]. Railgun supports mainnet (1) and Sepolia (11155111); to record a
+/// shield on Sepolia, relaunch the daemon + reader on Sepolia and set this to `11155111`
+/// (a single switch point, kept out of the render path).
+const SHIELD_CHAIN_ID: u64 = DAEMON_CHAIN_ID;
+
+/// How long the user must hold the shield confirm before it signs — the deliberate-gesture
+/// duration (DESIGN: confirm is a hold, never a tap). The amber fill-sweep (`shield_view`)
+/// runs for the same span so the bar fills exactly as the action fires.
+pub(crate) const SHIELD_HOLD: Duration = Duration::from_millis(900);
+
 /// Trim a noisy provider error down to one short line for the UI.
 fn short_err(e: impl std::fmt::Display) -> String {
     let line = e.to_string();
     let line = line.lines().next().unwrap_or("").trim();
     line.chars().take(140).collect()
+}
+
+/// Map a daemon deny/`reason` tag to a calm, user-facing line (the wire tags are terse +
+/// machine-readable; the UI shouldn't show `chain_mismatch` raw).
+fn humanize_deny(reason: &str) -> String {
+    // The broadcast error carries a variable RPC suffix, so match it by prefix.
+    if reason.starts_with("broadcast_failed") {
+        return "the deposit couldn't be broadcast — check your network, then review again".into();
+    }
+    match reason {
+        "locked" => "unlock your wallet first".into(),
+        "revoked" => "the signer is paused (STOP is active)".into(),
+        "chain_mismatch" => {
+            "the signer is on a different chain than this deposit — reconcile the chain first"
+                .into()
+        }
+        "over_cap" | "cap_exceeded" => "it exceeds the agent's spending cap".into(),
+        "off_allowlist" => "the recipient isn't on the allowlist".into(),
+        "undecodable" => "the deposit calldata didn't validate".into(),
+        "erc20_unsupported_v1" => "only native-ETH shields are supported in v1".into(),
+        "unsupported_v1" => "that action isn't supported in v1".into(),
+        "broadcast_timeout" => {
+            "the network didn't confirm in time — your deposit may already be in flight, so check your activity before retrying"
+                .into()
+        }
+        "already_executed" => "this deposit was already submitted".into(),
+        other => other.to_string(),
+    }
 }
 
 /// Run `prework` (which seals + writes the keystore for create/import/migrate, or is a no-op
@@ -52,11 +97,36 @@ fn write_then_unlock(
     signer::address_or_error(outcome)
 }
 
+/// What the sidebar tree selects — the contextual-view driver. The home surface
+/// renders differently per selection (wallet / project / agent). Demo scope is a
+/// single project, wallet, and agent (see deckard-demo-ux-locked.md).
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Route {
-    Welcome,
+pub enum Selection {
+    Project,
+    Wallet,
+    Agent,
+}
+
+/// Transient full-pane surfaces opened FROM a selection. `Home` = the contextual
+/// view for the current `Selection`; `Receive`/`Settings` are actions, not nav
+/// destinations (DESIGN §Information architecture).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Surface {
+    Home,
     Receive,
+    /// The shield trigger flow (T5): compose a deposit → review card → hold-to-confirm.
+    Shield,
     Settings,
+}
+
+/// A reviewed-and-allowed shield, ready to sign. Carries a **recipient snapshot** taken at
+/// review time so the clear-signing card always shows the recipient that is actually inside
+/// `intent` — never a value the user edited in the input after `propose` landed.
+#[derive(Clone)]
+pub struct ShieldProposal {
+    pub intent: Intent,
+    pub request_id: RequestId,
+    pub recipient: String,
 }
 
 /// The auth gate that wraps the whole app. Until it reaches `Ready`, the portfolio and
@@ -81,13 +151,66 @@ pub enum AuthStep {
 
 pub struct Shell {
     pub focus_handle: FocusHandle,
-    pub route: Route,
+    /// Which sidebar entity is selected (drives the Home contextual view).
+    pub selection: Selection,
+    /// The active full-pane surface (Home = the selection's contextual view).
+    pub surface: Surface,
     pub settings: Settings,
     pub name_input: Entity<InputState>,
     pub rpc_input: Entity<InputState>,
     pub watch_input: Entity<InputState>,
     pub created: usize,
     pub palette_open: bool,
+    /// Privacy mask: when true, every money surface renders fixed bullets instead of a
+    /// figure (DESIGN §Trust). Initialised from `Settings.mask_balances` and persisted on
+    /// every toggle — the inverse of the seed reveal's momentary, default-hidden model.
+    pub mask: bool,
+    /// Demo stand-in for "Atlas is currently acting": drives the one sanctioned ambient
+    /// motion (the ~1.2s breathing pulse on the agent squircle). Not persisted — it's a
+    /// narrated demo toggle, since the real MCP agent is a fast-follow.
+    pub agent_acting: bool,
+    /// The capture-block state last pushed to the OS, so `render` only re-issues the
+    /// native `setSharingType` call when `capture_block && mask` actually changes.
+    capture_applied: bool,
+
+    // --- shield trigger flow (T5) ---
+    /// Deposit amount (ETH, free text) and the `0zk…` recipient. Free-text recipient is v1;
+    /// auto-filling the user's OWN railgun address is Wave 2.
+    pub shield_amount: Entity<InputState>,
+    pub shield_recipient: Entity<InputState>,
+    /// Set once `propose` returns `Allow`. `Some` means the review card + hold-to-confirm are
+    /// live; it carries a recipient snapshot so the card can't show a since-edited address.
+    pub shield_proposal: Option<ShieldProposal>,
+    /// Bumped on each `review_shield` (and on reset) so a slow propose reply for a
+    /// since-cancelled/re-issued review can't install a stale proposal.
+    shield_review_epoch: u64,
+    /// True while a `propose`/`execute` round-trip runs on a background thread.
+    pub shield_busy: bool,
+    /// One-line, user-facing shield error (parse / build / deny / broadcast).
+    pub shield_error: Option<String>,
+    /// Set on a successful `execute` broadcast — the demo's "deposit is moving private" state.
+    pub shield_tx: Option<B256>,
+    /// True while the confirm button is being held; drives the amber fill-sweep.
+    pub shield_holding: bool,
+    /// Bumped on each hold-start so a stale hold timer can't fire a later confirm.
+    shield_hold_epoch: u64,
+
+    // --- shielded balance (Wave 2: T9 sync + T10 lifecycle) ---
+    /// The read-only Railgun sync actor (None until the view grant is fetched post-unlock,
+    /// and only if the derivation gate passes). Holds the viewing key, never the spending key.
+    pub shielded: Option<ShieldedHandle>,
+    /// The user's own 0zk address — the shield recipient auto-fill (None until granted).
+    pub railgun_address: Option<String>,
+    /// True once the shield recipient input has been auto-filled with `railgun_address`.
+    recipient_autofilled: bool,
+    /// The active shield's lifecycle, surfaced in the status strip (None when idle).
+    pub shield_status: Option<ShieldStatus>,
+    /// Bumped on every unlock/lock so a slow grant fetch from a prior session can't install a
+    /// stale handle/address after the wallet locked or a different wallet unlocked.
+    auth_epoch: u64,
+    /// Set on lock so the next Ready render clears the shield inputs (which a listener can't —
+    /// `set_value` needs a `Window`), preventing a prior wallet's 0zk recipient from lingering.
+    pending_shield_clear: bool,
 
     // --- auth / keystore (Chunk 3) ---
     pub auth: AuthStep,
@@ -226,6 +349,29 @@ impl Shell {
             InputState::new(window, cx).placeholder("12 / 24-word phrase, or a 0x private key")
         });
 
+        // Shield flow inputs (T5): amount in ETH + the 0zk recipient (free text in v1).
+        let shield_amount =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Amount in ETH, e.g. 0.05"));
+        let shield_recipient =
+            cx.new(|cx| InputState::new(window, cx).placeholder("0zk… recipient address"));
+        // Re-render on edits so the Review button's disabled state tracks validity live;
+        // Enter on the recipient reviews the deposit (keyboard-first).
+        cx.subscribe(&shield_amount, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        })
+        .detach();
+        cx.subscribe(
+            &shield_recipient,
+            |this, _, event: &InputEvent, cx| match event {
+                InputEvent::Change => cx.notify(),
+                InputEvent::PressEnter { .. } => this.review_shield(cx),
+                _ => {}
+            },
+        )
+        .detach();
+
         // Submit-on-Enter for each auth field (keyboard-first).
         cx.subscribe(&create_pass2, |this, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
@@ -272,15 +418,37 @@ impl Shell {
         // same RPC the app reads from.
         let signer = AppSigner::launch(current_rpc.clone(), DAEMON_CHAIN_ID);
 
+        // The mask is a persisted preference (default off); seed it from settings.
+        let mask = settings.mask_balances;
+
         Self {
             focus_handle,
-            route: Route::Welcome,
+            selection: Selection::Wallet,
+            surface: Surface::Home,
             settings,
             name_input,
             rpc_input,
             watch_input,
             created: 0,
             palette_open: false,
+            mask,
+            agent_acting: false,
+            capture_applied: false,
+            shield_amount,
+            shield_recipient,
+            shield_proposal: None,
+            shield_review_epoch: 0,
+            shield_busy: false,
+            shield_error: None,
+            shield_tx: None,
+            shield_holding: false,
+            shield_hold_epoch: 0,
+            shielded: None,
+            railgun_address: None,
+            recipient_autofilled: false,
+            shield_status: None,
+            auth_epoch: 0,
+            pending_shield_clear: false,
             auth,
             auth_error: None,
             auth_busy: false,
@@ -355,6 +523,15 @@ impl Shell {
         .detach();
         self.wallet_address = None;
         self.portfolio = None;
+        // Dropping the handle closes its channel → the sync worker thread exits.
+        self.shielded = None;
+        self.railgun_address = None;
+        self.recipient_autofilled = false;
+        self.shield_status = None;
+        // Invalidate any in-flight grant fetch and clear shield inputs on the next render.
+        self.auth_epoch = self.auth_epoch.wrapping_add(1);
+        self.pending_shield_clear = true;
+        self.reset_shield();
         self.auth = AuthStep::Unlock;
         self.palette_open = false;
         cx.notify();
@@ -643,8 +820,96 @@ impl Shell {
         self.wallet_address = Some(address);
         self.auth = AuthStep::Ready;
         self.auth_error = None;
-        self.route = Route::Welcome;
+        self.selection = Selection::Wallet;
+        self.surface = Surface::Home;
+        self.auth_epoch = self.auth_epoch.wrapping_add(1);
         self.retarget(cx);
+        self.kick_railgun_grant(cx);
+    }
+
+    /// After unlock, ask the daemon for the read-only Railgun view grant (it gates this on the
+    /// derivation known-answer test), then spawn the shielded-balance sync over the app's RPC
+    /// and start watching it. If the daemon refuses (locked / gate failed), there's simply no
+    /// shielded UI — honest, never a fabricated private balance.
+    fn kick_railgun_grant(&mut self, cx: &mut Context<Self>) {
+        // Belt-and-suspenders: the daemon already gates the grant on the derivation KAT, but
+        // never show a shielded balance unless the app independently re-verifies it too.
+        if !deckard_core::known_answer_ok() {
+            return;
+        }
+        let client = self.signer.client();
+        let chain_id = SHIELD_CHAIN_ID;
+        let rpc = self.settings.effective_rpc();
+        let epoch = self.auth_epoch;
+        let task =
+            cx.background_spawn(async move { client.railgun_view_grant_blocking(chain_id, 0) });
+        cx.spawn(async move |this, cx| {
+            let grant = task.await;
+            this.update(cx, |this, cx| {
+                // Drop a reply for a session that has since locked / re-unlocked.
+                if this.auth_epoch != epoch || this.auth != AuthStep::Ready {
+                    return;
+                }
+                if let Ok(grant) = grant {
+                    this.railgun_address = Some(grant.address.clone());
+                    this.recipient_autofilled = false;
+                    this.shielded = Some(ShieldedHandle::spawn(rpc, chain_id, grant));
+                    this.watch_shielded_sync(false, cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Poll the shielded snapshot while a sync runs so the UI reflects progress (the actor's
+    /// cached state isn't a GPUI entity, so we tick it). Capped so a hung sync can't loop
+    /// forever. With `drive_lifecycle`, once the sync SETTLES it advances `ShieldStatus`
+    /// honestly: a clean synced balance → `PrivateSpendable(wei)`, a sync error → `Failed`, a
+    /// timeout → stays in-flight (never claims "spendable" with a fabricated zero).
+    fn watch_shielded_sync(&self, drive_lifecycle: bool, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let mut timed_out = true;
+            for _ in 0..90 {
+                cx.background_executor().timer(Duration::from_secs(2)).await;
+                let syncing = this.update(cx, |this, cx| {
+                    cx.notify();
+                    this.shielded.as_ref().is_some_and(|h| h.snapshot().syncing)
+                });
+                match syncing {
+                    Ok(true) => continue,
+                    Ok(false) => {
+                        timed_out = false;
+                        break;
+                    }
+                    Err(_) => return, // the view is gone
+                }
+            }
+            if !drive_lifecycle || timed_out {
+                return; // an initial/refresh watch, or a hung sync — don't touch the lifecycle
+            }
+            this.update(cx, |this, cx| {
+                // Only advance an in-flight shield, and only on a real settled result.
+                if !matches!(this.shield_status, Some(ShieldStatus::Sending)) {
+                    return;
+                }
+                let snap = this.shielded.as_ref().map(|h| h.snapshot());
+                this.shield_status = match snap {
+                    Some(s) if s.error.is_some() => Some(ShieldStatus::Failed {
+                        reason: s.error.unwrap_or_default(),
+                    }),
+                    Some(s) => match s.shielded_wei {
+                        Some(wei) => Some(ShieldStatus::PrivateSpendable { shielded_wei: wei }),
+                        None => return, // settled without a value — leave it in-flight
+                    },
+                    None => return,
+                };
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// The unlocked wallet's own address as an EIP-55 string (empty until unlocked).
@@ -801,26 +1066,253 @@ impl Shell {
         self.current_rpc = url.clone();
         self.eth = EthProvider::spawn(url);
         self.retarget(cx);
+        // Re-point the shielded sync at the new RPC too (drops the old worker, clears stale
+        // private state) so public and private reads can't diverge across endpoints.
+        if self.auth == AuthStep::Ready {
+            self.shielded = None;
+            self.kick_railgun_grant(cx);
+        }
     }
 
-    pub fn navigate(&mut self, route: Route, cx: &mut Context<Self>) {
-        self.route = route;
+    /// Select a sidebar entity: switch the selection and reset to its Home view.
+    pub fn select(&mut self, sel: Selection, cx: &mut Context<Self>) {
+        self.selection = sel;
+        self.surface = Surface::Home;
         cx.notify();
     }
 
-    /// Re-install the theme from the current settings (accent + mode).
-    fn apply_theme(&self, cx: &mut Context<Self>) {
-        theme::install(cx, self.settings.accent, self.settings.theme_mode.to_gpui());
+    /// Open a full-pane surface (Home / Receive / Settings) over the current selection.
+    pub fn open(&mut self, surface: Surface, cx: &mut Context<Self>) {
+        // Leaving Shield (back, palette, a nav click) cancels any in-progress hold so its
+        // timer can't fire a confirm after the screen is gone.
+        if surface != Surface::Shield && self.shield_holding {
+            self.shield_holding = false;
+            self.shield_hold_epoch = self.shield_hold_epoch.wrapping_add(1);
+        }
+        self.surface = surface;
+        cx.notify();
     }
 
-    pub fn set_accent(&mut self, accent: Accent, cx: &mut Context<Self>) {
-        self.settings.accent = accent;
+    /// Set the privacy mask to an explicit value (the Settings switch), persisting it.
+    pub fn set_mask(&mut self, masked: bool, cx: &mut Context<Self>) {
+        if self.mask == masked {
+            return;
+        }
+        self.mask = masked;
+        self.settings.mask_balances = masked;
         self.settings.save();
-        self.apply_theme(cx);
-        // Keep the menu-bar tray icon (if running) in sync with the accent.
-        #[cfg(feature = "tray")]
-        crate::tray::set_accent(cx, accent);
         cx.notify();
+    }
+
+    /// Toggle the privacy mask (the ⌘⇧M action, the eye glyph, the click-the-Total
+    /// gesture, and the palette row all route here). Persists the new state.
+    pub fn toggle_mask(&mut self, cx: &mut Context<Self>) {
+        self.set_mask(!self.mask, cx);
+    }
+
+    /// Flip the demo "agent currently acting" state (the breathing-pulse driver). Not
+    /// persisted — Atlas is an openly-narrated manual stand-in for v1.
+    pub fn toggle_agent_acting(&mut self, cx: &mut Context<Self>) {
+        self.agent_acting = !self.agent_acting;
+        cx.notify();
+    }
+
+    // --- shield trigger flow (T5) ---
+
+    /// Open the shield flow with a clean slate (clears any prior proposal/error/result; the
+    /// typed amount/recipient are left intact). No-op while viewing a watched read-only
+    /// account — a shield signs from YOUR wallet, so it must not be initiated from a
+    /// someone-else's-address context.
+    pub fn open_shield(&mut self, cx: &mut Context<Self>) {
+        if self.viewing_watch {
+            return;
+        }
+        self.reset_shield();
+        self.open(Surface::Shield, cx);
+    }
+
+    /// Clear all transient shield state (proposal, error, broadcast, hold). Bumps the hold +
+    /// review epochs so any in-flight hold timer or propose reply lands as a no-op.
+    fn reset_shield(&mut self) {
+        self.shield_proposal = None;
+        self.shield_error = None;
+        self.shield_tx = None;
+        self.shield_busy = false;
+        self.shield_holding = false;
+        self.shield_hold_epoch = self.shield_hold_epoch.wrapping_add(1);
+        self.shield_review_epoch = self.shield_review_epoch.wrapping_add(1);
+    }
+
+    /// Build + `propose` the shield off-thread. On `Allow`, stash the proposal so the review
+    /// card + hold-to-confirm appear; on `NeedsApproval`/`Deny`/parse error, surface a clear
+    /// line. Mirrors `do_unlock` (build off-thread, fold the result on the UI thread).
+    pub fn review_shield(&mut self, cx: &mut Context<Self>) {
+        if self.shield_busy {
+            return;
+        }
+        let amount = self.shield_amount.read(cx).value().to_string();
+        let recipient = self.shield_recipient.read(cx).value().to_string();
+        let value_wei = match signer::parse_eth_to_wei(&amount) {
+            Ok(w) if w > U256::ZERO => w,
+            Ok(_) => {
+                self.shield_error = Some("Enter an amount greater than zero".into());
+                cx.notify();
+                return;
+            }
+            Err(e) => {
+                self.shield_error = Some(e);
+                cx.notify();
+                return;
+            }
+        };
+        if recipient.trim().is_empty() {
+            self.shield_error = Some("Enter a 0zk recipient address".into());
+            cx.notify();
+            return;
+        }
+        self.shield_error = None;
+        self.shield_proposal = None;
+        self.shield_busy = true;
+        // Each review supersedes the last; a slow reply for a since-cancelled/re-issued
+        // review checks this epoch before installing (and before touching `busy`).
+        self.shield_review_epoch = self.shield_review_epoch.wrapping_add(1);
+        let epoch = self.shield_review_epoch;
+        let recipient_snapshot = recipient.clone();
+        cx.notify();
+        let client = self.signer.client();
+        let task = cx.background_spawn(async move {
+            let intent = signer::build_shield_intent(SHIELD_CHAIN_ID, &recipient, value_wei)?;
+            let decision = client.propose_blocking(&intent)?;
+            Ok::<(Intent, Decision), anyhow::Error>((intent, decision))
+        });
+        cx.spawn(async move |this, cx| {
+            let res = task.await;
+            this.update(cx, |this, cx| {
+                // Guard FIRST: a stale review must not even clear `busy` (a newer review may
+                // own it now).
+                if this.shield_review_epoch != epoch {
+                    return;
+                }
+                this.shield_busy = false;
+                match res {
+                    Ok((intent, Decision::Allow)) => {
+                        let request_id = SignerClient::request_id_for_intent(&intent);
+                        this.shield_proposal = Some(ShieldProposal {
+                            intent,
+                            request_id,
+                            recipient: recipient_snapshot,
+                        });
+                    }
+                    Ok((_, Decision::NeedsApproval { .. })) => {
+                        this.shield_error = Some(
+                            "This is over the agent cap — a human approval card is required (lands with the approvals flow)."
+                                .into(),
+                        );
+                    }
+                    Ok((_, Decision::Deny { reason })) => {
+                        this.shield_error =
+                            Some(format!("Can't shield: {}", humanize_deny(&reason)));
+                    }
+                    Err(e) => this.shield_error = Some(short_err(e)),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Sign + broadcast the reviewed shield off-thread (the hold-to-confirm completed). On
+    /// success the deposit is on its way to a private note; surface the broadcast.
+    pub fn confirm_shield(&mut self, cx: &mut Context<Self>) {
+        let Some(ShieldProposal { request_id, .. }) = self.shield_proposal.clone() else {
+            return;
+        };
+        if self.shield_busy {
+            return;
+        }
+        self.shield_busy = true;
+        self.shield_error = None;
+        cx.notify();
+        let client = self.signer.client();
+        let task = cx.background_spawn(async move { client.execute_blocking(request_id) });
+        cx.spawn(async move |this, cx| {
+            let res = task.await;
+            this.update(cx, |this, cx| {
+                this.shield_busy = false;
+                // Invalidate the proposal on EVERY execute attempt: a second hold must not be
+                // able to re-broadcast. On an ambiguous timeout the deposit may already be in
+                // flight, so retrying requires a fresh, deliberate review (new request id).
+                this.shield_proposal = None;
+                match res {
+                    Ok(ExecuteResult::Broadcast { tx_hash }) => {
+                        this.shield_tx = Some(tx_hash);
+                        // Just broadcast — honestly `Sending` (we don't track confirmations).
+                        // The re-sync surfaces the note; the watcher then settles to
+                        // PrivateSpendable (or Failed), never a fabricated "spendable $0".
+                        this.shield_status = Some(ShieldStatus::Sending);
+                        if let Some(h) = &this.shielded {
+                            h.resync();
+                        }
+                        this.watch_shielded_sync(true, cx);
+                    }
+                    Ok(ExecuteResult::Denied { reason }) => {
+                        this.shield_error =
+                            Some(format!("Shield denied: {}", humanize_deny(&reason)));
+                    }
+                    Err(e) => this.shield_error = Some(short_err(e)),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Begin a confirm hold: start the amber fill-sweep and a timer that fires
+    /// `confirm_shield` only if the hold survives [`SHIELD_HOLD`]. A per-hold epoch guards
+    /// against a stale timer firing after an early release / re-press.
+    pub fn shield_hold_start(&mut self, cx: &mut Context<Self>) {
+        if self.shield_holding || self.shield_busy || self.shield_proposal.is_none() {
+            return;
+        }
+        self.shield_holding = true;
+        self.shield_hold_epoch = self.shield_hold_epoch.wrapping_add(1);
+        let epoch = self.shield_hold_epoch;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SHIELD_HOLD).await;
+            this.update(cx, |this, cx| {
+                // Only fire if THIS hold is still active (not released, not superseded) AND
+                // the user is still on the Shield surface — leaving via ⌘[ / palette / a
+                // surface change must never let a held confirm sign after the screen is gone.
+                if this.shield_holding
+                    && this.shield_hold_epoch == epoch
+                    && this.surface == Surface::Shield
+                    && this.shield_proposal.is_some()
+                {
+                    this.shield_holding = false;
+                    this.confirm_shield(cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Release the confirm hold before it completed — reset the sweep; the epoch bump
+    /// cancels the pending timer.
+    pub fn shield_hold_cancel(&mut self, cx: &mut Context<Self>) {
+        if self.shield_holding {
+            self.shield_holding = false;
+            self.shield_hold_epoch = self.shield_hold_epoch.wrapping_add(1);
+            cx.notify();
+        }
+    }
+
+    /// Re-install the theme from the current settings (mode).
+    fn apply_theme(&self, cx: &mut Context<Self>) {
+        theme::install(cx, self.settings.theme_mode.to_gpui());
     }
 
     pub fn set_mode(&mut self, mode: ThemeModePref, cx: &mut Context<Self>) {
@@ -846,12 +1338,13 @@ impl Shell {
     }
 
     fn on_open_settings(&mut self, _: &OpenSettings, _: &mut Window, cx: &mut Context<Self>) {
-        self.navigate(Route::Settings, cx);
+        self.open(Surface::Settings, cx);
     }
 
     fn on_go_back(&mut self, _: &GoBack, _: &mut Window, cx: &mut Context<Self>) {
-        if self.route != Route::Welcome {
-            self.navigate(Route::Welcome, cx);
+        // Back = leave any action surface and return to the selection's Home view.
+        if self.surface != Surface::Home {
+            self.open(Surface::Home, cx);
         }
     }
 
@@ -864,61 +1357,53 @@ impl Shell {
         cx.notify();
     }
 
+    fn on_toggle_mask(&mut self, _: &ToggleMask, _: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_mask(cx);
+    }
+
+    /// Clear a prior session's shield inputs once after lock, then pre-fill the recipient with
+    /// the user's own 0zk address once the grant arrives (still editable). Runs from `render`,
+    /// the only place with a `Window` for `set_value`.
+    fn prepare_shield_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending_shield_clear {
+            self.pending_shield_clear = false;
+            self.shield_amount
+                .update(cx, |i, cx| i.set_value("", window, cx));
+            self.shield_recipient
+                .update(cx, |i, cx| i.set_value("", window, cx));
+        }
+        if self.recipient_autofilled {
+            return;
+        }
+        if let Some(addr) = self.railgun_address.clone() {
+            self.shield_recipient.update(cx, |input, cx| {
+                input.set_value(addr.as_str(), window, cx);
+            });
+            self.recipient_autofilled = true;
+        }
+    }
+
+    /// Push the capture-block state to the OS when `capture_block && mask` changes.
+    /// Called once per `render`; the change-guard makes it a no-op on most frames. On a
+    /// non-macOS or non-`tray` build `apply_capture_block` is itself an inert no-op.
+    fn sync_capture_block(&mut self) {
+        let desired = self.settings.capture_block && self.mask;
+        if desired != self.capture_applied {
+            crate::capture::apply_capture_block(desired);
+            self.capture_applied = desired;
+        }
+    }
+
+    /// A bare macOS title bar: just the traffic-light inset + the app name. Its old
+    /// settings/theme controls now live in the breadcrumb (`shell_chrome.rs`).
     fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
-        let is_settings = self.route == Route::Settings;
-        let theme_icon = if self.settings.theme_mode == ThemeModePref::Dark {
-            IconName::Sun
-        } else {
-            IconName::Moon
-        };
-
         TitleBar::new().child(
-            h_flex()
-                .w_full()
-                .items_center()
-                .justify_between()
-                .child(
-                    h_flex()
-                        .items_center()
-                        .gap_2()
-                        .children(is_settings.then(|| {
-                            Button::new("back")
-                                .ghost()
-                                .icon(IconName::ChevronLeft)
-                                .on_click(
-                                    cx.listener(|this, _, _, cx| this.navigate(Route::Welcome, cx)),
-                                )
-                        }))
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(muted)
-                                .child(if is_settings { "Settings" } else { APP_NAME }),
-                        ),
-                )
-                .child(
-                    h_flex()
-                        .items_center()
-                        .gap_1()
-                        .children((!is_settings).then(|| {
-                            Button::new("open-settings")
-                                .ghost()
-                                .icon(IconName::Settings)
-                                .on_click(
-                                    cx.listener(|this, _, _, cx| {
-                                        this.navigate(Route::Settings, cx)
-                                    }),
-                                )
-                        }))
-                        .child(
-                            Button::new("toggle-theme")
-                                .ghost()
-                                .icon(theme_icon)
-                                .on_click(cx.listener(|this, _, _, cx| this.toggle_mode(cx))),
-                        ),
-                ),
+            div()
+                .text_sm()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(muted)
+                .child(APP_NAME),
         )
     }
 }
@@ -933,18 +1418,40 @@ impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let background = cx.theme().background;
 
+        // Keep the OS capture-block in sync with `capture_block && mask` (no-op unless it
+        // changed, and a no-op entirely off a macOS `--features tray` build).
+        self.sync_capture_block();
+
         let body = if self.auth == AuthStep::Ready {
-            // The unlocked app: full title bar + routes + command palette.
+            // The unlocked app: macOS title bar above the two-pane shell grid
+            // (sidebar | [breadcrumb / content / status strip]) + command palette.
+            self.prepare_shield_inputs(window, cx);
             let title_bar = self.render_title_bar(cx);
-            let content = match self.route {
-                Route::Welcome => self.render_welcome(cx).into_any_element(),
-                Route::Receive => self.render_receive(cx).into_any_element(),
-                Route::Settings => self.render_settings(window, cx).into_any_element(),
+            let content = match (self.selection, self.surface) {
+                (_, Surface::Settings) => self.render_settings(window, cx).into_any_element(),
+                (_, Surface::Receive) => self.render_receive(cx).into_any_element(),
+                (_, Surface::Shield) => self.render_shield(cx).into_any_element(),
+                (Selection::Wallet, Surface::Home) => {
+                    self.render_wallet_home(cx).into_any_element()
+                }
+                (Selection::Project, Surface::Home) => {
+                    self.render_project_home(cx).into_any_element()
+                }
+                (Selection::Agent, Surface::Home) => self.render_agent_home(cx).into_any_element(),
             };
             v_flex()
                 .size_full()
                 .child(title_bar)
-                .child(content)
+                .child(
+                    h_flex().size_full().child(self.render_sidebar(cx)).child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(self.render_breadcrumb(cx))
+                            .child(div().flex_1().min_h_0().child(content))
+                            .child(self.render_status_strip(cx)),
+                    ),
+                )
                 .children(self.palette_open.then(|| self.render_palette(cx)))
                 .into_any_element()
         } else {
@@ -971,6 +1478,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::on_go_back))
             .on_action(cx.listener(Self::on_toggle_theme))
             .on_action(cx.listener(Self::on_toggle_palette))
+            .on_action(cx.listener(Self::on_toggle_mask))
             .child(body)
     }
 }

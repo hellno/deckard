@@ -22,11 +22,14 @@ use tray_icon::{
     Icon, TrayIcon, TrayIconBuilder,
 };
 
-use crate::theme::Accent;
+/// The fixed brand color for the tray icon (locked amber, `#F2A43B`). The 6-accent
+/// picker is gone — there is one brand color.
+const BRAND: u32 = 0x00F2_A43B;
 
-/// Holds the live tray icon so it (a) stays alive for the process and (b) can be
-/// restyled when the user changes accent in settings. Stored as a GPUI global.
+/// Holds the live tray icon so it stays alive for the whole process. Stored as a
+/// GPUI global.
 struct TrayState {
+    #[allow(dead_code)]
     tray: TrayIcon,
 }
 
@@ -34,7 +37,7 @@ impl Global for TrayState {}
 
 /// Build the tray icon, hide the dock, and bridge tray-menu clicks into GPUI.
 /// Call once from `app.run` (it must run on the main thread, after launch).
-pub fn install(cx: &mut App, accent: Accent) {
+pub fn install(cx: &mut App) {
     hide_dock_icon();
 
     let menu = Menu::new();
@@ -45,13 +48,12 @@ pub fn install(cx: &mut App, accent: Accent) {
 
     let tray = TrayIconBuilder::new()
         .with_tooltip(crate::APP_NAME)
-        .with_icon(brand_icon(accent))
+        .with_icon(brand_icon())
         .with_menu(Box::new(menu))
         .build()
         .expect("failed to build tray icon");
 
-    // Keep the status item alive for the whole process, and reachable so accent
-    // changes can restyle it (see `set_accent`).
+    // Keep the status item alive for the whole process.
     cx.set_global(TrayState { tray });
 
     let show_id = show.id().clone();
@@ -78,15 +80,6 @@ pub fn install(cx: &mut App, accent: Accent) {
     .detach();
 }
 
-/// Restyle the tray icon to match a new accent. No-op if the tray isn't running
-/// (i.e. the feature is on but `install` wasn't called). Wired from `Shell`.
-pub fn set_accent(cx: &mut App, accent: Accent) {
-    if cx.has_global::<TrayState>() {
-        let icon = brand_icon(accent);
-        let _ = cx.global::<TrayState>().tray.set_icon(Some(icon));
-    }
-}
-
 /// Make the app a menu-bar "accessory": no dock icon, no ⌘-Tab entry.
 /// macOS-only — GPUI hardcodes `Regular` at launch, so we override it here at
 /// runtime via objc2. On Linux/Windows there's no dock; whether a window shows
@@ -106,12 +99,12 @@ fn hide_dock_icon() {
 #[cfg(not(target_os = "macos"))]
 fn hide_dock_icon() {}
 
-/// A simple 32×32 rounded-square icon in the current accent color. Replace with
+/// A simple 32×32 rounded-square icon in the fixed brand color. Replace with
 /// your own — e.g. `Icon::from_path("…")`, or a black template image so macOS
 /// tints it to match the menu bar automatically.
-fn brand_icon(accent: Accent) -> Icon {
+fn brand_icon() -> Icon {
     const SIZE: u32 = 32;
-    let hex = accent.rgb();
+    let hex = BRAND;
     let (r, g, b) = ((hex >> 16) as u8, (hex >> 8) as u8, hex as u8);
     let mut rgba = vec![0u8; (SIZE * SIZE * 4) as usize];
     for y in 0..SIZE {
