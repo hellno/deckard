@@ -1444,9 +1444,16 @@ impl Render for Shell {
                 .child(title_bar)
                 .child(
                     h_flex().size_full().child(self.render_sidebar(cx)).child(
+                        // Fill the full pane height (like the sidebar's `.h_full()`): `h_flex`
+                        // centers its children vertically, so without this the content column
+                        // collapses to its intrinsic height and floats mid-pane — the
+                        // breadcrumb, content, and bottom status strip then bunch up and overlap
+                        // whenever a view is shorter than the viewport.
                         v_flex()
                             .flex_1()
+                            .h_full()
                             .min_w_0()
+                            .min_h_0()
                             .child(self.render_breadcrumb(cx))
                             .child(div().flex_1().min_h_0().child(content))
                             .child(self.render_status_strip(cx)),
