@@ -176,6 +176,29 @@ mod roundtrip_tests {
         roundtrip(&SignerRequest::Address);
         roundtrip(&SignerRequest::Balance { shielded: true });
         roundtrip(&SignerRequest::Balance { shielded: false });
+        roundtrip(&SignerRequest::RailgunViewGrant {
+            chain_id: 1,
+            index: 0,
+        });
+    }
+
+    #[test]
+    fn railgun_view_grant_roundtrips_and_redacts_debug() {
+        let grant = RailgunViewGrant {
+            address: "0zk1example".into(),
+            viewing_key: "deadbeefdeadbeef".into(),
+        };
+        roundtrip(&SignerResponse::RailgunView(grant.clone()));
+        // The viewing key is a secret: it must never appear in Debug output.
+        let dbg = format!("{grant:?}");
+        assert!(
+            dbg.contains("<redacted>"),
+            "viewing key not redacted: {dbg}"
+        );
+        assert!(
+            !dbg.contains("deadbeef"),
+            "viewing key leaked in Debug: {dbg}"
+        );
     }
 
     #[test]
