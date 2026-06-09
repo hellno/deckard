@@ -143,6 +143,22 @@ pub fn railgun_address_from_entropy(
     Ok(address.to_string())
 }
 
+/// The read-only view grant for account `index` on `chain_id`: the 0zk address + the viewing
+/// key as hex. The spending key is intentionally NOT returned — this is the smaller grant the
+/// daemon hands the app for balance sync (it can see private notes, not spend them).
+pub fn railgun_view_grant_from_entropy(
+    entropy: &[u8],
+    chain_id: u64,
+    index: u32,
+) -> anyhow::Result<(String, String)> {
+    let keys = railgun_keys_from_entropy(entropy, index)?;
+    let viewing_key = keys.viewing.to_hex();
+    let address =
+        RailgunAddress::from_private_keys(keys.spending, keys.viewing, ChainId::evm(chain_id))
+            .to_string();
+    Ok((address, viewing_key))
+}
+
 /// The runtime gate: re-derive Railgun's own known mnemonic and compare the 0zk address to the
 /// engine's published vector. **The app must not display a shielded balance unless this is
 /// true** — a wrong derivation would otherwise show a silent, wrong (typically $0) balance.

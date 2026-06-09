@@ -17,9 +17,9 @@ use gpui_component::{
 };
 
 use alloy_primitives::B256;
-use deckard_contract::{Decision, ExecuteResult, Intent, RequestId};
+use deckard_contract::{Decision, ExecuteResult, Intent, RequestId, ShieldStatus};
 use deckard_core::{
-    Address, EthProvider, KdfParams, Portfolio, ReadStatus, Vault, WordCount, U256,
+    Address, EthProvider, KdfParams, Portfolio, ReadStatus, ShieldedHandle, Vault, WordCount, U256,
 };
 use zeroize::Zeroizing;
 
@@ -194,6 +194,17 @@ pub struct Shell {
     pub shield_holding: bool,
     /// Bumped on each hold-start so a stale hold timer can't fire a later confirm.
     shield_hold_epoch: u64,
+
+    // --- shielded balance (Wave 2: T9 sync + T10 lifecycle) ---
+    /// The read-only Railgun sync actor (None until the view grant is fetched post-unlock,
+    /// and only if the derivation gate passes). Holds the viewing key, never the spending key.
+    pub shielded: Option<ShieldedHandle>,
+    /// The user's own 0zk address — the shield recipient auto-fill (None until granted).
+    pub railgun_address: Option<String>,
+    /// True once the shield recipient input has been auto-filled with `railgun_address`.
+    recipient_autofilled: bool,
+    /// The active shield's lifecycle, surfaced in the status strip (None when idle).
+    pub shield_status: Option<ShieldStatus>,
 
     // --- auth / keystore (Chunk 3) ---
     pub auth: AuthStep,
@@ -426,6 +437,10 @@ impl Shell {
             shield_tx: None,
             shield_holding: false,
             shield_hold_epoch: 0,
+            shielded: None,
+            railgun_address: None,
+            recipient_autofilled: false,
+            shield_status: None,
             auth,
             auth_error: None,
             auth_busy: false,
@@ -500,6 +515,11 @@ impl Shell {
         .detach();
         self.wallet_address = None;
         self.portfolio = None;
+        // Dropping the handle closes its channel → the sync worker thread exits.
+        self.shielded = None;
+        self.railgun_address = None;
+        self.recipient_autofilled = false;
+        self.shield_status = None;
         self.auth = AuthStep::Unlock;
         self.palette_open = false;
         cx.notify();
@@ -791,6 +811,68 @@ impl Shell {
         self.selection = Selection::Wallet;
         self.surface = Surface::Home;
         self.retarget(cx);
+        self.kick_railgun_grant(cx);
+    }
+
+    /// After unlock, ask the daemon for the read-only Railgun view grant (it gates this on the
+    /// derivation known-answer test), then spawn the shielded-balance sync over the app's RPC
+    /// and start watching it. If the daemon refuses (locked / gate failed), there's simply no
+    /// shielded UI — honest, never a fabricated private balance.
+    fn kick_railgun_grant(&mut self, cx: &mut Context<Self>) {
+        let client = self.signer.client();
+        let chain_id = SHIELD_CHAIN_ID;
+        let rpc = self.settings.effective_rpc();
+        let task =
+            cx.background_spawn(async move { client.railgun_view_grant_blocking(chain_id, 0) });
+        cx.spawn(async move |this, cx| {
+            let grant = task.await;
+            this.update(cx, |this, cx| {
+                if let Ok(grant) = grant {
+                    this.railgun_address = Some(grant.address.clone());
+                    this.recipient_autofilled = false;
+                    this.shielded = Some(ShieldedHandle::spawn(rpc, chain_id, grant));
+                    this.watch_shielded_sync(cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Poll the shielded snapshot while a sync runs so the UI reflects progress + completion
+    /// (the actor's cached state isn't a GPUI entity, so we tick it). Caps the poll so a hung
+    /// sync can't loop forever. When a post-shield sync settles, advance `ShieldStatus`.
+    fn watch_shielded_sync(&self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            for _ in 0..90 {
+                cx.background_executor().timer(Duration::from_secs(2)).await;
+                let syncing = this.update(cx, |this, cx| {
+                    cx.notify();
+                    this.shielded.as_ref().is_some_and(|h| h.snapshot().syncing)
+                });
+                if !matches!(syncing, Ok(true)) {
+                    break;
+                }
+            }
+            // Sync settled: if this was the post-shield sync, the note is now visible.
+            this.update(cx, |this, cx| {
+                if matches!(
+                    this.shield_status,
+                    Some(ShieldStatus::SyncingPrivate { .. })
+                ) {
+                    let wei = this
+                        .shielded
+                        .as_ref()
+                        .and_then(|h| h.snapshot().shielded_wei)
+                        .unwrap_or(U256::ZERO);
+                    this.shield_status = Some(ShieldStatus::PrivateSpendable { shielded_wei: wei });
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// The unlocked wallet's own address as an EIP-55 string (empty until unlocked).
@@ -1122,6 +1204,13 @@ impl Shell {
                 match res {
                     Ok(ExecuteResult::Broadcast { tx_hash }) => {
                         this.shield_tx = Some(tx_hash);
+                        // The deposit is on its way to a private note; re-sync to surface it
+                        // and drive the lifecycle (SyncingPrivate → PrivateSpendable).
+                        this.shield_status = Some(ShieldStatus::SyncingPrivate { tx_hash });
+                        if let Some(h) = &this.shielded {
+                            h.resync();
+                        }
+                        this.watch_shielded_sync(cx);
                     }
                     Ok(ExecuteResult::Denied { reason }) => {
                         this.shield_error =
@@ -1228,6 +1317,20 @@ impl Shell {
         self.toggle_mask(cx);
     }
 
+    /// Pre-fill the shield recipient with the user's own 0zk address once the grant arrives
+    /// (the user can still edit it). Runs from `render`, the only place with a `Window`.
+    fn autofill_shield_recipient(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.recipient_autofilled {
+            return;
+        }
+        if let Some(addr) = self.railgun_address.clone() {
+            self.shield_recipient.update(cx, |input, cx| {
+                input.set_value(addr.as_str(), window, cx);
+            });
+            self.recipient_autofilled = true;
+        }
+    }
+
     /// Push the capture-block state to the OS when `capture_block && mask` changes.
     /// Called once per `render`; the change-guard makes it a no-op on most frames. On a
     /// non-macOS or non-`tray` build `apply_capture_block` is itself an inert no-op.
@@ -1270,6 +1373,7 @@ impl Render for Shell {
         let body = if self.auth == AuthStep::Ready {
             // The unlocked app: macOS title bar above the two-pane shell grid
             // (sidebar | [breadcrumb / content / status strip]) + command palette.
+            self.autofill_shield_recipient(window, cx);
             let title_bar = self.render_title_bar(cx);
             let content = match (self.selection, self.surface) {
                 (_, Surface::Settings) => self.render_settings(window, cx).into_any_element(),

@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 use tokio::net::UnixStream;
 
 use deckard_contract::{
-    ApprovalStatus, Decision, ExecuteResult, Intent, RequestId, SignerRequest, SignerResponse,
-    UnlockOutcome,
+    ApprovalStatus, Decision, ExecuteResult, Intent, RailgunViewGrant, RequestId, SignerRequest,
+    SignerResponse, UnlockOutcome,
 };
 
 use crate::frame;
@@ -141,6 +141,23 @@ impl SignerClient {
         })? {
             SignerResponse::Ack => Ok(()),
             other => Err(unexpected("Resolve", other)),
+        }
+    }
+
+    /// Blocking: fetch the read-only Railgun view grant (0zk address + viewing key) for
+    /// shielded-balance sync. A locked daemon or a failed derivation gate comes back as a
+    /// `Decision::Deny`, surfaced here as an error.
+    pub fn railgun_view_grant_blocking(
+        &self,
+        chain_id: u64,
+        index: u32,
+    ) -> anyhow::Result<RailgunViewGrant> {
+        match self.request_blocking(&SignerRequest::RailgunViewGrant { chain_id, index })? {
+            SignerResponse::RailgunView(grant) => Ok(grant),
+            SignerResponse::Decision(Decision::Deny { reason }) => {
+                anyhow::bail!("railgun view grant denied: {reason}")
+            }
+            other => Err(unexpected("RailgunViewGrant", other)),
         }
     }
 

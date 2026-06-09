@@ -387,6 +387,21 @@ impl Shell {
             muted
         };
 
+        // An active shield's lifecycle (the "where's my money?" reassurance line). The glyph
+        // token maps to a small colored dot: amber in-flight, success done, danger failed.
+        let shield_chip = self.shield_status.as_ref().map(|st| {
+            let color = match st.glyph() {
+                "check-filled" => theme.success,
+                "x-ring" => theme.danger,
+                _ => theme::amber(theme.is_dark()),
+            };
+            h_flex()
+                .items_center()
+                .gap_1p5()
+                .child(div().size(px(6.0)).rounded_full().bg(color))
+                .child(div().text_color(color).child(st.to_string()))
+        });
+
         h_flex()
             .h(px(25.0))
             .flex_shrink_0()
@@ -397,7 +412,13 @@ impl Shell {
             .border_t_1()
             .border_color(border)
             .text_xs()
-            .child(div().text_color(status_color).child(status_line))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_3()
+                    .children(shield_chip)
+                    .child(div().text_color(status_color).child(status_line)),
+            )
             .child(div().text_color(muted).child("Ethereum"))
     }
 

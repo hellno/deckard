@@ -507,6 +507,21 @@ impl UnlockedVault {
         );
         crate::railgun_keys::railgun_address_from_entropy(&self.secret, chain_id, index)
     }
+
+    /// The read-only view grant `(0zk address, viewing-key hex)` for shielded-balance sync.
+    /// The spending key is never exported. Errors for a raw-key import.
+    #[cfg(feature = "shield")]
+    pub fn railgun_view_grant(
+        &self,
+        chain_id: u64,
+        index: u32,
+    ) -> anyhow::Result<(String, String)> {
+        anyhow::ensure!(
+            self.kind.has_phrase(),
+            "imported raw key has no Railgun keys"
+        );
+        crate::railgun_keys::railgun_view_grant_from_entropy(&self.secret, chain_id, index)
+    }
 }
 
 // --- crypto helpers ---

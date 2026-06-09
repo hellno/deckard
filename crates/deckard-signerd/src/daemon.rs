@@ -21,7 +21,7 @@ use zeroize::Zeroizing;
 
 use deckard_contract::{
     evaluate, ApprovalStatus, BalanceReport, Decision, ExecuteResult, Intent, IntentKind, Policy,
-    ReadStatus, RequestId, SignerRequest, SignerResponse, UnlockOutcome,
+    RailgunViewGrant, ReadStatus, RequestId, SignerRequest, SignerResponse, UnlockOutcome,
 };
 use deckard_core::{UnlockedVault, Vault};
 
@@ -217,7 +217,48 @@ impl Daemon {
             SignerRequest::Balance { shielded } => {
                 SignerResponse::Balance(self.balance(shielded).await)
             }
+            SignerRequest::RailgunViewGrant { chain_id, index } => {
+                self.railgun_view_grant(chain_id, index)
+            }
         }
+    }
+
+    /// Export the read-only Railgun view grant (0zk address + viewing key) for the unlocked
+    /// vault. Refuses if locked, and — crucially — if the derivation known-answer test fails:
+    /// a grant from an unverified derivation would let the app show a wrong/silent-$0 private
+    /// balance. The spending key never leaves the daemon.
+    #[cfg(feature = "shield")]
+    fn railgun_view_grant(&self, chain_id: u64, index: u32) -> SignerResponse {
+        let vault = match &self.state {
+            VaultState::Unlocked { vault, .. } => vault,
+            VaultState::Locked => {
+                return SignerResponse::Decision(Decision::Deny {
+                    reason: "locked".into(),
+                })
+            }
+        };
+        if !deckard_core::known_answer_ok() {
+            return SignerResponse::Decision(Decision::Deny {
+                reason: "derivation_unverified".into(),
+            });
+        }
+        match vault.railgun_view_grant(chain_id, index) {
+            Ok((address, viewing_key)) => SignerResponse::RailgunView(RailgunViewGrant {
+                address,
+                viewing_key,
+            }),
+            Err(e) => SignerResponse::Decision(Decision::Deny {
+                reason: format!("railgun_keys: {}", one_line(&e)),
+            }),
+        }
+    }
+
+    /// Without the `shield` feature there is no Railgun derivation to grant.
+    #[cfg(not(feature = "shield"))]
+    fn railgun_view_grant(&self, _chain_id: u64, _index: u32) -> SignerResponse {
+        SignerResponse::Decision(Decision::Deny {
+            reason: "shield_unavailable".into(),
+        })
     }
 
     /// Read the keystore, decrypt under `passphrase`, and hold the key. The raw passphrase is
