@@ -28,6 +28,7 @@ pub mod mock;
 pub mod policy;
 pub mod read_status;
 pub mod rpc;
+pub mod shield_status;
 pub mod signer;
 
 pub use decision::{Decision, RequestId};
@@ -38,6 +39,7 @@ pub use read_status::ReadStatus;
 pub use rpc::{
     ApprovalStatus, BalanceReport, ExecuteResult, SignerRequest, SignerResponse, UnlockOutcome,
 };
+pub use shield_status::ShieldStatus;
 pub use signer::Signer;
 
 #[cfg(test)]
@@ -247,5 +249,62 @@ mod roundtrip_tests {
         roundtrip(&ReadStatus::Unsynced {
             reason: "verification disabled".into(),
         });
+    }
+
+    #[test]
+    fn shield_status_roundtrip() {
+        // Every variant of the shield lifecycle must survive both wire encodings,
+        // including the owned-String failure reason and the U256 spendable amount.
+        roundtrip(&ShieldStatus::Sending);
+        roundtrip(&ShieldStatus::ConfirmingOnChain {
+            tx_hash: B256::repeat_byte(0xCD),
+            confirmed: 2,
+            target: 6,
+        });
+        roundtrip(&ShieldStatus::SyncingPrivate {
+            tx_hash: B256::repeat_byte(0xEF),
+        });
+        roundtrip(&ShieldStatus::PrivateSpendable {
+            shielded_wei: U256::from(997_500_u64),
+        });
+        roundtrip(&ShieldStatus::Failed {
+            reason: "reverted".into(),
+        });
+    }
+
+    #[test]
+    fn shield_status_glyph_and_terminality() {
+        // Glyph + lifecycle predicates: in-flight states share the pending glyph and
+        // are non-terminal; the two terminal states report themselves as such.
+        assert_eq!(ShieldStatus::Sending.glyph(), "clock-ring");
+        assert_eq!(
+            ShieldStatus::PrivateSpendable {
+                shielded_wei: U256::from(1_u64),
+            }
+            .glyph(),
+            "check-filled"
+        );
+        assert_eq!(
+            ShieldStatus::Failed { reason: "x".into() }.glyph(),
+            "x-ring"
+        );
+
+        assert!(!ShieldStatus::Sending.is_terminal());
+        assert!(!ShieldStatus::SyncingPrivate {
+            tx_hash: B256::ZERO,
+        }
+        .is_terminal());
+
+        let spendable = ShieldStatus::PrivateSpendable {
+            shielded_wei: U256::from(5_u64),
+        };
+        assert!(spendable.is_spendable());
+        assert!(spendable.is_terminal());
+
+        let failed = ShieldStatus::Failed {
+            reason: "sync_failed".into(),
+        };
+        assert!(!failed.is_spendable());
+        assert!(failed.is_terminal());
     }
 }

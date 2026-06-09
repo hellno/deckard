@@ -3,15 +3,29 @@
 //! live over Multicall3 (`deckard-core`). Renders instantly from the last cached
 //! snapshot; the only loading state is the very first sync.
 
-use gpui::{div, px, Context, FontWeight, IntoElement, ParentElement, Styled};
+use gpui::prelude::FluentBuilder;
+use gpui::{div, px, Context, FontWeight, IntoElement, ParentElement, SharedString, Styled};
 use gpui_component::{
     button::{Button, ButtonVariants},
     h_flex, v_flex, ActiveTheme, Disableable, IconName,
 };
 
-use deckard_core::format_amount;
+use deckard_core::U256;
 
-use crate::shell::{Route, Shell};
+use crate::money::money;
+use crate::shell::{Shell, Surface};
+use crate::theme;
+
+/// One row in the holdings table. Carries the raw balance (not a pre-formatted
+/// string) so the amount column can render mono-for-money with dimmed decimals.
+struct Holding {
+    mark: String,
+    name: String,
+    symbol: String,
+    raw: U256,
+    decimals: u8,
+    max_frac: usize,
+}
 
 /// The primary modifier label, per platform (⌘ on macOS, "Ctrl " elsewhere).
 #[cfg(target_os = "macos")]
@@ -29,13 +43,17 @@ fn short_addr(a: &str) -> String {
 }
 
 impl Shell {
-    pub fn render_welcome(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The selected wallet's home — a left-anchored, scrollable main pane:
+    /// wallet-name H1 + address subtitle, the balance hero, Send/Receive/Swap,
+    /// then live holdings. The synced/trust status line lives in the bottom
+    /// status strip (`shell_chrome.rs`), not here.
+    pub fn render_wallet_home(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let fg = theme.foreground;
         let muted = theme.muted_foreground;
         let border = theme.border;
         let surface = theme.secondary;
-        let accent = theme.primary;
+        let mono: SharedString = theme.mono_font_family.clone();
 
         // A small bordered key-hint chip, e.g. ⌘K.
         let chip = move |keys: String, label: String| {
@@ -62,30 +80,33 @@ impl Shell {
         let account_pill = short_addr(&addr_str);
         let first_sync = self.portfolio_loading && self.portfolio.is_none();
 
-        let native_str = self
-            .portfolio
-            .as_ref()
-            .map(|p| format_amount(p.native_wei, 18, 4))
-            .unwrap_or_else(|| "—".to_string());
+        // The native ETH balance for the hero — `None` until the first sync lands.
+        let native_wei = self.portfolio.as_ref().map(|p| p.native_wei);
 
-        // Holdings rows: ETH first, then each non-zero listed token.
-        let mut holdings: Vec<(String, String, String, String)> = Vec::new();
+        // Holdings rows: ETH first, then each listed token. Each row carries the
+        // raw value + decimals + frac so the amount column renders mono-for-money
+        // (dimmed decimals) rather than a single-color string.
+        let mut holdings: Vec<Holding> = Vec::new();
         if let Some(p) = &self.portfolio {
-            holdings.push((
-                "Ξ".into(),
-                "Ethereum".into(),
-                "ETH".into(),
-                format_amount(p.native_wei, 18, 4),
-            ));
+            holdings.push(Holding {
+                mark: "Ξ".into(),
+                name: "Ethereum".into(),
+                symbol: "ETH".into(),
+                raw: p.native_wei,
+                decimals: 18,
+                max_frac: 4,
+            });
             for t in &p.tokens {
                 let frac = if t.decimals <= 6 { 2 } else { 4 };
                 let mark = t.symbol.chars().next().unwrap_or('•').to_string();
-                holdings.push((
+                holdings.push(Holding {
                     mark,
-                    t.name.to_string(),
-                    t.symbol.to_string(),
-                    format_amount(t.raw, t.decimals, frac),
-                ));
+                    name: t.name.to_string(),
+                    symbol: t.symbol.to_string(),
+                    raw: t.raw,
+                    decimals: t.decimals,
+                    max_frac: frac,
+                });
             }
         }
         let has_tokens = self
@@ -94,107 +115,85 @@ impl Shell {
             .map(|p| !p.tokens.is_empty())
             .unwrap_or(false);
 
-        // Status sub-line: synced block, watching tag, or an error. When a read carries a
-        // non-Verified trust label, surface it: a balance is never shown as quietly trusted.
-        let trust_tag = match &self.read_status {
-            Some(deckard_core::ReadStatus::Verified) => " · verified",
-            Some(deckard_core::ReadStatus::Degraded { .. }) => " · degraded",
-            Some(deckard_core::ReadStatus::Unsynced { .. }) => " · NOT VERIFIED",
-            None => "",
-        };
-        let status_line = if let Some(err) = &self.portfolio_error {
-            format!("⚠ {err}")
-        } else if first_sync {
-            "Syncing over Ethereum…".to_string()
-        } else if let Some(block) = self.synced_block {
-            let net = if self.viewing_watch {
-                "watching · "
-            } else {
-                ""
-            };
-            format!("{net}synced · block {block}{trust_tag}")
+        // Wallet identity for the header: a desaturated, tinted-neutral square
+        // (DESIGN rule 4 — identity squares avoid the warm/amber band).
+        let id_square = theme::identity_square(theme.is_dark());
+        let wallet_name = if self.viewing_watch {
+            "Watched account".to_string()
         } else {
-            "Ethereum mainnet".to_string()
-        };
-        // An unverified read is a soft warning (the value may not be trustless), not a hard error.
-        let unverified = matches!(
-            self.read_status,
-            Some(deckard_core::ReadStatus::Unsynced { .. })
-        );
-        let status_color = if self.portfolio_error.is_some() {
-            theme.danger
-        } else if unverified {
-            theme.warning
-        } else {
-            muted
+            "Personal".to_string()
         };
 
         div()
-            .flex_1()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
+            .size_full()
+            .p_8()
+            // TODO(scroll): restore a scrollable main pane via a Stateful
+            // `div().id(..).overflow_y_scroll()` (the agent draft mis-ordered
+            // gpui-component's `overflow_y_scrollbar`). Content is short for now.
             .child(
                 v_flex()
-                    .w(px(460.0))
+                    .items_start()
+                    .max_w(px(680.0))
                     .gap_6()
-                    // Header: section label + account pill + refresh.
+                    // Page header (DESIGN §Page header): identity square + wallet-name
+                    // H1 (text.primary, weight 600 — NEVER cyan) + a muted mono,
+                    // middle-truncated address subtitle.
                     .child(
                         h_flex()
                             .w_full()
                             .items_center()
                             .justify_between()
-                            .child(div().text_sm().text_color(muted).child("Portfolio"))
                             .child(
                                 h_flex()
                                     .items_center()
-                                    .gap_2()
+                                    .gap_3()
+                                    .child(div().size(px(28.0)).rounded(px(6.0)).bg(id_square))
                                     .child(
-                                        div()
-                                            .px_2p5()
-                                            .py_1()
-                                            .rounded_full()
-                                            .border_1()
-                                            .border_color(if self.viewing_watch {
-                                                accent
-                                            } else {
-                                                border
-                                            })
-                                            .bg(surface)
-                                            .text_xs()
-                                            .text_color(fg)
-                                            .child(account_pill),
-                                    )
-                                    .child(
-                                        Button::new("refresh")
-                                            .ghost()
-                                            .icon(IconName::Replace)
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.refresh_portfolio(cx)
-                                            })),
+                                        v_flex()
+                                            .gap_0p5()
+                                            .child(
+                                                div()
+                                                    .text_xl()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(fg)
+                                                    .child(wallet_name),
+                                            )
+                                            .child(
+                                                div()
+                                                    .font_family(mono.clone())
+                                                    .text_xs()
+                                                    .text_color(muted)
+                                                    .child(account_pill),
+                                            ),
+                                    ),
+                            )
+                            .child(
+                                Button::new("refresh")
+                                    .ghost()
+                                    .icon(IconName::Replace)
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.refresh_portfolio(cx)),
                                     ),
                             ),
                     )
-                    // Total: native ETH balance + status sub-line.
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(
-                                h_flex()
-                                    .items_baseline()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .text_3xl()
-                                            .font_weight(FontWeight::BOLD)
-                                            .text_color(fg)
-                                            .child(native_str),
-                                    )
-                                    .child(div().text_lg().text_color(muted).child("ETH")),
-                            )
-                            .child(div().text_sm().text_color(status_color).child(status_line)),
-                    )
+                    // Balance hero: native ETH balance (mono-for-money, dimmed
+                    // decimals + ticker, weight 600 not 700).
+                    .child(v_flex().gap_1().child(
+                        div().text_3xl().font_weight(FontWeight::SEMIBOLD).map(
+                            |el| match native_wei {
+                                Some(wei) => el.child(money(
+                                    wei,
+                                    18,
+                                    4,
+                                    Some("ETH"),
+                                    mono.clone(),
+                                    fg,
+                                    muted,
+                                )),
+                                None => el.font_family(mono.clone()).text_color(muted).child("—"),
+                            },
+                        ),
+                    ))
                     // Primary actions. Send + Swap are gated to the next release (Chunk 4,
                     // testnet-first), so they're shown disabled rather than inert-but-active.
                     .child(
@@ -203,7 +202,7 @@ impl Shell {
                             .gap_2()
                             .child(Button::new("send").primary().label("Send").disabled(true))
                             .child(Button::new("receive").ghost().label("Receive").on_click(
-                                cx.listener(|this, _, _, cx| this.navigate(Route::Receive, cx)),
+                                cx.listener(|this, _, _, cx| this.open(Surface::Receive, cx)),
                             ))
                             .child(Button::new("swap").ghost().label("Swap").disabled(true)),
                     )
@@ -233,11 +232,12 @@ impl Shell {
         &self,
         first_sync: bool,
         has_tokens: bool,
-        holdings: Vec<(String, String, String, String)>,
+        holdings: Vec<Holding>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
+        let mono: SharedString = theme.mono_font_family.clone();
 
         let mut col = v_flex().w_full().gap_2();
 
@@ -279,17 +279,20 @@ impl Shell {
                 .into_any_element();
         }
 
-        for (mark, name, symbol, amount) in holdings {
+        for h in holdings {
             col = col.child(render_row(
                 theme.foreground,
                 theme.muted_foreground,
                 theme.border,
                 theme.secondary,
                 theme.muted,
-                mark,
-                name,
-                symbol,
-                amount,
+                h.mark,
+                h.name,
+                h.symbol,
+                h.raw,
+                h.decimals,
+                h.max_frac,
+                mono.clone(),
             ));
         }
         if !has_tokens {
@@ -310,6 +313,179 @@ impl Shell {
             );
         }
         col.into_any_element()
+    }
+
+    /// Project home — the aggregate-of-one for the demo's single project: the
+    /// wallet's balance plus a one-line composition (1 wallet · 1 agent). Real
+    /// multi-wallet aggregation is fast-follow.
+    pub fn render_project_home(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let fg = theme.foreground;
+        let muted = theme.muted_foreground;
+        let mono: SharedString = theme.mono_font_family.clone();
+        let id_square = theme::identity_square(theme.is_dark());
+
+        let native_wei = self.portfolio.as_ref().map(|p| p.native_wei);
+
+        div()
+            .size_full()
+            .p_8()
+            // TODO(scroll): restore a scrollable main pane via a Stateful
+            // `div().id(..).overflow_y_scroll()` (the agent draft mis-ordered
+            // gpui-component's `overflow_y_scrollbar`). Content is short for now.
+            .child(
+                v_flex()
+                    .items_start()
+                    .max_w(px(680.0))
+                    .gap_6()
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_3()
+                            .child(div().size(px(28.0)).rounded(px(6.0)).bg(id_square))
+                            .child(
+                                div()
+                                    .text_xl()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(fg)
+                                    .child("Personal"),
+                            ),
+                    )
+                    .child(
+                        div().text_3xl().font_weight(FontWeight::SEMIBOLD).map(
+                            |el| match native_wei {
+                                Some(wei) => el.child(money(
+                                    wei,
+                                    18,
+                                    4,
+                                    Some("ETH"),
+                                    mono.clone(),
+                                    fg,
+                                    muted,
+                                )),
+                                None => el.font_family(mono.clone()).text_color(muted).child("—"),
+                            },
+                        ),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(muted)
+                            .child("1 wallet · 1 agent"),
+                    ),
+            )
+    }
+
+    /// Agent home — a static, demo-scoped policy-card placeholder (DESIGN §Policy
+    /// card): 2-column label/value pairs grouped by whitespace in one faint frame,
+    /// no interior grid lines. Agent "Atlas" is the openly-narrated manual stand-in
+    /// for v1 (real Claude-Desktop-via-MCP is fast-follow), so the values are
+    /// static. The agent identity (cyan) lives only on the squircle glyph.
+    pub fn render_agent_home(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let fg = theme.foreground;
+        let muted = theme.muted_foreground;
+        let border = theme.border;
+        let surface = theme.secondary;
+        let mono: SharedString = theme.mono_font_family.clone();
+        let is_dark = theme.is_dark();
+        let agent = theme::agent(is_dark);
+        let agent_tint = theme::agent_tint(is_dark);
+
+        // One policy row: label left (muted), value right (mono, primary). No
+        // per-row hairline — grouping is whitespace.
+        let mono_for_row = mono.clone();
+        let policy_row = move |label: &'static str, value: &'static str| {
+            h_flex()
+                .w_full()
+                .justify_between()
+                .items_center()
+                .py_1p5()
+                .child(div().text_sm().text_color(muted).child(label))
+                .child(
+                    div()
+                        .font_family(mono_for_row.clone())
+                        .text_sm()
+                        .text_color(fg)
+                        .child(value),
+                )
+        };
+
+        div()
+            .size_full()
+            .p_8()
+            // TODO(scroll): restore a scrollable main pane via a Stateful
+            // `div().id(..).overflow_y_scroll()` (the agent draft mis-ordered
+            // gpui-component's `overflow_y_scrollbar`). Content is short for now.
+            .child(
+                v_flex()
+                    .items_start()
+                    .max_w(px(680.0))
+                    .gap_6()
+                    // Header: cyan squircle monogram (the ONLY cyan on the surface) +
+                    // agent name H1 (text.primary, NEVER cyan).
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .size(px(28.0))
+                                    .rounded(px(6.0))
+                                    .bg(agent_tint)
+                                    .border_1()
+                                    .border_color(agent)
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(agent)
+                                            .child("A"),
+                                    ),
+                            )
+                            .child(
+                                v_flex()
+                                    .gap_0p5()
+                                    .child(
+                                        div()
+                                            .text_xl()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(fg)
+                                            .child("Atlas"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(muted)
+                                            .child("Delegated agent · idle"),
+                                    ),
+                            ),
+                    )
+                    // Policy card: one faint frame, no interior grid lines.
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .gap_0()
+                            .p_4()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(border)
+                            .bg(surface)
+                            .child(policy_row("Per-transaction cap", "0.10 ETH"))
+                            .child(policy_row("Period budget", "1.00 ETH / week"))
+                            .child(policy_row("Allowed assets", "ETH"))
+                            .child(policy_row("Session key", "expires in 6d"))
+                            .child(policy_row("Autonomy", "act < $50 · ask above")),
+                    )
+                    .child(
+                        div().text_xs().text_color(muted).child(
+                            "Atlas is a manual stand-in for the demo. Controls land with MCP.",
+                        ),
+                    ),
+            )
     }
 }
 
@@ -341,12 +517,15 @@ fn render_row(
     fg: gpui::Hsla,
     muted: gpui::Hsla,
     border: gpui::Hsla,
-    surface: gpui::Hsla,
+    _surface: gpui::Hsla,
     mark_bg: gpui::Hsla,
     mark: String,
     name: String,
     symbol: String,
-    amount: String,
+    raw: U256,
+    decimals: u8,
+    max_frac: usize,
+    mono: SharedString,
 ) -> impl IntoElement {
     h_flex()
         .w_full()
@@ -354,10 +533,10 @@ fn render_row(
         .justify_between()
         .px_4()
         .py_3()
-        .rounded_lg()
-        .border_1()
+        // DESIGN §Holdings table: tight rows, hairline row separators only —
+        // no per-row card frame, no fill.
+        .border_b_1()
         .border_color(border)
-        .bg(surface)
         .child(
             h_flex()
                 .items_center()
@@ -365,7 +544,9 @@ fn render_row(
                 .child(
                     div()
                         .size(px(34.0))
-                        .rounded_full()
+                        // DESIGN §Radii: a desaturated token SQUARE (6px), not a
+                        // round identicon (round is reserved for the human principal).
+                        .rounded(px(6.0))
                         .bg(mark_bg)
                         .flex()
                         .items_center()
@@ -394,8 +575,6 @@ fn render_row(
         .child(
             div()
                 .text_sm()
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(fg)
-                .child(amount),
+                .child(money(raw, decimals, max_frac, None, mono, fg, muted)),
         )
 }

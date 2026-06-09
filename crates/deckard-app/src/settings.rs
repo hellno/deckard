@@ -12,8 +12,6 @@ use directories::ProjectDirs;
 use gpui_component::ThemeMode;
 use serde::{Deserialize, Serialize};
 
-use crate::theme::Accent;
-
 // Reverse-DNS used for the config dir. Matches the bundle identifier
 // (`com.deckard.app`) and the wallet keystore dir, so settings + keystore share one
 // location. (qualifier, organization, application)
@@ -45,7 +43,6 @@ impl ThemeModePref {
 #[serde(default)]
 pub struct Settings {
     pub theme_mode: ThemeModePref,
-    pub accent: Accent,
     pub display_name: String,
     pub launch_minimized: bool,
     /// Custom Ethereum RPC URL (bring-your-own-RPC). Empty = the bundled default.
@@ -60,7 +57,6 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             theme_mode: ThemeModePref::Dark,
-            accent: Accent::default(),
             display_name: String::new(),
             launch_minimized: false,
             rpc_url: String::new(),
