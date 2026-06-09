@@ -34,6 +34,11 @@ pub mod eth;
 #[cfg(feature = "verified-reads")]
 pub mod helios;
 pub mod keystore;
+/// Railgun seed→0zk-key derivation (SLIP-0010 ed25519), gated behind `shield`. The
+/// consensus-critical path: KAT-verified against Railgun's own engine vector so a wrong
+/// derivation can't silently show a $0 shielded balance.
+#[cfg(feature = "shield")]
+pub mod railgun_keys;
 /// Key-less Railgun shield-calldata builder. Gated behind the default-on `shield` feature
 /// so the heavy ZK `railgun` crate is toggleable. When the feature is off, the
 /// `build_shield_native_intent` stub below returns a clear error (never a fake success).
@@ -51,6 +56,13 @@ pub use keystore::{random_word_positions, KdfParams, SecretKind, UnlockedVault, 
 // and its tests can name them through core without a direct `railgun` dependency.
 #[cfg(feature = "shield")]
 pub use shield::{build_shield_native_intent, RailgunAddress};
+// Railgun key derivation + the runtime known-answer gate (`known_answer_ok`), re-exported so
+// the app can derive the user's own 0zk address and refuse to show shielded balances until the
+// gate passes.
+#[cfg(feature = "shield")]
+pub use railgun_keys::{
+    known_answer_ok, railgun_address_from_entropy, railgun_keys_from_entropy, RailgunKeys,
+};
 pub use tokens::{TokenInfo, DEFAULT_TOKENS};
 
 /// Feature-off stub: when `shield` is compiled out, the symbol still exists so the daemon
