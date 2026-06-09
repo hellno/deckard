@@ -16,6 +16,7 @@ mod settings;
 mod settings_view;
 mod shell;
 mod shell_chrome;
+mod shield_view;
 mod signer;
 mod theme;
 #[cfg(feature = "tray")]

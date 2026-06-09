@@ -4,6 +4,8 @@
 //! `settings_view.rs` as `impl Shell` methods (Rust lets you split an inherent
 //! impl across modules), so this file stays focused on state + navigation.
 
+use std::time::Duration;
+
 use gpui::{
     div, App, AppContext, Context, Entity, FocusHandle, Focusable, FontWeight, InteractiveElement,
     IntoElement, ParentElement, Render, Styled, Window,
@@ -14,7 +16,11 @@ use gpui_component::{
     v_flex, ActiveTheme, TitleBar,
 };
 
-use deckard_core::{Address, EthProvider, KdfParams, Portfolio, ReadStatus, Vault, WordCount};
+use alloy_primitives::B256;
+use deckard_contract::{Decision, ExecuteResult, Intent, RequestId};
+use deckard_core::{
+    Address, EthProvider, KdfParams, Portfolio, ReadStatus, Vault, WordCount, U256,
+};
 use zeroize::Zeroizing;
 
 use deckard_signerd::SignerClient;
@@ -30,11 +36,42 @@ use crate::{GoBack, NewItem, OpenSettings, ToggleMask, TogglePalette, ToggleThem
 /// fast-follow.
 const DAEMON_CHAIN_ID: u64 = 1;
 
+/// The chain a **shield** deposit targets (T5 config seam, decision D1). It MUST equal the
+/// daemon's chain or `propose` denies `chain_mismatch` — so it defaults to
+/// [`DAEMON_CHAIN_ID`]. Railgun supports mainnet (1) and Sepolia (11155111); to record a
+/// shield on Sepolia, relaunch the daemon + reader on Sepolia and set this to `11155111`
+/// (a single switch point, kept out of the render path).
+const SHIELD_CHAIN_ID: u64 = DAEMON_CHAIN_ID;
+
+/// How long the user must hold the shield confirm before it signs — the deliberate-gesture
+/// duration (DESIGN: confirm is a hold, never a tap). The amber fill-sweep (`shield_view`)
+/// runs for the same span so the bar fills exactly as the action fires.
+pub(crate) const SHIELD_HOLD: Duration = Duration::from_millis(900);
+
 /// Trim a noisy provider error down to one short line for the UI.
 fn short_err(e: impl std::fmt::Display) -> String {
     let line = e.to_string();
     let line = line.lines().next().unwrap_or("").trim();
     line.chars().take(140).collect()
+}
+
+/// Map a daemon deny/`reason` tag to a calm, user-facing line (the wire tags are terse +
+/// machine-readable; the UI shouldn't show `chain_mismatch` raw).
+fn humanize_deny(reason: &str) -> String {
+    match reason {
+        "locked" => "unlock your wallet first".into(),
+        "revoked" => "the signer is paused (STOP is active)".into(),
+        "chain_mismatch" => {
+            "the signer is on a different chain than this deposit — reconcile the chain first"
+                .into()
+        }
+        "over_cap" => "it exceeds the agent's spending cap".into(),
+        "off_allowlist" => "the recipient isn't on the allowlist".into(),
+        "undecodable" => "the deposit calldata didn't validate".into(),
+        "erc20_unsupported_v1" => "only native-ETH shields are supported in v1".into(),
+        "unsupported_v1" => "that action isn't supported in v1".into(),
+        other => other.to_string(),
+    }
 }
 
 /// Run `prework` (which seals + writes the keystore for create/import/migrate, or is a no-op
@@ -68,6 +105,8 @@ pub enum Selection {
 pub enum Surface {
     Home,
     Receive,
+    /// The shield trigger flow (T5): compose a deposit → review card → hold-to-confirm.
+    Shield,
     Settings,
 }
 
@@ -114,6 +153,25 @@ pub struct Shell {
     /// The capture-block state last pushed to the OS, so `render` only re-issues the
     /// native `setSharingType` call when `capture_block && mask` actually changes.
     capture_applied: bool,
+
+    // --- shield trigger flow (T5) ---
+    /// Deposit amount (ETH, free text) and the `0zk…` recipient. Free-text recipient is v1;
+    /// auto-filling the user's OWN railgun address is Wave 2.
+    pub shield_amount: Entity<InputState>,
+    pub shield_recipient: Entity<InputState>,
+    /// Set once `propose` returns `Allow`: the built intent + its (locally-derived) request
+    /// id. `Some` means the review card + hold-to-confirm are live.
+    pub shield_proposal: Option<(Intent, RequestId)>,
+    /// True while a `propose`/`execute` round-trip runs on a background thread.
+    pub shield_busy: bool,
+    /// One-line, user-facing shield error (parse / build / deny / broadcast).
+    pub shield_error: Option<String>,
+    /// Set on a successful `execute` broadcast — the demo's "deposit is moving private" state.
+    pub shield_tx: Option<B256>,
+    /// True while the confirm button is being held; drives the amber fill-sweep.
+    pub shield_holding: bool,
+    /// Bumped on each hold-start so a stale hold timer can't fire a later confirm.
+    shield_hold_epoch: u64,
 
     // --- auth / keystore (Chunk 3) ---
     pub auth: AuthStep,
@@ -252,6 +310,19 @@ impl Shell {
             InputState::new(window, cx).placeholder("12 / 24-word phrase, or a 0x private key")
         });
 
+        // Shield flow inputs (T5): amount in ETH + the 0zk recipient (free text in v1).
+        let shield_amount =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Amount in ETH, e.g. 0.05"));
+        let shield_recipient =
+            cx.new(|cx| InputState::new(window, cx).placeholder("0zk… recipient address"));
+        // Enter on the recipient field reviews the deposit (keyboard-first).
+        cx.subscribe(&shield_recipient, |this, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                this.review_shield(cx);
+            }
+        })
+        .detach();
+
         // Submit-on-Enter for each auth field (keyboard-first).
         cx.subscribe(&create_pass2, |this, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
@@ -314,6 +385,14 @@ impl Shell {
             mask,
             agent_acting: false,
             capture_applied: false,
+            shield_amount,
+            shield_recipient,
+            shield_proposal: None,
+            shield_busy: false,
+            shield_error: None,
+            shield_tx: None,
+            shield_holding: false,
+            shield_hold_epoch: 0,
             auth,
             auth_error: None,
             auth_busy: false,
@@ -874,6 +953,162 @@ impl Shell {
         cx.notify();
     }
 
+    // --- shield trigger flow (T5) ---
+
+    /// Open the shield flow with a clean slate (clears any prior proposal/error/result; the
+    /// typed amount/recipient are left intact).
+    pub fn open_shield(&mut self, cx: &mut Context<Self>) {
+        self.reset_shield();
+        self.open(Surface::Shield, cx);
+    }
+
+    /// Clear all transient shield state (proposal, error, broadcast, hold). Bumps the hold
+    /// epoch so any in-flight hold timer is cancelled.
+    fn reset_shield(&mut self) {
+        self.shield_proposal = None;
+        self.shield_error = None;
+        self.shield_tx = None;
+        self.shield_busy = false;
+        self.shield_holding = false;
+        self.shield_hold_epoch = self.shield_hold_epoch.wrapping_add(1);
+    }
+
+    /// Build + `propose` the shield off-thread. On `Allow`, stash the proposal so the review
+    /// card + hold-to-confirm appear; on `NeedsApproval`/`Deny`/parse error, surface a clear
+    /// line. Mirrors `do_unlock` (build off-thread, fold the result on the UI thread).
+    pub fn review_shield(&mut self, cx: &mut Context<Self>) {
+        if self.shield_busy {
+            return;
+        }
+        let amount = self.shield_amount.read(cx).value().to_string();
+        let recipient = self.shield_recipient.read(cx).value().to_string();
+        let value_wei = match signer::parse_eth_to_wei(&amount) {
+            Ok(w) if w > U256::ZERO => w,
+            Ok(_) => {
+                self.shield_error = Some("Enter an amount greater than zero".into());
+                cx.notify();
+                return;
+            }
+            Err(e) => {
+                self.shield_error = Some(e);
+                cx.notify();
+                return;
+            }
+        };
+        if recipient.trim().is_empty() {
+            self.shield_error = Some("Enter a 0zk recipient address".into());
+            cx.notify();
+            return;
+        }
+        self.shield_error = None;
+        self.shield_proposal = None;
+        self.shield_busy = true;
+        cx.notify();
+        let client = self.signer.client();
+        let task = cx.background_spawn(async move {
+            let intent = signer::build_shield_intent(SHIELD_CHAIN_ID, &recipient, value_wei)?;
+            let decision = client.propose_blocking(&intent)?;
+            Ok::<(Intent, Decision), anyhow::Error>((intent, decision))
+        });
+        cx.spawn(async move |this, cx| {
+            let res = task.await;
+            this.update(cx, |this, cx| {
+                this.shield_busy = false;
+                match res {
+                    Ok((intent, Decision::Allow)) => {
+                        let request_id = SignerClient::request_id_for_intent(&intent);
+                        this.shield_proposal = Some((intent, request_id));
+                    }
+                    Ok((_, Decision::NeedsApproval { .. })) => {
+                        this.shield_error = Some(
+                            "This is over the agent cap — a human approval card is required (lands with the approvals flow)."
+                                .into(),
+                        );
+                    }
+                    Ok((_, Decision::Deny { reason })) => {
+                        this.shield_error =
+                            Some(format!("Can't shield: {}", humanize_deny(&reason)));
+                    }
+                    Err(e) => this.shield_error = Some(short_err(e)),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Sign + broadcast the reviewed shield off-thread (the hold-to-confirm completed). On
+    /// success the deposit is on its way to a private note; surface the broadcast.
+    pub fn confirm_shield(&mut self, cx: &mut Context<Self>) {
+        let Some((_, request_id)) = self.shield_proposal.clone() else {
+            return;
+        };
+        if self.shield_busy {
+            return;
+        }
+        self.shield_busy = true;
+        self.shield_error = None;
+        cx.notify();
+        let client = self.signer.client();
+        let task = cx.background_spawn(async move { client.execute_blocking(request_id) });
+        cx.spawn(async move |this, cx| {
+            let res = task.await;
+            this.update(cx, |this, cx| {
+                this.shield_busy = false;
+                match res {
+                    Ok(ExecuteResult::Broadcast { tx_hash }) => {
+                        this.shield_proposal = None;
+                        this.shield_tx = Some(tx_hash);
+                    }
+                    Ok(ExecuteResult::Denied { reason }) => {
+                        this.shield_error =
+                            Some(format!("Shield denied: {}", humanize_deny(&reason)));
+                    }
+                    Err(e) => this.shield_error = Some(short_err(e)),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Begin a confirm hold: start the amber fill-sweep and a timer that fires
+    /// `confirm_shield` only if the hold survives [`SHIELD_HOLD`]. A per-hold epoch guards
+    /// against a stale timer firing after an early release / re-press.
+    pub fn shield_hold_start(&mut self, cx: &mut Context<Self>) {
+        if self.shield_holding || self.shield_busy || self.shield_proposal.is_none() {
+            return;
+        }
+        self.shield_holding = true;
+        self.shield_hold_epoch = self.shield_hold_epoch.wrapping_add(1);
+        let epoch = self.shield_hold_epoch;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SHIELD_HOLD).await;
+            this.update(cx, |this, cx| {
+                // Only fire if THIS hold is still active (not released, not superseded).
+                if this.shield_holding && this.shield_hold_epoch == epoch {
+                    this.shield_holding = false;
+                    this.confirm_shield(cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Release the confirm hold before it completed — reset the sweep; the epoch bump
+    /// cancels the pending timer.
+    pub fn shield_hold_cancel(&mut self, cx: &mut Context<Self>) {
+        if self.shield_holding {
+            self.shield_holding = false;
+            self.shield_hold_epoch = self.shield_hold_epoch.wrapping_add(1);
+            cx.notify();
+        }
+    }
+
     /// Re-install the theme from the current settings (mode).
     fn apply_theme(&self, cx: &mut Context<Self>) {
         theme::install(cx, self.settings.theme_mode.to_gpui());
@@ -971,6 +1206,7 @@ impl Render for Shell {
             let content = match (self.selection, self.surface) {
                 (_, Surface::Settings) => self.render_settings(window, cx).into_any_element(),
                 (_, Surface::Receive) => self.render_receive(cx).into_any_element(),
+                (_, Surface::Shield) => self.render_shield(cx).into_any_element(),
                 (Selection::Wallet, Surface::Home) => {
                     self.render_wallet_home(cx).into_any_element()
                 }

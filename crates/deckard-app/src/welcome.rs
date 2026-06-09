@@ -228,16 +228,23 @@ impl Shell {
                                 )
                             })),
                     )
-                    // Primary actions. Send + Swap are gated to the next release (Chunk 4,
-                    // testnet-first), so they're shown disabled rather than inert-but-active.
+                    // Primary actions. Shield (the privacy hero) is the one live, primary
+                    // CTA; Send + Swap are gated to the next release (Chunk 4, testnet-first)
+                    // and shown disabled rather than inert-but-active.
                     .child(
                         h_flex()
                             .w_full()
                             .gap_2()
-                            .child(Button::new("send").primary().label("Send").disabled(true))
+                            .child(
+                                Button::new("shield")
+                                    .primary()
+                                    .label("Shield")
+                                    .on_click(cx.listener(|this, _, _, cx| this.open_shield(cx))),
+                            )
                             .child(Button::new("receive").ghost().label("Receive").on_click(
                                 cx.listener(|this, _, _, cx| this.open(Surface::Receive, cx)),
                             ))
+                            .child(Button::new("send").ghost().label("Send").disabled(true))
                             .child(Button::new("swap").ghost().label("Swap").disabled(true)),
                     )
                     .child(

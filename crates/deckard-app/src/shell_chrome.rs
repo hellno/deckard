@@ -85,6 +85,7 @@ impl Shell {
         match self.surface {
             Surface::Settings => "Settings",
             Surface::Receive => "Receive",
+            Surface::Shield => "Shield",
             Surface::Home => match self.selection {
                 Selection::Project => "Personal",
                 Selection::Wallet => "Wallet",
