@@ -117,13 +117,21 @@ impl Shell {
                         ),
                 )
                 .child(
-                    div().text_xs().text_color(muted).child(
-                        if recipient_raw.trim().is_empty() {
+                    // Only call the recipient "your own 0zk address" when it actually matches the
+                    // wallet's auto-filled address — a user-typed/edited recipient gets neutral copy
+                    // so the line never misrepresents where the deposit is going.
+                    div().text_xs().text_color(muted).child({
+                        let recipient = recipient_raw.trim();
+                        let is_own_address =
+                            self.railgun_address.as_deref().map(str::trim) == Some(recipient);
+                        if recipient.is_empty() {
                             "Enter the 0zk address that will receive the private balance."
-                        } else {
+                        } else if is_own_address {
                             "Pre-filled with your own 0zk address — edit it to shield to a different recipient."
-                        },
-                    ),
+                        } else {
+                            "Shielding to the 0zk address above — double-check it before you continue."
+                        }
+                    }),
                 )
                 .into_any_element(),
         )
