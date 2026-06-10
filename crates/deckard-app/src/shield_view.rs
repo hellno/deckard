@@ -117,10 +117,13 @@ impl Shell {
                         ),
                 )
                 .child(
-                    div()
-                        .text_xs()
-                        .text_color(muted)
-                        .child("Your own 0zk address auto-fills in a later release."),
+                    div().text_xs().text_color(muted).child(
+                        if recipient_raw.trim().is_empty() {
+                            "Enter the 0zk address that will receive the private balance."
+                        } else {
+                            "Pre-filled with your own 0zk address — edit it to shield to a different recipient."
+                        },
+                    ),
                 )
                 .into_any_element(),
         )
