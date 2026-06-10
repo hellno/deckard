@@ -3884,7 +3884,7 @@ checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 
 [[package]]
 name = "deckard-app"
-version = "0.1.0"
+version = "0.0.1-alpha"
 dependencies = [
  "alloy-primitives",
  "alloy-signer-local 2.0.5",
@@ -3910,7 +3910,7 @@ dependencies = [
 
 [[package]]
 name = "deckard-contract"
-version = "0.1.0"
+version = "0.0.1-alpha"
 dependencies = [
  "alloy-primitives",
  "ciborium",
@@ -3920,7 +3920,7 @@ dependencies = [
 
 [[package]]
 name = "deckard-core"
-version = "0.1.0"
+version = "0.0.1-alpha"
 dependencies = [
  "alloy",
  "alloy-primitives",
@@ -3944,7 +3944,7 @@ dependencies = [
 
 [[package]]
 name = "deckard-signerd"
-version = "0.1.0"
+version = "0.0.1-alpha"
 dependencies = [
  "alloy",
  "alloy-primitives",

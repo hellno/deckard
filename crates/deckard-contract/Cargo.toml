@@ -1,6 +1,6 @@
 [package]
 name = "deckard-contract"
-version = "0.1.0"
+version = "0.0.1-alpha"
 edition = "2021"
 license = "AGPL-3.0-or-later"
 description = "Deckard's frozen wire contract: Intent / Decision / Policy, the signer-daemon RPC enums, a sync Signer trait, and an in-memory MockSigner. Zero key material. Owned by docs/build/30-mcp-shape.md."
