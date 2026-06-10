@@ -1,6 +1,6 @@
 [package]
 name = "deckard-signerd"
-version = "0.1.0"
+version = "0.0.1-alpha"
 edition = "2021"
 license = "AGPL-3.0-or-later"
 description = "Deckard's process-isolated signer daemon: owns the decrypted key, runs the policy gate, signs + broadcasts, and answers STOP — over a same-uid Unix-domain socket. The app and the future MCP sidecar are key-less clients."

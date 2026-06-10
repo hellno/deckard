@@ -1,0 +1,49 @@
+name: Feature request
+description: Suggest an idea or improvement for Deckard.
+title: "[feature]: "
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the idea. Deckard is `0.0.1-alpha` — experimental, pre-1.0 software — so the
+        roadmap is still forming. A clear problem statement helps far more than a fully-specified
+        solution.
+
+        > Not a feature request? For security reports see [`SECURITY.md`](https://github.com/hellno/deckard/blob/main/SECURITY.md);
+        > for open-ended questions use [Discussions](https://github.com/hellno/deckard/discussions).
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What problem are you trying to solve? What is the use case, and who is affected? Describe the situation, not just the fix.
+      placeholder: I'm always frustrated when ... / Today there is no way to ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: What would you like to happen? Describe the behavior or capability you have in mind.
+      placeholder: Deckard could ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What other approaches or workarounds have you considered, and why are they insufficient?
+      placeholder: I considered ..., but ...
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Anything else — mockups, links, prior art, or how this fits the self-custodial / privacy-by-default direction.
+    validations:
+      required: false

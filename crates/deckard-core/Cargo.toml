@@ -1,6 +1,6 @@
 [package]
 name = "deckard-core"
-version = "0.1.0"
+version = "0.0.1-alpha"
 edition = "2021"
 license = "AGPL-3.0-or-later"
 description = "Deckard's headless engine: Ethereum provider, balances, HD keys, and the encrypted keystore — no GPUI dependency, fully unit-testable."

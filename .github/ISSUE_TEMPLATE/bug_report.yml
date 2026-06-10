@@ -1,0 +1,99 @@
+name: Bug report
+description: Report a reproducible problem in Deckard (0.0.1-alpha).
+title: "[bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug.
+
+        **Deckard is `0.0.1-alpha` — experimental, pre-1.0 software.** It is not production-ready,
+        has not had a third-party security audit, and must only be used with **testnet / throwaway
+        keys — never real funds or real mainnet keys.**
+
+        > **Stop:** if this is a *security vulnerability* (anything that could expose a key, seed,
+        > passphrase, or signed transaction), do **not** open a public issue. Report it privately —
+        > see [`SECURITY.md`](https://github.com/hellno/deckard/blob/main/SECURITY.md). Public disclosure puts other users at risk.
+
+  - type: checkboxes
+    id: acknowledgements
+    attributes:
+      label: Acknowledgements
+      description: Please confirm all of the following before filing.
+      options:
+        - label: "I am **NOT** reporting a security vulnerability (those go to `SECURITY.md`, privately)."
+          required: true
+        - label: "I am using **testnet / throwaway keys, not real funds**."
+          required: true
+        - label: "I searched existing issues and this is not a duplicate."
+          required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear, concise description of the actual behavior. Include any error output or screenshots (redact any key/seed/address you would rather not share).
+      placeholder: When I ..., Deckard did ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+      description: A clear, concise description of the expected behavior.
+      placeholder: I expected Deckard to ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The exact sequence to reliably reproduce the problem.
+      placeholder: |
+        1. Run `just run`
+        2. Complete onboarding with a throwaway seed
+        3. Click '...'
+        4. See error
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS
+        - Linux
+    validations:
+      required: true
+
+  - type: input
+    id: os-version
+    attributes:
+      label: OS version
+      description: e.g. "macOS 15.5 (Apple Silicon)" or "Ubuntu 24.04 / Fedora 40".
+      placeholder: macOS 15.5 (Apple Silicon)
+    validations:
+      required: true
+
+  - type: input
+    id: app-version
+    attributes:
+      label: Deckard version
+      description: The current pre-release is `0.0.1-alpha`. If you built from a specific commit, paste the short SHA.
+      placeholder: 0.0.1-alpha (commit abc1234)
+      value: "0.0.1-alpha"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or context
+      description: Paste any relevant terminal output. **Never paste a seed phrase, private key, or passphrase** — they are not needed to triage a bug.
+      render: shell
+    validations:
+      required: false
