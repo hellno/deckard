@@ -454,8 +454,6 @@ impl Shell {
                     .flex_shrink_0(),
             )
             .child(
-                // Bound the text column so the title/subtitle wrap within the card rather than
-                // running off the right edge next to the fixed-width glyph.
                 v_flex()
                     .flex_1()
                     .min_w_0()

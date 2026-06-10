@@ -1428,12 +1428,9 @@ impl Render for Shell {
             // (sidebar | [breadcrumb / content / status strip]) + command palette.
             self.prepare_shield_inputs(window, cx);
             let title_bar = self.render_title_bar(cx);
-            // Scrollable content surfaces wrap their view in a Scrollable. Each arm inlines its
-            // OWN `.overflow_y_scrollbar()` (not a shared helper) on purpose: gpui-component keys
-            // the scroll offset by call site, so a per-arm call gives each surface an independent
-            // offset — otherwise scrolling one long page would leave the next one opened
-            // pre-scrolled with its header hidden. Receive and Shield are short, centered
-            // single-action cards, so they get NO scroll wrapper and stay vertically centered.
+            // Each scrollable surface inlines its OWN `.overflow_y_scrollbar()` (don't factor into
+            // a helper): gpui-component keys the scroll offset by call site, so per-arm calls give
+            // each surface an independent offset. Receive/Shield are short centered cards — no wrapper.
             let content = match (self.selection, self.surface) {
                 (_, Surface::Settings) => div()
                     .id("scroll-settings")
@@ -1478,12 +1475,9 @@ impl Render for Shell {
                             .min_w_0()
                             .min_h_0()
                             .child(self.render_breadcrumb(cx))
-                            // The content slot is a full-height flex COLUMN (not a plain `div`,
-                            // which gpui defaults to `display: block`): the centered single-action
-                            // surfaces (Receive/Shield) use `flex_1` + `justify_center`, which only
-                            // fills + centers inside a flex parent — a block slot would let them
-                            // shrink to their card height and sit under the breadcrumb. Scrolling
-                            // surfaces wrap themselves (the match above), so each owns its offset.
+                            // The slot is a `v_flex`, not a plain `div` (gpui defaults to
+                            // `display: block`): the centered Receive/Shield roots use `flex_1` +
+                            // `justify_center`, which only fill + center inside a flex parent.
                             .child(v_flex().flex_1().min_h_0().child(content))
                             .child(self.render_status_strip(cx)),
                     ),
