@@ -1,0 +1,12 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability (private)
+    url: https://github.com/hellno/deckard/blob/main/SECURITY.md
+    about: >-
+      Do NOT open a public issue for security problems. Deckard holds private keys, seed phrases,
+      and an encrypted keystore. Follow the private disclosure process in SECURITY.md.
+  - name: Questions & discussion
+    url: https://github.com/hellno/deckard/discussions
+    about: >-
+      Have a general question, idea, or want to talk through an approach? Use GitHub Discussions
+      instead of opening an issue.
