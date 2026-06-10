@@ -131,8 +131,9 @@ impl Shell {
         div()
             .size_full()
             .p_8()
-            // Scrolling for this surface is handled by its per-surface wrapper in
-            // `shell.rs` (the content match), so the body here is plain content.
+            // TODO(scroll): restore a scrollable main pane via a Stateful
+            // `div().id(..).overflow_y_scroll()` (the agent draft mis-ordered
+            // gpui-component's `overflow_y_scrollbar`). Content is short for now.
             .child(
                 v_flex()
                     .items_start()
@@ -470,8 +471,9 @@ impl Shell {
         div()
             .size_full()
             .p_8()
-            // Scrolling for this surface is handled by its per-surface wrapper in
-            // `shell.rs` (the content match), so the body here is plain content.
+            // TODO(scroll): restore a scrollable main pane via a Stateful
+            // `div().id(..).overflow_y_scroll()` (the agent draft mis-ordered
+            // gpui-component's `overflow_y_scrollbar`). Content is short for now.
             .child(
                 v_flex()
                     .items_start()
@@ -579,8 +581,9 @@ impl Shell {
         div()
             .size_full()
             .p_8()
-            // Scrolling for this surface is handled by its per-surface wrapper in
-            // `shell.rs` (the content match), so the body here is plain content.
+            // TODO(scroll): restore a scrollable main pane via a Stateful
+            // `div().id(..).overflow_y_scroll()` (the agent draft mis-ordered
+            // gpui-component's `overflow_y_scrollbar`). Content is short for now.
             .child(
                 v_flex()
                     .items_start()
