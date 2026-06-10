@@ -98,22 +98,28 @@ async fn propose_decision_matrix() {
         }
     );
 
-    // Shield (the privacy hero) is now admitted: a within-cap, on-allowlist native shield
-    // classifies like a send (its RelayAdapt calldata rides in `intent.calldata`). It is
-    // `token: None`, so it passes the ERC-20 guard; within cap → Allow.
+    // Shield on a chain with NO known RelayAdapt (31337) is refused outright — the daemon
+    // can't pin the target, so it never signs. The positive path (correct RelayAdapt on a
+    // supported chain → Allow) lives in `shield_target.rs`.
     let mut shield = send(to, 1_000);
     shield.kind = IntentKind::Shield;
     shield.calldata = Bytes::from_static(&[0xde, 0xad, 0xbe, 0xef]); // stand-in RelayAdapt call
-    assert_eq!(client.propose(&shield).await.unwrap(), Decision::Allow);
+    assert_eq!(
+        client.propose(&shield).await.unwrap(),
+        Decision::Deny {
+            reason: "shield_to_mismatch".into()
+        }
+    );
 
-    // A Shield with EMPTY calldata is rejected (would otherwise broadcast as a bare native
-    // send to `to` — moving ETH to an arbitrary address under the "Shield" label, no note).
+    // A Shield with EMPTY calldata is rejected too. On 31337 the RelayAdapt pre-check fires
+    // first (no adapter known); the calldata-shape `undecodable` deny for a correctly-
+    // targeted shield is asserted on a supported chain in `shield_target.rs`.
     let mut empty_shield = send(to, 1_000);
     empty_shield.kind = IntentKind::Shield; // calldata stays empty (from send())
     assert_eq!(
         client.propose(&empty_shield).await.unwrap(),
         Decision::Deny {
-            reason: "undecodable".into()
+            reason: "shield_to_mismatch".into()
         }
     );
 
@@ -378,6 +384,84 @@ async fn re_propose_is_idempotent() {
     )
     .await;
     assert_eq!(client.propose(&approved).await.unwrap(), Decision::Allow);
+}
+
+#[tokio::test]
+async fn two_clients_interleave_app_and_mcp_sessions() {
+    // The two-client reality on ONE daemon: the GUI app and the MCP sidecar are both
+    // same-uid key-less clients of the same socket. Walks the lifecycle the launch demo
+    // exercises: app unlock → MCP propose/approve flow → MCP STOP locks the app out too →
+    // app re-unlock starts a CLEAN session that invalidates every in-flight MCP request id
+    // (with an explanatory error, not a silent failure).
+    let dir = TempDir::new("interleave");
+    let (wallet, to) = seal_account0(dir.path());
+    let d = spawn_daemon(dir.path(), DUMMY_RPC, CHAIN, &[]);
+    let app = SignerClient::new(d.socket_path.clone());
+    let mcp = SignerClient::new(d.socket_path.clone());
+
+    // 1. The app unlocks; the MCP client immediately sees an unlocked daemon.
+    assert_eq!(
+        app.unlock(PASS).await.unwrap(),
+        UnlockOutcome::Unlocked { address: wallet }
+    );
+    let within = send(to, 1_000);
+    assert_eq!(mcp.propose(&within).await.unwrap(), Decision::Allow);
+    let within_id = SignerClient::request_id_for_intent(&within);
+
+    // 2. An over-cap MCP request raises a card; the APP resolves it (it is the designated
+    //    human-facing resolver) and the MCP client observes the approval.
+    let over = send(to, PER_TX_CAP + 1);
+    let over_id = needs_approval_id(&mcp, &over).await;
+    ack(
+        &app,
+        SignerRequest::Resolve {
+            request_id: over_id,
+            approved: true,
+        },
+    )
+    .await;
+    assert_eq!(status(&mcp, over_id).await, ApprovalStatus::Allowed);
+
+    // 3. MCP STOP (revoke_all) — the panic brake cuts BOTH clients: the app's next call
+    //    surfaces locked, and every pre-STOP approval is dead.
+    ack(&mcp, SignerRequest::RevokeAll).await;
+    match app.request(&SignerRequest::Address).await.unwrap() {
+        SignerResponse::Decision(Decision::Deny { reason }) => assert_eq!(reason, "locked"),
+        other => panic!("app must see locked after MCP STOP, got {other:?}"),
+    }
+    assert_eq!(
+        mcp.execute(over_id).await.unwrap(),
+        ExecuteResult::Denied {
+            reason: "revoked".into()
+        }
+    );
+
+    // 4. The app re-unlocks → a FRESH session: the request table is cleared, so the MCP
+    //    client's stale ids come back `unknown_request` (the explanatory cue to re-run the
+    //    flow), never a stale approval that silently executes.
+    assert_eq!(
+        app.unlock(PASS).await.unwrap(),
+        UnlockOutcome::Unlocked { address: wallet }
+    );
+    for stale in [within_id, over_id] {
+        assert_eq!(
+            mcp.execute(stale).await.unwrap(),
+            ExecuteResult::Denied {
+                reason: "unknown_request".into()
+            }
+        );
+        assert_eq!(
+            status(&mcp, stale).await,
+            ApprovalStatus::Denied {
+                reason: "unknown_request".into()
+            }
+        );
+    }
+    // And the fresh session is live again for new work.
+    assert_eq!(
+        mcp.propose(&send(to, 2_000)).await.unwrap(),
+        Decision::Allow
+    );
 }
 
 // --- small request helpers -----------------------------------------------------------------

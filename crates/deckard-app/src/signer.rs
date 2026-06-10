@@ -85,6 +85,23 @@ pub fn send_blocking(client: &SignerClient, intent: &Intent) -> anyhow::Result<S
     }
 }
 
+/// Execute a reviewed proposal, key-less. For a `NeedsApproval` proposal (over-cap, or the
+/// daemon's mainnet guardrail downgrading an auto-allow), the completed hold-to-confirm IS
+/// the human approval — the app is the wire contract's designated human-facing resolver —
+/// so this first sends `Resolve{approved: true}` to flip the `Pending` record to `Allowed`,
+/// then `Execute`. For an `Allow` proposal it goes straight to `Execute` (byte-identical to
+/// the old path). Blocking; called from a background thread.
+pub fn approve_and_execute_blocking(
+    client: &SignerClient,
+    request_id: RequestId,
+    needs_resolve: bool,
+) -> anyhow::Result<ExecuteResult> {
+    if needs_resolve {
+        client.resolve_blocking(request_id, true)?;
+    }
+    client.execute_blocking(request_id)
+}
+
 /// Build a key-less Railgun **shield** intent from a free-text `0zk…` recipient (T5). Parses
 /// the recipient into a [`RailgunAddress`](deckard_core::RailgunAddress) — surfacing a clear
 /// error on a malformed address rather than building junk calldata — then wraps
@@ -230,6 +247,76 @@ mod tests {
         assert_eq!(
             *seen.lock().unwrap(),
             vec!["Propose".to_string(), "Execute".to_string()]
+        );
+
+        server.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The mainnet-guardrail regression guard: a `NeedsApproval` shield completes via the
+    /// resolve path — the app sends `Resolve{approved: true}` (the hold-to-confirm is the
+    /// human approval) and THEN `Execute`, over the socket, signing nothing in-process.
+    #[test]
+    fn approve_and_execute_resolves_then_executes_over_the_socket() {
+        let dir =
+            std::env::temp_dir().join(format!("deckard-appresolve-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("signerd.sock");
+
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_srv = Arc::clone(&seen);
+        let sock_srv = sock.clone();
+        let (ready_tx, ready_rx) = mpsc::channel();
+
+        // Recording server: two per-call connections (Resolve, then Execute).
+        let server = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                let listener = tokio::net::UnixListener::bind(&sock_srv).unwrap();
+                ready_tx.send(()).unwrap();
+                for _ in 0..2 {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let buf = frame::read_frame(&mut stream).await.unwrap().unwrap();
+                    let req: SignerRequest = frame::decode(&buf).unwrap();
+                    let resp = match &req {
+                        SignerRequest::Resolve { approved, .. } => {
+                            assert!(*approved, "hold-to-confirm must approve, not deny");
+                            seen_srv.lock().unwrap().push("Resolve".into());
+                            SignerResponse::Ack
+                        }
+                        SignerRequest::Execute { .. } => {
+                            seen_srv.lock().unwrap().push("Execute".into());
+                            SignerResponse::Execute(ExecuteResult::Broadcast {
+                                tx_hash: B256::repeat_byte(0xCD),
+                            })
+                        }
+                        other => panic!("unexpected request on the wire: {other:?}"),
+                    };
+                    let body = frame::encode(&resp).unwrap();
+                    frame::write_frame(&mut stream, &body).await.unwrap();
+                }
+            });
+        });
+
+        ready_rx.recv().unwrap();
+
+        let client = SignerClient::new(sock);
+        let result =
+            approve_and_execute_blocking(&client, RequestId::repeat_byte(0x77), true).unwrap();
+
+        assert_eq!(
+            result,
+            ExecuteResult::Broadcast {
+                tx_hash: B256::repeat_byte(0xCD)
+            }
+        );
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec!["Resolve".to_string(), "Execute".to_string()]
         );
 
         server.join().unwrap();

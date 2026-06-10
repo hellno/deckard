@@ -21,8 +21,12 @@ use zeroize::Zeroizing;
 
 use deckard_contract::{
     evaluate, ApprovalStatus, BalanceReport, Decision, ExecuteResult, Intent, IntentKind, Policy,
-    RailgunViewGrant, ReadStatus, RequestId, SignerRequest, SignerResponse, UnlockOutcome,
+    ReadStatus, RequestId, SignerRequest, SignerResponse, UnlockOutcome,
 };
+// Only the `shield`-gated view-grant handler constructs this; an unconditional import would
+// warn in the no-default-features build (e.g. deckard-mcp's dependency edge).
+#[cfg(feature = "shield")]
+use deckard_contract::RailgunViewGrant;
 use deckard_core::{UnlockedVault, Vault};
 
 use crate::config::Config;
@@ -41,6 +45,30 @@ fn approval_ttl() -> Duration {
         .and_then(|s| s.parse::<u64>().ok())
         .map(Duration::from_secs)
         .unwrap_or(APPROVAL_TTL)
+}
+
+/// The Railgun **RelayAdapt** contract a native `Shield` intent MUST target on `chain_id`.
+///
+/// The policy gate defers this check by charter (the contract crate is chain-blind and has
+/// no railgun dependency), and without it a within-cap `Intent{kind: Shield}` carrying junk
+/// calldata to ANY address would be signed — calldata-non-empty alone doesn't pin the
+/// target. The daemon owns the pre-check; this table is the daemon's (railgun-free) source
+/// of truth, pinned against `railgun::chain_config` by a parity test in
+/// `tests/shield_target.rs` so the two can never drift.
+///
+/// Addresses sourced from Railgun's published network config (the same source
+/// `railgun::chain_config` cites):
+/// <https://github.com/Railgun-Community/shared-models/blob/main/src/models/network-config.ts>
+fn relay_adapt(chain_id: u64) -> Option<Address> {
+    use alloy_primitives::address;
+    match chain_id {
+        // Ethereum mainnet.
+        1 => Some(address!("0xAc9f360Ae85469B27aEDdEaFC579Ef2d052aD405")),
+        // Sepolia (the demo fork preserves this chain id).
+        11155111 => Some(address!("0x7e3d929EbD5bDC84d02Bd3205c777578f33A214D")),
+        // Unknown chain → no known adapter → a Shield there is always refused.
+        _ => None,
+    }
 }
 
 /// `Locked` holds no key; `Unlocked` owns the decrypted vault (dropped — and zeroized — on
@@ -374,6 +402,14 @@ impl Daemon {
                 reason: "erc20_unsupported_v1".into(),
             };
         }
+        // A Shield must target the chain's RelayAdapt contract. The contract crate's policy
+        // gate deliberately can't express this (it is chain-blind); without the pre-check a
+        // within-cap "Shield" to an arbitrary address would be signed (see [`relay_adapt`]).
+        if intent.kind == IntentKind::Shield && relay_adapt(intent.chain_id) != Some(intent.to) {
+            return Decision::Deny {
+                reason: "shield_to_mismatch".into(),
+            };
+        }
 
         let id = request_id_for(intent);
 
@@ -398,8 +434,26 @@ impl Daemon {
         }
 
         // No record yet: the ONE shared decision function decides.
+        //
+        // Mainnet guardrail (post-`evaluate`, mock/daemon parity carve-out): on chain 1,
+        // unless the operator set the override (see `Config::mainnet_override` — its env
+        // var is documented only in THREAT-MODEL.md and must never appear in a reason),
+        // EVERY auto-Allow is downgraded to `NeedsApproval`. The default policy is
+        // `OverCap` with an empty (= any-recipient) allowlist, so without this a prompt-
+        // injected client could move real funds hands-free within the caps. The record is
+        // stored `Pending`; a human resolver (the app's hold-to-confirm) flips it to
+        // `Allowed` via `Resolve`. Like `locked`/`chain_mismatch`, this is a process-level
+        // check the pure policy can't express — the parity contract with `MockSigner`
+        // covers `evaluate` only, never this daemon state.
         let status = match evaluate(intent, &self.policy) {
             deny @ Decision::Deny { .. } => return deny,
+            Decision::Allow if self.mainnet_guardrail_active() => {
+                eprintln!(
+                    "signerd: mainnet guardrail — auto-allow downgraded to NeedsApproval \
+                     (approve in the Deckard app)"
+                );
+                ApprovalStatus::Pending
+            }
             Decision::Allow => ApprovalStatus::Allowed,
             Decision::NeedsApproval { .. } => ApprovalStatus::Pending,
         };
@@ -482,7 +536,7 @@ impl Daemon {
                 Ok(s) => s,
                 Err(e) => {
                     return ExecuteResult::Denied {
-                        reason: format!("signer_error: {e}"),
+                        reason: format!("signer_error: {}", one_line(&e)),
                     }
                 }
             };
@@ -654,6 +708,13 @@ impl Daemon {
         }
     }
 
+    /// Whether the chain-1 guardrail is armed: the daemon signs for mainnet and the
+    /// operator has NOT set the override. While armed, no auto-Allow exists — every
+    /// within-policy write still requires a human `Resolve` (the app's hold-to-confirm).
+    fn mainnet_guardrail_active(&self) -> bool {
+        self.cfg.chain_id == 1 && !self.cfg.mainnet_override
+    }
+
     /// Reset the daily spend window when the UTC day ticks over.
     fn rollover(&mut self) {
         let today = current_utc_day();
@@ -664,13 +725,15 @@ impl Daemon {
     }
 }
 
-/// Collapse a multi-line error into one short line for a `reason` string (never includes a
-/// secret — broadcast/signing errors carry only addresses/amounts/RPC text).
+/// Collapse a multi-line error into one short, **redacted** line for a `reason` string or a
+/// log. Transport errors can echo the full RPC URL — which carries the API key in its
+/// path/query — so every embedded URL is scrubbed to `scheme://host[:port]`
+/// ([`crate::config::sanitize_reason`]) BEFORE truncation. Reasons cross into agent
+/// transcripts; they must never carry a credential.
 fn one_line(e: &anyhow::Error) -> String {
-    e.to_string()
-        .lines()
-        .next()
-        .unwrap_or("")
+    let first = e.to_string();
+    let first = first.lines().next().unwrap_or("");
+    crate::config::sanitize_reason(first)
         .chars()
         .take(160)
         .collect()

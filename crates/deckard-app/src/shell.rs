@@ -73,6 +73,13 @@ fn humanize_deny(reason: &str) -> String {
         "over_cap" | "cap_exceeded" => "it exceeds the agent's spending cap".into(),
         "off_allowlist" => "the recipient isn't on the allowlist".into(),
         "undecodable" => "the deposit calldata didn't validate".into(),
+        "shield_to_mismatch" => {
+            "the deposit doesn't target the Railgun contract for this chain".into()
+        }
+        "not_approved" => "this deposit hasn't been approved yet — review it again".into(),
+        "unknown_request" => {
+            "the signer session was reset — review the deposit again".into()
+        }
         "erc20_unsupported_v1" => "only native-ETH shields are supported in v1".into(),
         "unsupported_v1" => "that action isn't supported in v1".into(),
         "broadcast_timeout" => {
@@ -128,6 +135,11 @@ pub struct ShieldProposal {
     pub intent: Intent,
     pub request_id: RequestId,
     pub recipient: String,
+    /// True when the daemon answered `NeedsApproval` (over-cap, or the mainnet guardrail
+    /// downgrading an auto-allow). The completed hold-to-confirm IS the human approval —
+    /// the app is the wire contract's designated resolver — so confirm sends
+    /// `Resolve{approved: true}` before `Execute`.
+    pub needs_resolve: bool,
 }
 
 /// The auth gate that wraps the whole app. Until it reaches `Ready`, the portfolio and
@@ -1202,13 +1214,19 @@ impl Shell {
                             intent,
                             request_id,
                             recipient: recipient_snapshot,
+                            needs_resolve: false,
                         });
                     }
-                    Ok((_, Decision::NeedsApproval { .. })) => {
-                        this.shield_error = Some(
-                            "This is over the agent cap — a human approval card is required (lands with the approvals flow)."
-                                .into(),
-                        );
+                    // NeedsApproval (over-cap, or the daemon's mainnet guardrail): the
+                    // review card + hold-to-confirm ARE the human approval surface — the
+                    // hold resolves the pending record, then executes.
+                    Ok((intent, Decision::NeedsApproval { request_id })) => {
+                        this.shield_proposal = Some(ShieldProposal {
+                            intent,
+                            request_id,
+                            recipient: recipient_snapshot,
+                            needs_resolve: true,
+                        });
                     }
                     Ok((_, Decision::Deny { reason })) => {
                         this.shield_error =
@@ -1226,7 +1244,12 @@ impl Shell {
     /// Sign + broadcast the reviewed shield off-thread (the hold-to-confirm completed). On
     /// success the deposit is on its way to a private note; surface the broadcast.
     pub fn confirm_shield(&mut self, cx: &mut Context<Self>) {
-        let Some(ShieldProposal { request_id, .. }) = self.shield_proposal.clone() else {
+        let Some(ShieldProposal {
+            request_id,
+            needs_resolve,
+            ..
+        }) = self.shield_proposal.clone()
+        else {
             return;
         };
         if self.shield_busy {
@@ -1236,7 +1259,11 @@ impl Shell {
         self.shield_error = None;
         cx.notify();
         let client = self.signer.client();
-        let task = cx.background_spawn(async move { client.execute_blocking(request_id) });
+        // For a NeedsApproval proposal the completed hold IS the approval: resolve, then
+        // execute (signer::approve_and_execute_blocking). An Allow goes straight to execute.
+        let task = cx.background_spawn(async move {
+            signer::approve_and_execute_blocking(&client, request_id, needs_resolve)
+        });
         cx.spawn(async move |this, cx| {
             let res = task.await;
             this.update(cx, |this, cx| {

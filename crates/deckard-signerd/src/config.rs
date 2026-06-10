@@ -8,6 +8,10 @@
 //!   config dir, shared with the GUI app via `deckard_core::config`). Tests set this.
 //! - `DECKARD_SOCKET_PATH`— explicit UDS path (default: the per-uid runtime path). Tests +
 //!   the app set this so both ends agree.
+//!
+//! One more env var exists (the mainnet-guardrail override). It is deliberately NOT named in
+//! this doc comment, in any reason string, or in any client-visible text — it is documented
+//! exactly once, in THREAT-MODEL.md. See [`Config::mainnet_override`].
 
 use std::path::PathBuf;
 
@@ -18,6 +22,13 @@ pub struct Config {
     pub chain_id: u64,
     pub config_dir: PathBuf,
     pub socket_path: PathBuf,
+    /// True when the operator explicitly disarmed the chain-1 guardrail via the override
+    /// env var (documented only in THREAT-MODEL.md). Default false: on mainnet, every
+    /// auto-Allow is converted to `NeedsApproval` so no hands-free agent spend exists
+    /// while no approval surface ships. The variable's NAME must never be echoed into a
+    /// reason string or tool response — a guardrail with printed instructions is a speed
+    /// bump, not a control.
+    pub mainnet_override: bool,
 }
 
 impl Config {
@@ -45,11 +56,16 @@ impl Config {
             None => crate::socket::default_socket_path(),
         };
 
+        let mainnet_override = std::env::var("DECKARD_I_KNOW_THIS_IS_MAINNET")
+            .map(|v| v.trim() == "1")
+            .unwrap_or(false);
+
         Ok(Self {
             rpc_url,
             chain_id,
             config_dir,
             socket_path,
+            mainnet_override,
         })
     }
 
@@ -71,7 +87,7 @@ impl Config {
 
 /// Reduce an RPC URL to `scheme://host[:port]` so an embedded API key (e.g. an Infura
 /// project secret in the path/query) never reaches a log line.
-fn redact_url(url: &str) -> String {
+pub(crate) fn redact_url(url: &str) -> String {
     let (scheme, rest) = match url.split_once("://") {
         Some(parts) => parts,
         None => return "<redacted>".to_string(),
@@ -91,9 +107,41 @@ fn redact_url(url: &str) -> String {
     }
 }
 
+/// Scrub every URL embedded in an arbitrary error/`reason` string down to
+/// `scheme://host[:port]`. Transport errors (alloy/reqwest) routinely echo the full request
+/// URL — which for an RPC endpoint carries the API key in its path/query/userinfo — and
+/// `reason` strings cross the trust boundary into agent transcripts. So every reason is
+/// scrubbed at the daemon boundary, not just truncated.
+///
+/// Token-based: any whitespace-delimited token containing `://` is replaced by its
+/// [`redact_url`] form (leading punctuation like `(` is preserved so error text stays
+/// readable). Tokens without a URL shape pass through untouched.
+pub(crate) fn sanitize_reason(s: &str) -> String {
+    s.split_whitespace()
+        .map(|token| {
+            if let Some(at) = token.find("://") {
+                // Preserve any leading punctuation (e.g. the `(` in reqwest's
+                // `... for url (https://…)`), then redact from the scheme on.
+                let scheme_start = token[..at]
+                    .rfind(|c: char| !c.is_ascii_alphanumeric() && c != '+' && c != '-' && c != '.')
+                    .map(|i| i + 1)
+                    .unwrap_or(0);
+                format!(
+                    "{}{}",
+                    &token[..scheme_start],
+                    redact_url(&token[scheme_start..])
+                )
+            } else {
+                token.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::redact_url;
+    use super::{redact_url, sanitize_reason};
 
     #[test]
     fn redaction_drops_paths_and_userinfo() {
@@ -107,5 +155,26 @@ mod tests {
             "https://rpc.example.com"
         );
         assert_eq!(redact_url("not-a-url"), "<redacted>");
+    }
+
+    #[test]
+    fn sanitize_scrubs_urls_inside_error_text() {
+        // The reqwest/alloy shape: full request URL echoed in parentheses.
+        assert_eq!(
+            sanitize_reason(
+                "broadcast: error sending request for url (https://eth.example.com/v3/SECRETKEY123)"
+            ),
+            "broadcast: error sending request for url (https://eth.example.com"
+        );
+        // Userinfo credentials are dropped too.
+        assert_eq!(
+            sanitize_reason("connect https://user:hunter2@rpc.example.com/path failed"),
+            "connect https://rpc.example.com failed"
+        );
+        // Query-string keys never survive.
+        let out = sanitize_reason("get http://127.0.0.1:8545/?apikey=TOPSECRET refused");
+        assert!(!out.contains("TOPSECRET"), "query key leaked: {out}");
+        // Plain text passes through (modulo whitespace normalization).
+        assert_eq!(sanitize_reason("no url here"), "no url here");
     }
 }
