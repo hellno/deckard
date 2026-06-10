@@ -5,6 +5,7 @@
 #   - deckard-core     the headless engine (Ethereum provider, balances, keystore)
 #   - deckard-contract the frozen wire contract (Intent / Decision / Policy / RPC)
 #   - deckard-signerd  the process-isolated signer daemon (owns the key; UDS server)
+#   - deckard-mcp      the key-less agent surface (one binary: CLI + `--mcp` stdio server)
 #
 # `cargo run` from the repo root still launches the app via `default-members`.
 [workspace]
@@ -14,6 +15,7 @@ members = [
     "crates/deckard-core",
     "crates/deckard-contract",
     "crates/deckard-signerd",
+    "crates/deckard-mcp",
 ]
 default-members = ["crates/deckard-app"]
 
