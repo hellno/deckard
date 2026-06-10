@@ -31,3 +31,21 @@ tray-icon (optional, `--features tray`)
 ---------------------------------------
 - tray-icon, muda, objc2, objc2-app-kit — MIT/Apache-2.0 (Tauri / objc2
   contributors).
+
+Kohaku — eip-1193-provider (vendored), railgun, common
+------------------------------------------------------
+Deckard builds on Kohaku (https://github.com/ethereum/kohaku, git rev 618c53f):
+
+- eip-1193-provider — VENDORED into this repo as a native-only fork
+  (vendor/eip-1193-provider). Redistributed as source; its license and full
+  provenance are in vendor/eip-1193-provider/LICENSE.
+- railgun (the pure-Rust Railgun client) and common — pulled as git dependencies
+  and linked into the shipped binary via deckard-core's default-on `shield`
+  feature (the key-less shield-calldata builder). railgun is also exercised by
+  the black-box shield_e2e integration test.
+
+Kohaku declares its license as MIT in its repository-root package.json
+("license": "MIT"). Upstream ships no standalone LICENSE file and no per-crate
+license field; the MIT text is reproduced at vendor/eip-1193-provider/LICENSE.
+MIT is compatible with Deckard's AGPL-3.0-or-later. (Maintainer note: confirm the
+MIT designation with the Kohaku maintainers before/shortly after publishing.)

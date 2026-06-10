@@ -34,7 +34,7 @@ is a deliberate act: take it slowly and do not skip the pre-flight.
 - **License.** AGPL-3.0-or-later — see [`LICENSE`](../LICENSE) and [`NOTICE`](../NOTICE). Deckard was
   forked from the [`deck`](https://github.com/hellno/deck) GPUI starter (originally 0BSD, which
   permits relicensing). Do not strip `NOTICE`; it carries the upstream + bundled-asset attributions.
-- **Repo:** <https://github.com/hellno/deckard> · **Security contact:** [contact-removed-see-SECURITY.md]
+- **Repo:** <https://github.com/hellno/deckard> · **Security contact:** GitHub private vulnerability reporting (Security → Report a vulnerability)
 - **Toolchain** is pinned in [`rust-toolchain.toml`](../rust-toolchain.toml) (currently `1.95.0`) — use
   it; do not build a release on an ad-hoc toolchain.
 
@@ -218,7 +218,7 @@ command palette, Helios-verified reads, process-isolated signer daemon, the shie
 black-box tested on an anvil fork).
 Not yet: Send (gated, next release), Swap (TODO), agent/MCP surface (not built), receive-watcher (TODO).
 
-License: AGPL-3.0-or-later. Security contact: [contact-removed-see-SECURITY.md]"
+License: AGPL-3.0-or-later. Security: report privately via GitHub Security Advisories."
 
 # Push the commit and the tag.
 git push origin main          # or the release branch you cut from
@@ -265,7 +265,7 @@ flipping `hellno/deckard` from private to public, deliberately confirm:
   present and accurate.
 - No secrets, seeds, or private keys are anywhere in the history. Nothing in `Zeroizing`-protected
   paths leaked into a fixture, log, or commit.
-- The security contact ([contact-removed-see-SECURITY.md]) is discoverable for responsible disclosure.
+- GitHub private vulnerability reporting is enabled (Security → Report a vulnerability) for responsible disclosure.
 
 Only when all of that holds should a maintainer flip visibility. Treat it as its own reviewed action.
 

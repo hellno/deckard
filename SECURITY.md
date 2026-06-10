@@ -45,17 +45,17 @@ Always run the latest available build. Older alpha builds receive no fixes.
 request, or discussion for a security vulnerability** — public disclosure before a fix is
 available can put users' keys and funds at risk.
 
-Use **either or both** of these private channels:
+Use GitHub's private vulnerability reporting:
 
-1. **GitHub private vulnerability reporting** (preferred) — go to the repository's
-   **Security** tab → **Report a vulnerability**:
-   <https://github.com/hellno/deckard/security/advisories/new>
-2. **Email** the maintainer directly: **[contact-removed-see-SECURITY.md]**
-   (PGP available on request — ask in your first message if you want to encrypt details.)
+- Go to the repository's **Security** tab → **Report a vulnerability**:
+  <https://github.com/hellno/deckard/security/advisories/new>
+- This is a confidential channel visible only to the maintainers. No email
+  address is published; please do not open a public issue for a security report.
+  (PGP available on request — ask in your first message if you want to encrypt details.)
 
 ### What to include
 
-To help us triage and reproduce quickly, please send:
+To help us triage and reproduce quickly, please include:
 
 - **Description** — what the issue is, in your own words.
 - **Reproduction** — exact steps, environment (OS, build/commit), and any proof-of-concept.

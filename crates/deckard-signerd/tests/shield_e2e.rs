@@ -50,10 +50,6 @@ use rand_09::random;
 
 use common::*;
 
-/// Sepolia archive RPC the spec pre-verified to serve the pinned fork block. Overridable via
-/// `RPC_URL_SEPOLIA` (CI secret) so the literal isn't the only path.
-const DEFAULT_SEPOLIA_RPC: &str =
-    "https://eth-sepolia.g.alchemy.com/v2/[redacted-alchemy-key]";
 /// Pinned fork block (pre-verified). A fixed block keeps Subsquid + the asserts deterministic.
 const FORK_BLOCK: u64 = 10_822_990;
 /// Sepolia chain id — the fork preserves it; the daemon's chain_id + the Intent must match it.
@@ -66,8 +62,20 @@ const EOA_KEY: &str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7
 /// contract deducts it, so the synced private note reads `value - value*25/10000`.
 const SHIELD_FEE_BPS: u128 = 25;
 
+/// Sepolia archive RPC serving the pinned fork block — supplied ONLY via the
+/// `RPC_URL_SEPOLIA` env var. No RPC key is baked into the source (W0 publish-blocker:
+/// a hardcoded key was removed pre-public; see SECURITY.md). Use any free Sepolia
+/// *archive* endpoint (Alchemy / Infura / dRPC).
 fn sepolia_rpc() -> String {
-    std::env::var("RPC_URL_SEPOLIA").unwrap_or_else(|_| DEFAULT_SEPOLIA_RPC.to_string())
+    std::env::var("RPC_URL_SEPOLIA").unwrap_or_else(|_| {
+        panic!(
+            "RPC_URL_SEPOLIA is not set — this test needs a Sepolia *archive* RPC that \
+             serves the pinned fork block {FORK_BLOCK}. Set a free archive endpoint and \
+             re-run, e.g.:\n  \
+             RPC_URL_SEPOLIA=https://eth-sepolia.g.alchemy.com/v2/<your-key> \\\n  \
+             cargo test -p deckard-signerd --test shield_e2e -- --ignored --nocapture"
+        )
+    })
 }
 
 #[tokio::test]

@@ -17,6 +17,9 @@ name = "eip-1193-provider"
 version = "0.1.0"
 edition = "2024"
 publish = false
+# Native-only fork of ethereum/kohaku's `eip-1193-provider` @ 618c53f (MIT). The
+# verbatim native sources + the MIT text + full provenance are in this crate's LICENSE.
+license = "MIT"
 
 [lib]
 crate-type = ["rlib"]

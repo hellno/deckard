@@ -110,7 +110,7 @@ reviewing self-custody enforcement is your thing, please reach out.
 
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — how to build, test, and submit changes.
 - [`SECURITY.md`](SECURITY.md) — how to report a vulnerability **privately**
-  (security contact: [contact-removed-see-SECURITY.md]).
+  (to report privately, use GitHub's **Security** tab → **Report a vulnerability**).
 - [`CHANGELOG.md`](CHANGELOG.md) — what changed, release by release.
 
 Repo: <https://github.com/hellno/deckard>.

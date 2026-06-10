@@ -154,7 +154,7 @@ Per `STATUS.md` — don't overstate maturity:
 ## Reporting security issues
 
 **Do not open a public issue for a security vulnerability.** Report it privately per
-[`SECURITY.md`](SECURITY.md), or directly to the maintainer at **[contact-removed-see-SECURITY.md]**.
+[`SECURITY.md`](SECURITY.md) — use GitHub's private vulnerability reporting (the repository's **Security** tab → **Report a vulnerability**).
 
 ## License
 
