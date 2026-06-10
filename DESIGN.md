@@ -118,8 +118,8 @@ do not go lighter) · `accent #A8650C` (deepened for AA) · `agent #0C7E75`.
 5. **Allocation/category bars** use neutral/low-chroma tonal steps, never amber as a category.
 6. **Danger stays loud red, early.** Even though the app is otherwise near-colorless, unlimited
    approvals, unknown contracts, fresh-address sends, and over-cap states surface in `error`.
-7. **Caution banners** = neutral surface + a 2px amber left keyline + amber icon/text. Not a filled
-   warm block.
+7. **Caution** = an amber alert icon + the risk text, inline. No left keyline or banner box — the
+   amber icon carries the signal and the risk word carries the emphasis.
 8. **Budget/utilization bars** = thin (4px), neutral track, neutral/cyan fill at rest; amber only
    ≥90%, red at ≥100%. Never a saturated amber slab.
 
@@ -232,8 +232,8 @@ data components must define **empty / loading / error**. Defaults:
 - **Seed reveal** — blurred by default, **hold-to-reveal**, auto-hides after a few seconds, a
   "make sure nobody is watching" caution, **never auto-copied** (and Copy is visually demoted below
   Hold-to-reveal). The index numbers stay legible so the grid reads as "present but hidden."
-- **Network warning** on Receive — the one caution moment; neutral surface + amber keyline, the risk
-  word emphasized, not the network chip.
+- **Network warning** on Receive — the one caution moment; an amber alert icon + the risk text inline
+  (no keyline or banner box), the risk word emphasized, not the network chip.
 - **Kill switch / revocation** — Pause / Revoke / Rotate always one deliberate action away on any
   agent; a master "Pause all agents" belongs in Settings (agent governance), styled deliberate.
 
