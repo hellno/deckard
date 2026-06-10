@@ -128,94 +128,101 @@ impl Shell {
             "Personal".to_string()
         };
 
-        div().size_full().p_8().child(
-            v_flex()
-                .items_start()
-                .max_w(px(680.0))
-                .gap_6()
-                // Page header (DESIGN §Page header): identity square + wallet-name
-                // H1 (text.primary, weight 600 — NEVER cyan) + a muted mono,
-                // middle-truncated address subtitle.
-                .child(
-                    h_flex()
-                        .w_full()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .gap_3()
-                                .child(div().size(px(28.0)).rounded(px(6.0)).bg(id_square))
-                                .child(
-                                    v_flex()
-                                        .gap_0p5()
-                                        .child(
-                                            div()
-                                                .text_xl()
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .text_color(fg)
-                                                .child(wallet_name),
-                                        )
-                                        .child(
-                                            div()
-                                                .font_family(mono.clone())
-                                                .text_xs()
-                                                .text_color(muted)
-                                                .child(account_pill),
-                                        ),
-                                ),
-                        )
-                        .child(
-                            Button::new("refresh")
-                                .ghost()
-                                .icon(IconName::Replace)
-                                .on_click(cx.listener(|this, _, _, cx| this.refresh_portfolio(cx))),
-                        ),
-                )
-                // Balance hero: the merged Total (public + private), a Private/Public
-                // allocation bar, and the composition lines (Wave 2 T10).
-                .child(self.render_shielded_hero(native_wei, cx))
-                // Primary actions. Shield (the privacy hero) is the one live, primary
-                // CTA; Send + Swap are gated to the next release (Chunk 4, testnet-first)
-                // and shown disabled rather than inert-but-active.
-                .child(
-                    h_flex()
-                        .w_full()
-                        .gap_2()
-                        // Shield signs from YOUR wallet, so it's disabled while viewing a
-                        // watched read-only account (don't show a funds-moving action in a
-                        // someone-else's-address context).
-                        .child(
-                            Button::new("shield")
-                                .primary()
-                                .label("Shield")
-                                .disabled(self.viewing_watch)
-                                .on_click(cx.listener(|this, _, _, cx| this.open_shield(cx))),
-                        )
-                        .child(Button::new("receive").ghost().label("Receive").on_click(
-                            cx.listener(|this, _, _, cx| this.open(Surface::Receive, cx)),
-                        ))
-                        .child(Button::new("send").ghost().label("Send").disabled(true))
-                        .child(Button::new("swap").ghost().label("Swap").disabled(true)),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(muted)
-                        .child("Send & Swap arrive in the next release."),
-                )
-                // Holdings, or a state.
-                .child(self.render_holdings(first_sync, has_tokens, holdings, cx))
-                // Keyboard hints — the Superhuman/Linear signal.
-                .child(
-                    h_flex()
-                        .gap_4()
-                        .pt_1()
-                        .child(chip(format!("{MOD}K"), "Command palette".into()))
-                        .child(chip(format!("{MOD}["), "Back".into()))
-                        .child(chip(format!("{MOD},"), "Settings".into())),
-                ),
-        )
+        div()
+            .size_full()
+            .p_8()
+            // Scrolling for this surface is handled by its per-surface wrapper in
+            // `shell.rs` (the content match), so the body here is plain content.
+            .child(
+                v_flex()
+                    .items_start()
+                    .max_w(px(680.0))
+                    .gap_6()
+                    // Page header (DESIGN §Page header): identity square + wallet-name
+                    // H1 (text.primary, weight 600 — NEVER cyan) + a muted mono,
+                    // middle-truncated address subtitle.
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .child(div().size(px(28.0)).rounded(px(6.0)).bg(id_square))
+                                    .child(
+                                        v_flex()
+                                            .gap_0p5()
+                                            .child(
+                                                div()
+                                                    .text_xl()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(fg)
+                                                    .child(wallet_name),
+                                            )
+                                            .child(
+                                                div()
+                                                    .font_family(mono.clone())
+                                                    .text_xs()
+                                                    .text_color(muted)
+                                                    .child(account_pill),
+                                            ),
+                                    ),
+                            )
+                            .child(
+                                Button::new("refresh")
+                                    .ghost()
+                                    .icon(IconName::Replace)
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.refresh_portfolio(cx)),
+                                    ),
+                            ),
+                    )
+                    // Balance hero: the merged Total (public + private), a Private/Public
+                    // allocation bar, and the composition lines (Wave 2 T10).
+                    .child(self.render_shielded_hero(native_wei, cx))
+                    // Primary actions. Shield (the privacy hero) is the one live, primary
+                    // CTA; Send + Swap are gated to the next release (Chunk 4, testnet-first)
+                    // and shown disabled rather than inert-but-active.
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap_2()
+                            // Shield signs from YOUR wallet, so it's disabled while viewing a
+                            // watched read-only account (don't show a funds-moving action in a
+                            // someone-else's-address context).
+                            .child(
+                                Button::new("shield")
+                                    .primary()
+                                    .label("Shield")
+                                    .disabled(self.viewing_watch)
+                                    .on_click(cx.listener(|this, _, _, cx| this.open_shield(cx))),
+                            )
+                            .child(Button::new("receive").ghost().label("Receive").on_click(
+                                cx.listener(|this, _, _, cx| this.open(Surface::Receive, cx)),
+                            ))
+                            .child(Button::new("send").ghost().label("Send").disabled(true))
+                            .child(Button::new("swap").ghost().label("Swap").disabled(true)),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child("Send & Swap arrive in the next release."),
+                    )
+                    // Holdings, or a state.
+                    .child(self.render_holdings(first_sync, has_tokens, holdings, cx))
+                    // Keyboard hints — the Superhuman/Linear signal.
+                    .child(
+                        h_flex()
+                            .gap_4()
+                            .pt_1()
+                            .child(chip(format!("{MOD}K"), "Command palette".into()))
+                            .child(chip(format!("{MOD}["), "Back".into()))
+                            .child(chip(format!("{MOD},"), "Settings".into())),
+                    ),
+            )
     }
 
     /// The merged Total hero (Wave 2 T10): `Total = public + private` when both are known, a
@@ -460,72 +467,78 @@ impl Shell {
 
         let native_wei = self.portfolio.as_ref().map(|p| p.native_wei);
 
-        div().size_full().p_8().child(
-            v_flex()
-                .items_start()
-                .max_w(px(680.0))
-                .gap_6()
-                .child(
-                    h_flex()
-                        .items_center()
-                        .gap_3()
-                        .child(div().size(px(28.0)).rounded(px(6.0)).bg(id_square))
-                        .child(
-                            div()
-                                .text_xl()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(fg)
-                                .child("Personal"),
-                        ),
-                )
-                .child(
-                    v_flex()
-                        .w_full()
-                        .gap_3()
-                        .child(
-                            div()
-                                .id("project-balance-hero")
-                                .cursor_pointer()
-                                .text_3xl()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .map(|el| match native_wei {
-                                    Some(wei) => el.child(money(
-                                        wei,
-                                        18,
-                                        4,
-                                        Some("ETH"),
-                                        masked,
-                                        mono.clone(),
-                                        fg,
-                                        muted,
-                                    )),
-                                    None => {
-                                        el.font_family(mono.clone()).text_color(muted).child("—")
-                                    }
-                                })
-                                .on_click(cx.listener(|this, _, _, cx| this.toggle_mask(cx))),
-                        )
-                        .children(native_wei.map(|_| {
-                            allocation_bar(
-                                vec![AllocSegment {
-                                    label: "Public".into(),
-                                    fraction: 1.0,
-                                    tone: id_square,
-                                }],
-                                masked,
-                                border,
-                                muted,
-                                fg,
+        div()
+            .size_full()
+            .p_8()
+            // Scrolling for this surface is handled by its per-surface wrapper in
+            // `shell.rs` (the content match), so the body here is plain content.
+            .child(
+                v_flex()
+                    .items_start()
+                    .max_w(px(680.0))
+                    .gap_6()
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_3()
+                            .child(div().size(px(28.0)).rounded(px(6.0)).bg(id_square))
+                            .child(
+                                div()
+                                    .text_xl()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(fg)
+                                    .child("Personal"),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .id("project-balance-hero")
+                                    .cursor_pointer()
+                                    .text_3xl()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .map(|el| match native_wei {
+                                        Some(wei) => el.child(money(
+                                            wei,
+                                            18,
+                                            4,
+                                            Some("ETH"),
+                                            masked,
+                                            mono.clone(),
+                                            fg,
+                                            muted,
+                                        )),
+                                        None => el
+                                            .font_family(mono.clone())
+                                            .text_color(muted)
+                                            .child("—"),
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| this.toggle_mask(cx))),
                             )
-                        })),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(muted)
-                        .child("1 wallet · 1 agent"),
-                ),
-        )
+                            .children(native_wei.map(|_| {
+                                allocation_bar(
+                                    vec![AllocSegment {
+                                        label: "Public".into(),
+                                        fraction: 1.0,
+                                        tone: id_square,
+                                    }],
+                                    masked,
+                                    border,
+                                    muted,
+                                    fg,
+                                )
+                            })),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(muted)
+                            .child("1 wallet · 1 agent"),
+                    ),
+            )
     }
 
     /// Agent home — a static, demo-scoped policy-card placeholder (DESIGN §Policy
@@ -563,79 +576,83 @@ impl Shell {
                 )
         };
 
-        div().size_full().p_8().child(
-            v_flex()
-                .items_start()
-                .max_w(px(680.0))
-                .gap_6()
-                // Header: cyan squircle monogram (the ONLY cyan on the surface,
-                // breathing while Atlas acts) + agent name H1 (text.primary, NEVER cyan).
-                .child(
-                    h_flex()
-                        .items_center()
-                        .gap_3()
-                        .child(agent_squircle(
-                            px(28.0),
-                            px(6.0),
-                            self.agent_acting,
-                            agent,
-                            agent_tint,
-                            "agent-pulse-home",
-                        ))
-                        .child(
-                            v_flex()
-                                .gap_0p5()
-                                .child(
-                                    div()
-                                        .text_xl()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(fg)
-                                        .child("Atlas"),
-                                )
-                                .child(div().text_xs().text_color(muted).child(
-                                    if self.agent_acting {
-                                        "Delegated agent · acting now"
-                                    } else {
-                                        "Delegated agent · idle"
-                                    },
-                                )),
+        div()
+            .size_full()
+            .p_8()
+            // Scrolling for this surface is handled by its per-surface wrapper in
+            // `shell.rs` (the content match), so the body here is plain content.
+            .child(
+                v_flex()
+                    .items_start()
+                    .max_w(px(680.0))
+                    .gap_6()
+                    // Header: cyan squircle monogram (the ONLY cyan on the surface,
+                    // breathing while Atlas acts) + agent name H1 (text.primary, NEVER cyan).
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_3()
+                            .child(agent_squircle(
+                                px(28.0),
+                                px(6.0),
+                                self.agent_acting,
+                                agent,
+                                agent_tint,
+                                "agent-pulse-home",
+                            ))
+                            .child(
+                                v_flex()
+                                    .gap_0p5()
+                                    .child(
+                                        div()
+                                            .text_xl()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(fg)
+                                            .child("Atlas"),
+                                    )
+                                    .child(div().text_xs().text_color(muted).child(
+                                        if self.agent_acting {
+                                            "Delegated agent · acting now"
+                                        } else {
+                                            "Delegated agent · idle"
+                                        },
+                                    )),
+                            ),
+                    )
+                    // Policy card: one faint frame, no interior grid lines.
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .gap_0()
+                            .p_4()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(border)
+                            .bg(surface)
+                            .child(policy_row("Per-transaction cap", "0.10 ETH"))
+                            .child(policy_row("Period budget", "1.00 ETH / week"))
+                            .child(policy_row("Allowed assets", "ETH"))
+                            .child(policy_row("Session key", "expires in 6d"))
+                            .child(policy_row("Autonomy", "act < $50 · ask above")),
+                    )
+                    // Demo control: narrate Atlas "acting" to show the one ambient motion
+                    // (the breathing squircle). Real activity arrives with the MCP agent.
+                    .child(
+                        Button::new("toggle-agent-acting")
+                            .ghost()
+                            .label(if self.agent_acting {
+                                "Stop activity (demo)"
+                            } else {
+                                "Simulate activity (demo)"
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_agent_acting(cx))),
+                    )
+                    .child(
+                        div().text_xs().text_color(muted).child(
+                            "Atlas is a manual stand-in for the demo. Controls land with MCP.",
                         ),
-                )
-                // Policy card: one faint frame, no interior grid lines.
-                .child(
-                    v_flex()
-                        .w_full()
-                        .gap_0()
-                        .p_4()
-                        .rounded_lg()
-                        .border_1()
-                        .border_color(border)
-                        .bg(surface)
-                        .child(policy_row("Per-transaction cap", "0.10 ETH"))
-                        .child(policy_row("Period budget", "1.00 ETH / week"))
-                        .child(policy_row("Allowed assets", "ETH"))
-                        .child(policy_row("Session key", "expires in 6d"))
-                        .child(policy_row("Autonomy", "act < $50 · ask above")),
-                )
-                // Demo control: narrate Atlas "acting" to show the one ambient motion
-                // (the breathing squircle). Real activity arrives with the MCP agent.
-                .child(
-                    Button::new("toggle-agent-acting")
-                        .ghost()
-                        .label(if self.agent_acting {
-                            "Stop activity (demo)"
-                        } else {
-                            "Simulate activity (demo)"
-                        })
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_agent_acting(cx))),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(muted)
-                        .child("Atlas is a manual stand-in for the demo. Controls land with MCP."),
-                ),
-        )
+                    ),
+            )
     }
 }
 
