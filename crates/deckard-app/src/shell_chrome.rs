@@ -298,8 +298,15 @@ impl Shell {
                     .gap_2()
                     .child(div().size(px(16.0)).rounded(px(4.0)).bg(id_square))
                     .child(div().text_sm().text_color(fg).child("Personal"))
-                    .child(div().text_sm().text_color(muted).child("›"))
-                    .child(div().text_sm().text_color(fg).child(self.view_label())),
+                    // Skip the trailing "› <view>" when it would just repeat the project name
+                    // (Project Home's label is "Personal" → avoid "Personal › Personal").
+                    .when(
+                        !(self.surface == Surface::Home && self.selection == Selection::Project),
+                        |el| {
+                            el.child(div().text_sm().text_color(muted).child("›"))
+                                .child(div().text_sm().text_color(fg).child(self.view_label()))
+                        },
+                    ),
             )
             .child(
                 h_flex()

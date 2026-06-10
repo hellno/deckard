@@ -13,6 +13,7 @@ use gpui::{
 use gpui_component::{
     h_flex,
     input::{InputEvent, InputState},
+    scroll::ScrollableElement,
     v_flex, ActiveTheme, TitleBar,
 };
 
@@ -1427,28 +1428,57 @@ impl Render for Shell {
             // (sidebar | [breadcrumb / content / status strip]) + command palette.
             self.prepare_shield_inputs(window, cx);
             let title_bar = self.render_title_bar(cx);
+            // Each scrollable surface inlines its OWN `.overflow_y_scrollbar()` (don't factor into
+            // a helper): gpui-component keys the scroll offset by call site, so per-arm calls give
+            // each surface an independent offset. Receive/Shield are short centered cards — no wrapper.
             let content = match (self.selection, self.surface) {
-                (_, Surface::Settings) => self.render_settings(window, cx).into_any_element(),
+                (_, Surface::Settings) => div()
+                    .id("scroll-settings")
+                    .size_full()
+                    .overflow_y_scrollbar()
+                    .child(self.render_settings(window, cx))
+                    .into_any_element(),
                 (_, Surface::Receive) => self.render_receive(cx).into_any_element(),
                 (_, Surface::Shield) => self.render_shield(cx).into_any_element(),
-                (Selection::Wallet, Surface::Home) => {
-                    self.render_wallet_home(cx).into_any_element()
-                }
-                (Selection::Project, Surface::Home) => {
-                    self.render_project_home(cx).into_any_element()
-                }
-                (Selection::Agent, Surface::Home) => self.render_agent_home(cx).into_any_element(),
+                (Selection::Wallet, Surface::Home) => div()
+                    .id("scroll-wallet")
+                    .size_full()
+                    .overflow_y_scrollbar()
+                    .child(self.render_wallet_home(cx))
+                    .into_any_element(),
+                (Selection::Project, Surface::Home) => div()
+                    .id("scroll-project")
+                    .size_full()
+                    .overflow_y_scrollbar()
+                    .child(self.render_project_home(cx))
+                    .into_any_element(),
+                (Selection::Agent, Surface::Home) => div()
+                    .id("scroll-agent")
+                    .size_full()
+                    .overflow_y_scrollbar()
+                    .child(self.render_agent_home(cx))
+                    .into_any_element(),
             };
             v_flex()
                 .size_full()
                 .child(title_bar)
                 .child(
                     h_flex().size_full().child(self.render_sidebar(cx)).child(
+                        // Fill the full pane height (like the sidebar's `.h_full()`): `h_flex`
+                        // centers its children vertically, so without this the content column
+                        // collapses to its intrinsic height and floats mid-pane — the
+                        // breadcrumb, content, and bottom status strip then bunch up and overlap
+                        // whenever a view is shorter than the viewport.
                         v_flex()
                             .flex_1()
+                            .h_full()
                             .min_w_0()
+                            .min_h_0()
                             .child(self.render_breadcrumb(cx))
-                            .child(div().flex_1().min_h_0().child(content))
+                            // The slot is a `v_flex`, not a plain `div` (gpui defaults to
+                            // `display: block`): the centered Receive/Shield roots use `flex_1` +
+                            // `justify_center`, which only fill + center inside a flex parent.
+                            .child(v_flex().flex_1().min_h_0().child(content))
                             .child(self.render_status_strip(cx)),
                     ),
                 )

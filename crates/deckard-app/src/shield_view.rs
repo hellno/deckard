@@ -117,10 +117,21 @@ impl Shell {
                         ),
                 )
                 .child(
-                    div()
-                        .text_xs()
-                        .text_color(muted)
-                        .child("Your own 0zk address auto-fills in a later release."),
+                    // Only call the recipient "your own 0zk address" when it actually matches the
+                    // wallet's auto-filled address — a user-typed/edited recipient gets neutral copy
+                    // so the line never misrepresents where the deposit is going.
+                    div().text_xs().text_color(muted).child({
+                        let recipient = recipient_raw.trim();
+                        let is_own_address =
+                            self.railgun_address.as_deref().map(str::trim) == Some(recipient);
+                        if recipient.is_empty() {
+                            "Enter the 0zk address that will receive the private balance."
+                        } else if is_own_address {
+                            "Pre-filled with your own 0zk address — edit it to shield to a different recipient."
+                        } else {
+                            "Shielding to the 0zk address above — double-check it before you continue."
+                        }
+                    }),
                 )
                 .into_any_element(),
         )
@@ -289,14 +300,12 @@ impl Shell {
         )
     }
 
-    /// The three honesty lines, in DESIGN's caution frame (neutral surface + a 2px amber
-    /// left keyline). Calm, not a filled warm block.
+    /// The three honesty lines in a calm neutral surface (no keyline).
     fn shield_honesty(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let fg = theme.foreground;
         let muted = theme.muted_foreground;
         let surface = theme.secondary;
-        let amber = theme::amber(theme.is_dark());
 
         v_flex()
             .w_full()
@@ -305,8 +314,6 @@ impl Shell {
             .py_2p5()
             .rounded_lg()
             .bg(surface)
-            .border_l_2()
-            .border_color(amber)
             .child(
                 div()
                     .text_xs()
@@ -444,6 +451,8 @@ impl Shell {
             )
             .child(
                 v_flex()
+                    .flex_1()
+                    .min_w_0()
                     .gap_1()
                     .child(
                         div()

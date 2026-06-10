@@ -85,20 +85,13 @@ impl Shell {
                             .text_color(fg)
                             .child(address),
                     )
-                    // Network warning — the one caution moment (DESIGN §236): a
-                    // neutral surface with a 2px amber LEFT keyline + amber icon/text.
-                    // Not a filled warm block; the risk word carries the emphasis.
+                    // Network warning — the one caution moment: an amber alert icon + the risk
+                    // text, inline. No banner box or keyline; the icon carries the signal.
                     .child(
                         h_flex()
                             .w_full()
                             .items_start()
                             .gap_2()
-                            .px_3()
-                            .py_2p5()
-                            .rounded_lg()
-                            .bg(surface)
-                            .border_l_2()
-                            .border_color(amber)
                             .child(
                                 Icon::new(IconName::TriangleAlert)
                                     .text_color(amber)
@@ -106,6 +99,8 @@ impl Shell {
                             )
                             .child(
                                 div()
+                                    .flex_1()
+                                    .min_w_0()
                                     .text_xs()
                                     .text_color(fg)
                                     .child("Only send Ethereum-network assets to this address. Funds sent on the wrong network may be lost."),
