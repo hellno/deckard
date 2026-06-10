@@ -1428,17 +1428,39 @@ impl Render for Shell {
             // (sidebar | [breadcrumb / content / status strip]) + command palette.
             self.prepare_shield_inputs(window, cx);
             let title_bar = self.render_title_bar(cx);
+            // Scrollable content surfaces wrap their view in a Scrollable. Each arm inlines its
+            // OWN `.overflow_y_scrollbar()` (not a shared helper) on purpose: gpui-component keys
+            // the scroll offset by call site, so a per-arm call gives each surface an independent
+            // offset — otherwise scrolling one long page would leave the next one opened
+            // pre-scrolled with its header hidden. Receive and Shield are short, centered
+            // single-action cards, so they get NO scroll wrapper and stay vertically centered.
             let content = match (self.selection, self.surface) {
-                (_, Surface::Settings) => self.render_settings(window, cx).into_any_element(),
+                (_, Surface::Settings) => div()
+                    .id("scroll-settings")
+                    .size_full()
+                    .overflow_y_scrollbar()
+                    .child(self.render_settings(window, cx))
+                    .into_any_element(),
                 (_, Surface::Receive) => self.render_receive(cx).into_any_element(),
                 (_, Surface::Shield) => self.render_shield(cx).into_any_element(),
-                (Selection::Wallet, Surface::Home) => {
-                    self.render_wallet_home(cx).into_any_element()
-                }
-                (Selection::Project, Surface::Home) => {
-                    self.render_project_home(cx).into_any_element()
-                }
-                (Selection::Agent, Surface::Home) => self.render_agent_home(cx).into_any_element(),
+                (Selection::Wallet, Surface::Home) => div()
+                    .id("scroll-wallet")
+                    .size_full()
+                    .overflow_y_scrollbar()
+                    .child(self.render_wallet_home(cx))
+                    .into_any_element(),
+                (Selection::Project, Surface::Home) => div()
+                    .id("scroll-project")
+                    .size_full()
+                    .overflow_y_scrollbar()
+                    .child(self.render_project_home(cx))
+                    .into_any_element(),
+                (Selection::Agent, Surface::Home) => div()
+                    .id("scroll-agent")
+                    .size_full()
+                    .overflow_y_scrollbar()
+                    .child(self.render_agent_home(cx))
+                    .into_any_element(),
             };
             v_flex()
                 .size_full()
@@ -1456,19 +1478,10 @@ impl Render for Shell {
                             .min_w_0()
                             .min_h_0()
                             .child(self.render_breadcrumb(cx))
-                            // Scrollable content slot: a bounded flex item wrapping a
-                            // gpui-component Scrollable (which owns its own scroll handle), so a
-                            // view taller than the pane scrolls instead of underlapping the
-                            // status strip below it.
-                            .child(
-                                div().flex_1().min_h_0().child(
-                                    div()
-                                        .id("content-scroll")
-                                        .size_full()
-                                        .overflow_y_scrollbar()
-                                        .child(content),
-                                ),
-                            )
+                            // The content slot just fills the space between the breadcrumb and the
+                            // status strip; per-surface scrolling is applied where `content` is
+                            // built (the match above), so each surface owns its own scroll offset.
+                            .child(div().flex_1().min_h_0().child(content))
                             .child(self.render_status_strip(cx)),
                     ),
                 )
