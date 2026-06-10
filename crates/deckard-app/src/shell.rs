@@ -13,6 +13,7 @@ use gpui::{
 use gpui_component::{
     h_flex,
     input::{InputEvent, InputState},
+    scroll::ScrollableElement,
     v_flex, ActiveTheme, TitleBar,
 };
 
@@ -1455,7 +1456,19 @@ impl Render for Shell {
                             .min_w_0()
                             .min_h_0()
                             .child(self.render_breadcrumb(cx))
-                            .child(div().flex_1().min_h_0().child(content))
+                            // Scrollable content slot: a bounded flex item wrapping a
+                            // gpui-component Scrollable (which owns its own scroll handle), so a
+                            // view taller than the pane scrolls instead of underlapping the
+                            // status strip below it.
+                            .child(
+                                div().flex_1().min_h_0().child(
+                                    div()
+                                        .id("content-scroll")
+                                        .size_full()
+                                        .overflow_y_scrollbar()
+                                        .child(content),
+                                ),
+                            )
                             .child(self.render_status_strip(cx)),
                     ),
                 )
