@@ -1478,10 +1478,13 @@ impl Render for Shell {
                             .min_w_0()
                             .min_h_0()
                             .child(self.render_breadcrumb(cx))
-                            // The content slot just fills the space between the breadcrumb and the
-                            // status strip; per-surface scrolling is applied where `content` is
-                            // built (the match above), so each surface owns its own scroll offset.
-                            .child(div().flex_1().min_h_0().child(content))
+                            // The content slot is a full-height flex COLUMN (not a plain `div`,
+                            // which gpui defaults to `display: block`): the centered single-action
+                            // surfaces (Receive/Shield) use `flex_1` + `justify_center`, which only
+                            // fills + centers inside a flex parent — a block slot would let them
+                            // shrink to their card height and sit under the breadcrumb. Scrolling
+                            // surfaces wrap themselves (the match above), so each owns its offset.
+                            .child(v_flex().flex_1().min_h_0().child(content))
                             .child(self.render_status_strip(cx)),
                     ),
                 )
