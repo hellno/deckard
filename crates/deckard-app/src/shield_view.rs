@@ -300,14 +300,12 @@ impl Shell {
         )
     }
 
-    /// The three honesty lines, in DESIGN's caution frame (neutral surface + a 2px amber
-    /// left keyline). Calm, not a filled warm block.
+    /// The three honesty lines in a calm neutral surface (no keyline).
     fn shield_honesty(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let fg = theme.foreground;
         let muted = theme.muted_foreground;
         let surface = theme.secondary;
-        let amber = theme::amber(theme.is_dark());
 
         v_flex()
             .w_full()
@@ -316,8 +314,6 @@ impl Shell {
             .py_2p5()
             .rounded_lg()
             .bg(surface)
-            .border_l_2()
-            .border_color(amber)
             .child(
                 div()
                     .text_xs()
