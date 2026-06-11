@@ -71,6 +71,106 @@ under `crates/`:
 > The fast `just core` loop is for iterating — the **full Definition of Done still applies before
 > you're done.**
 
+## Demo / local-chain dev loop
+
+`just demo` is **contributor infrastructure first, demo second** — the only way to hack on
+money flows without real ETH. It starts a local **anvil fork of Sepolia** (pinned to the
+`shield_e2e` block) and runs the app + signer daemon against an **isolated** config dir at
+`~/.deckard/demo`, so it never touches your everyday keystore.
+
+### Prerequisites
+
+- **Foundry** (`anvil` + `cast`): macOS `brew install foundry` (or
+  `curl -L https://foundry.paradigm.xyz | bash && foundryup`); Linux
+  `curl -L https://foundry.paradigm.xyz | bash && foundryup`.
+- **A Sepolia archive RPC** as `RPC_URL_SEPOLIA` — anvil's upstream fork source. This is
+  **not** read by any Deckard binary; only `just demo`/`just demo-check` use it.
+  ```sh
+  export RPC_URL_SEPOLIA=https://eth-sepolia.g.alchemy.com/v2/<your-key>
+  ```
+- Quit any everyday Deckard first — the demo uses its own socket, but a running instance
+  invites confusion.
+
+### macOS (Claude Desktop)
+
+1. **`just demo`** — starts the anvil fork and opens the app on the demo config dir.
+   (Leave it running; Ctrl-C tears anvil down.)
+2. In the app, **create a throwaway wallet** (never a real seed) and **unlock** it.
+3. In another terminal, **`just demo-fund`** — funds the wallet the app onboarded with
+   10 ETH on the fork. (No arg = asks the demo daemon for its address; the app must be
+   running + unlocked. Or pass one: `just demo-fund 0x…`.)
+4. **`deckard-mcp install --demo`** — prints the Claude Desktop registration (key-less;
+   it embeds only the demo env block). Merge it / re-run with `--write`, then restart
+   Claude Desktop.
+5. **Ask Claude to "shield 0.02 ETH."** Claude calls `deckard_shield` → `deckard_execute`;
+   the daemon enforces policy and signs; the split-balance bar flips public → private
+   on screen.
+
+### Linux (CLI path)
+
+Claude Desktop is macOS-only, so on Linux drive the **same daemon** through the
+`deckard-mcp` CLI:
+
+```sh
+just demo                       # terminal 1: fork + app (create + unlock a throwaway wallet)
+just demo-fund                  # terminal 2: fund it
+deckard-mcp shield --amount-eth 0.02   # propose -> prints a request_id
+deckard-mcp execute <request_id>       # sign + broadcast
+deckard-mcp policy                     # read the active fence
+```
+
+> The CLI reads the demo env from your shell. If you didn't launch it from a shell that
+> has the demo env exported, prefix the demo block (the same four vars `install --demo`
+> emits): `DECKARD_SOCKET_PATH`, `DECKARD_CONFIG_DIR`, `DECKARD_CHAIN_ID=11155111`,
+> `DECKARD_RPC_URL=http://127.0.0.1:8545`.
+
+### Over-cap behavior
+
+The demo policy (`policy.demo.json`, installed at `~/.deckard/demo/policy.json`) caps
+per-tx at **0.1 ETH** and daily at **0.5 ETH** with `require_approval: OverCap`. A shield
+**within** cap auto-allows (on the Sepolia fork the mainnet guardrail is inactive). A
+shield **over** cap returns `NeedsApproval` — and there's no approval card in this alpha
+(the app only resolves shields it proposed itself, so an agent/CLI-proposed over-cap shield
+can't be approved from the app). To proceed, either **lower the amount** under the per-tx
+cap, or **raise the cap** in `~/.deckard/demo/policy.json` and relaunch `just demo`.
+
+### Fresh chain every run
+
+Each `just demo` is a **fresh fork** — anvil state does not persist across runs, so
+**re-fund and re-shield** each time (`just demo-fund` then ask again). Your throwaway
+wallet, settings, and `policy.json` under `~/.deckard/demo` **do** persist (you onboard
+once); only the chain resets. The shielded balance is rebuilt in-memory on every app
+launch, so it always reflects the current fork.
+
+### When something's off
+
+Run **`just demo-check`** — it verifies foundry, `RPC_URL_SEPOLIA`, the local fork, the
+signerd build, and that the app is running + unlocked on the right chain, then prints the
+active chain + policy + auto-allow state and the exact fix for each failure. It exits `0`
+when ready and a distinct nonzero code per failure category.
+
+### Demo environment variables
+
+Every Deckard process resolves the same `DECKARD_*` vars; `just demo` sets the demo block,
+and `deckard-mcp install --demo` emits the same four for Claude Desktop. `RPC_URL_SEPOLIA`
+is the odd one out — it's anvil's upstream fork source, read only by `just demo`.
+
+| Variable | Read by | Default | Secret-bearing? |
+|---|---|---|---|
+| `DECKARD_CONFIG_DIR` | app, daemon, mcp, core | platform config dir | No |
+| `DECKARD_SOCKET_PATH` | app, daemon, mcp | per-uid runtime path | No |
+| `DECKARD_CHAIN_ID` | app, daemon, mcp | `1` (mainnet) | No |
+| `DECKARD_RPC_URL` | app, daemon | public RPC | **Yes** — may carry an API key; redacted in logs |
+| `DECKARD_VERIFIED_READS` | core (app/daemon) | on (`1`) | No |
+| `DECKARD_DEMO_FORK_BLOCK` | core (app/daemon) | unset (live, unpinned) | No |
+| `DECKARD_SIGNERD_BIN` | app (daemon resolution) | sibling of app binary | No |
+| `RPC_URL_SEPOLIA` | `just demo` / `just demo-check` only (anvil `--fork-url`) | unset (required for demo) | **Yes** — archive RPC, may carry an API key |
+
+> Demo block (set by `just demo`, emitted by `deckard-mcp install --demo`):
+> `DECKARD_CONFIG_DIR=~/.deckard/demo`, `DECKARD_SOCKET_PATH=~/.deckard/demo/signerd.sock`,
+> `DECKARD_CHAIN_ID=11155111`, `DECKARD_RPC_URL=http://127.0.0.1:8545`. `just demo` also
+> sets `DECKARD_VERIFIED_READS=0` (Helios is mainnet-only) and `DECKARD_DEMO_FORK_BLOCK=10822990`.
+
 ## Definition of Done
 
 All of these must hold before a change is complete (reproduced verbatim from `AGENTS.md`):
@@ -147,9 +247,11 @@ Per `STATUS.md` — don't overstate maturity:
   (no third-party RPC trusted by default); the process-isolated signer daemon (`deckard-signerd`)
   that holds the key and gates writes; the shield hero (auto-private via Railgun), which is **wired
   and black-box tested on an anvil fork.**
-- **Not done / partial:** the **Send** UI is gated ("next release"); **Swap** is TODO; the agent /
-  MCP surface (`deckard-mcp`) is **not built**; the receive-watcher auto-detect is TODO. Some tests
-  are `#[ignore]` (they need `anvil` + an archive RPC) — see the test caveats in `STATUS.md`.
+- **Not done / partial:** the **Send** UI is gated ("next release", first post-launch
+  milestone); **Swap** is TODO; the receive-watcher auto-detect is TODO. The agent / MCP
+  surface (`deckard-mcp`) **is built** — a key-less CLI + MCP stdio server that proposes
+  writes to the daemon (see the demo loop above). Some tests are `#[ignore]` (they need
+  `anvil` + an archive RPC) — see the test caveats in `STATUS.md`.
 
 ## Reporting security issues
 

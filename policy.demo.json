@@ -1,0 +1,18 @@
+{
+  "_comment": "Deckard DEMO policy — copied to $HOME/.deckard/demo/policy.json by `just demo` (install-if-absent; your edits there are never clobbered). NOT for mainnet. All caps are wei, as DECIMAL strings. Comment keys (_comment*) are ignored by the loader (Policy has no deny_unknown_fields).",
+  "_comment_hero": "per_tx_cap 0.1 ETH lets the hero `shield 0.02 ETH` auto-allow on the Sepolia fork (chain 11155111 -> mainnet guardrail inactive; require_approval=OverCap allows within-cap). Shield > 0.1 ETH (or cumulative > 0.5 ETH/day) -> NeedsApproval, the clean over-cap example.",
+  "per_tx_cap_wei": "100000000000000000",
+  "_comment_per_tx_cap": "0.1 ETH",
+  "daily_cap_wei": "500000000000000000",
+  "_comment_daily_cap": "0.5 ETH",
+  "spent_today_wei": "0",
+  "_comment_spent_today": "Always reset to 0 by the daemon on load (spend tracking is in-memory). Value here is cosmetic.",
+  "allow_to": [],
+  "_comment_allow_to": "EMPTY = any recipient allowed; the per-tx/daily caps still apply. Shield routes to the wallet's own 0zk address, so an allowlist is unnecessary for the demo.",
+  "auto_shield_min_wei": "10000000000000000",
+  "_comment_auto_shield_min": "0.01 ETH. Advisory only — the agent reads it to decide whether to PROPOSE an auto-shield; the policy gate does not switch on it.",
+  "require_approval": "OverCap",
+  "_comment_require_approval": "One of: Never | OverCap | Always. OverCap = within-cap auto-allows; over-cap raises NeedsApproval — no approval card in this alpha, so lower the amount under the per-tx cap or raise the cap here.",
+  "revoked": false,
+  "_comment_revoked": "Always reset to false by the daemon on load (a daemon boots armed; STOP is a live action, never a persisted flag)."
+}
