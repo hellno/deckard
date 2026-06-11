@@ -18,7 +18,9 @@ use gpui_component::{
 };
 
 use alloy_primitives::B256;
-use deckard_contract::{Decision, ExecuteResult, Intent, RequestId, ShieldStatus};
+use deckard_contract::{
+    Decision, ExecuteResult, Intent, Policy, RequestId, ShieldStatus, SignerRequest, SignerResponse,
+};
 use deckard_core::{
     Address, EthProvider, KdfParams, Portfolio, ReadStatus, ShieldedHandle, Vault, WordCount, U256,
 };
@@ -176,8 +178,13 @@ pub struct Shell {
     pub mask: bool,
     /// Demo stand-in for "Atlas is currently acting": drives the one sanctioned ambient
     /// motion (the ~1.2s breathing pulse on the agent squircle). Not persisted — it's a
-    /// narrated demo toggle, since the real MCP agent is a fast-follow.
+    /// narrated demo toggle until the daemon exposes an activity feed.
     pub agent_acting: bool,
+    /// The signer's live policy fence, rendered on the agent home so the card shows the
+    /// SAME numbers `deckard_policy_get` returns. Fetched from the daemon (`PolicyGet`
+    /// deliberately succeeds while locked — the fence is config, not a secret); `None`
+    /// until the first fetch lands or when the daemon is unreachable.
+    pub agent_policy: Option<Policy>,
     /// The capture-block state last pushed to the OS, so `render` only re-issues the
     /// native `setSharingType` call when `capture_block && mask` actually changes.
     capture_applied: bool,
@@ -468,6 +475,7 @@ impl Shell {
             palette_open: false,
             mask,
             agent_acting: false,
+            agent_policy: None,
             capture_applied: false,
             shield_amount,
             shield_recipient,
@@ -861,6 +869,32 @@ impl Shell {
         self.auth_epoch = self.auth_epoch.wrapping_add(1);
         self.retarget(cx);
         self.kick_railgun_grant(cx);
+        self.kick_agent_policy(cx);
+    }
+
+    /// Fetch the daemon's live policy for the agent home (off the UI thread). Key-less:
+    /// `PolicyGet` is a read of the fence the daemon enforces — the daemon answers it even
+    /// while locked, so this works from the unlock gate too. On any failure the card keeps
+    /// its previous snapshot (or honestly shows none); it never fabricates numbers.
+    fn kick_agent_policy(&mut self, cx: &mut Context<Self>) {
+        let client = self.signer.client();
+        let task = cx.background_spawn(async move {
+            match client.request_blocking(&SignerRequest::PolicyGet) {
+                Ok(SignerResponse::Policy(p)) => Some(p),
+                _ => None,
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let policy = task.await;
+            this.update(cx, |this, cx| {
+                if policy.is_some() {
+                    this.agent_policy = policy;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// After unlock, ask the daemon for the read-only Railgun view grant (it gates this on the
@@ -1045,6 +1079,13 @@ impl Shell {
         self.portfolio_error = None;
         Self::kick_portfolio(&self.eth, self.display_address, cx);
         Self::kick_block_number(&self.eth, cx);
+        // An MCP/CLI agent shields through the daemon WITHOUT this app in the loop, so a
+        // manual refresh must re-scan the shielded balance too — otherwise an agent-path
+        // deposit stays invisible until the next unlock.
+        if let Some(h) = &self.shielded {
+            h.resync();
+            self.watch_shielded_sync(false, cx);
+        }
         cx.notify();
     }
 
@@ -1131,6 +1172,11 @@ impl Shell {
     pub fn select(&mut self, sel: Selection, cx: &mut Context<Self>) {
         self.selection = sel;
         self.surface = Surface::Home;
+        // The agent home renders the daemon's live policy fence — re-fetch on every visit
+        // so an out-of-band edit to policy.json (or a STOP) shows up without a relaunch.
+        if sel == Selection::Agent {
+            self.kick_agent_policy(cx);
+        }
         cx.notify();
     }
 
@@ -1164,7 +1210,8 @@ impl Shell {
     }
 
     /// Flip the demo "agent currently acting" state (the breathing-pulse driver). Not
-    /// persisted — Atlas is an openly-narrated manual stand-in for v1.
+    /// persisted — a narrated demo toggle until the daemon exposes an activity feed the
+    /// pulse can bind to (the policy card itself is already live via `PolicyGet`).
     pub fn toggle_agent_acting(&mut self, cx: &mut Context<Self>) {
         self.agent_acting = !self.agent_acting;
         cx.notify();
