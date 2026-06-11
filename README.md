@@ -25,6 +25,8 @@ That is the whole design; if you can cross a boundary it claims, that's a vulner
 > Forked from the [`deck`](https://github.com/hellno/deck) GPUI starter (0BSD, which permits
 > relicensing). Now its own project: Rust + [GPUI](https://www.gpui.rs/), licensed AGPL-3.0-or-later.
 
+Why this exists: [the manifesto](docs/MANIFESTO.md).
+
 ---
 
 ## Start here: clone → ask Claude to shield ETH
