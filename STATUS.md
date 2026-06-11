@@ -17,8 +17,8 @@ Legend: ✅ done + tested · 🟡 partial / integrated-not-finished · 🧪 spik
 >
 > What is **still** honestly true: the network-dependent `signerd/shield_e2e` remains `#[ignore]` (needs a local
 > `anvil`/fork + archive RPC, not run by default `cargo test`); the MCP acceptance suite runs by default but drives a
-> **mock signerd** (deterministic tx hash, no live broadcast); the **demo `.gif` re-record is pending**; the **repo
-> is still private**; **Send UI stays gated**
+> **mock signerd** (deterministic tx hash, no live broadcast); the **demo `.gif` re-record is pending**; the README's
+> **TTHW measurement is pending** (fresh-clone gate); **Send UI stays gated**
 > ("next release") and **Swap is a disabled TODO** (Send + Swap is the first post-launch milestone). "Tested" below
 > still includes some mocked-transport / fake-daemon unit tests — noted per row.
 
