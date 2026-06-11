@@ -16,9 +16,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Agent surface — `deckard-mcp` (MCP sidecar + CLI).** One key-less binary that is both a
+  CLI and an MCP stdio server for Claude Desktop, exposing the `mcp.v0.1` 6-tool profile:
+  `deckard_wallet_address`, `deckard_wallet_balance`, `deckard_policy_get`, `deckard_shield`,
+  `deckard_execute`, and `deckard_revoke_all`. It holds no key and never signs — every write
+  is an `Intent` proposed to `deckard-signerd`, which enforces policy and signs. The raw
+  `propose` and `simulate` tools specced earlier were cut from launch (see
+  `docs/build/30-mcp-shape.md`). `wallet_balance` is public-only in v0.1 (the shielded field
+  is an honest "unavailable" string, never a fake `0`).
+- **Demo recipes + env contract.** `just demo` / `just demo-fund` / `just demo-check` stand up
+  a forked Sepolia, a funded EOA, and the app against `policy.demo.json`. The app reads its
+  configuration from `DECKARD_CONFIG_DIR`, `DECKARD_SOCKET_PATH`, `DECKARD_CHAIN_ID`,
+  `DECKARD_RPC_URL`, `DECKARD_VERIFIED_READS`, and `DECKARD_DEMO_FORK_BLOCK` (documented in
+  `CONTRIBUTING.md`), and shows a **"DEMO FORK — not mainnet"** banner when running on a fork.
+- **`THREAT-MODEL.md`.** Documents the trust boundaries, the mainnet guardrail, and the one
+  override env var (kept out of every reason string and tool response).
+
 ### Changed
 
+- **`deckard-signerd` mainnet guardrail + Resolve flow.** On chain 1, every policy auto-`Allow`
+  is downgraded to `NeedsApproval` and held `Pending`; a human resolves it through the app's
+  hold-to-confirm (`Resolve`), so a prompt-injected agent can't move real funds hands-free
+  within the caps. A daemon-side `Shield.to == RelayAdapt` pre-check landed as
+  defense-in-depth.
+
 ### Fixed
+
+### Security
+
+- **Reason / RPC redaction.** Denial reasons and the logged RPC URL are sanitized so that
+  RPC paths, userinfo, and API keys never leak into a reason string, a tool response, or the
+  startup log. The mainnet-override env var is documented only in `THREAT-MODEL.md` and never
+  printed.
 
 ## [0.0.1-alpha] - 2026-06-10
 
