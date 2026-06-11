@@ -47,6 +47,7 @@ use `[n]`-style source numbering; the rest use `n.` — internally consistent wi
 | 07 | [`07-wallet-rankings.md`](07-wallet-rankings.md) | The "L2BEAT for wallets" and its **codified rubric** (a ready-made checklist) | **Walletbeat** (`beta.walletbeat.eth.limo`, MIT repo) rates 5 attribute groups + a Stages ladder; WalletScrutiny does reproducible-build verdicts; L2BEAT itself does **not** rank wallets |
 | 08 | [`08-security-keystores.md`](08-security-keystores.md) | Key-management field standards; validates Deckard's locked keystore; flags the v0 risk | Web3 Secret Storage v3 is the floor; v0 **plaintext key on disk is below it**; Argon2id+XChaCha20 is stronger but non-interoperable; Secure Enclave is **secp256r1-only**; EIP-7951 put P-256 on mainnet (Fusaka, Dec 3 2025) |
 | 09 | [`09-deckard-relevance.md`](09-deckard-relevance.md) | **Cross-cutting synthesis** — the recurring threads across all eight files and the opportunity surface (observations only) | — |
+| 10 | [`10-tempo-accounts.md`](10-tempo-accounts.md) | Tempo's Accounts SDK: agent-first devex (quick prompt, AGENTS.md, docs-as-MCP), examples-as-product, protocol-native access keys / fee sponsorship, HTTP-402 machine payments | 13 gitpick-able examples; access keys = scoped delegate keys with expiry + per-token limits, chain-enforced; MPP zero-charge auth intent (proof of ownership, no tx); Vocs docs expose MCP sources. ⚠ added 2026-06-11 via a lighter single-pass pipeline (no adversarial-verification stage) |
 
 ## How to use it
 
