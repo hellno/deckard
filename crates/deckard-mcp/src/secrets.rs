@@ -7,20 +7,20 @@
 //! keeps a pasted passphrase or RPC bearer token out of tool-call transcripts and shell
 //! history bridges.
 
-/// Flag stems that may carry a secret. Matched against `--<stem>`, `--<stem>=…`.
-const SECRET_FLAG_STEMS: &[&str] = &[
+/// Secret keywords. A flag is refused when ANY of its `-`/`_`-delimited components matches
+/// one of these — so compound flags (`--rpc-api-key`, `--private_key`, `--my-seed-phrase`)
+/// are caught, not just the bare stems. Kept as whole words to avoid false positives on
+/// substrings (`--config-dir` carries none of these; `--token`-style flags do).
+const SECRET_KEYWORDS: &[&str] = &[
     "passphrase",
     "password",
     "key",
-    "private-key",
-    "api-key",
     "apikey",
     "seed",
     "mnemonic",
     "secret",
+    "private",
     "token",
-    "rpc-token",
-    "auth-token",
     "bearer",
 ];
 
@@ -34,7 +34,13 @@ pub fn reject_secret_flags<I: IntoIterator<Item = String>>(args: I) -> Result<()
         // `--passphrase=hunter2` → compare the part before '='; value is never touched.
         let name = flag.split('=').next().unwrap_or("");
         let lname = name.to_ascii_lowercase();
-        if SECRET_FLAG_STEMS.iter().any(|stem| lname == *stem) {
+        // Delimiter-aware: split on '-'/'_' and reject if any component is a secret keyword.
+        // This catches `--rpc-api-key`, `--private_key`, `--railgun-viewing-key`, etc., while
+        // `--mcp` / `--amount-eth` / `--demo` / `--config-dir` keep none of the keywords.
+        let is_secret = lname
+            .split(['-', '_'])
+            .any(|part| SECRET_KEYWORDS.contains(&part));
+        if is_secret {
             return Err(format!(
                 "secrets are not accepted on the deckard-mcp command line: flag --{name} \
                  rejected (its value was not read and will not be echoed). deckard-mcp is \
@@ -56,11 +62,18 @@ mod tests {
             vec!["--key=deadbeef".to_string()],
             vec!["balance".to_string(), "--TOKEN=abc".to_string()],
             vec!["--mnemonic=a b c".to_string()],
+            // Compound flags: a secret keyword in ANY '-'/'_' component must still reject,
+            // so clap never gets a chance to echo the value back in its error output.
+            vec!["--rpc-api-key=abc".to_string()],
+            vec!["--private_key=deadbeef".to_string()],
+            vec!["--railgun-viewing-key=zzz".to_string()],
+            vec!["--my-seed-phrase=a b c".to_string()],
+            vec!["--AUTH_TOKEN=hunter2".to_string()],
         ] {
             let err =
                 reject_secret_flags(argv.clone()).expect_err(&format!("{argv:?} must be rejected"));
             assert!(err.contains("secrets are not accepted"), "{err}");
-            for secret in ["hunter2", "deadbeef", "abc", "a b c"] {
+            for secret in ["hunter2", "deadbeef", "abc", "a b c", "zzz"] {
                 assert!(!err.contains(secret), "value echoed: {err}");
             }
         }
@@ -76,6 +89,11 @@ mod tests {
                 "0.02".to_string(),
             ],
             vec!["install".to_string(), "--demo".to_string()],
+            // Legitimate compound flags must NOT trip the delimiter-aware match: none of
+            // their components is a secret keyword.
+            vec!["--config-dir".to_string(), "/tmp/d".to_string()],
+            vec!["--chain-id".to_string(), "1".to_string()],
+            vec!["--socket-path".to_string(), "/tmp/s".to_string()],
         ] {
             assert!(reject_secret_flags(argv).is_ok());
         }

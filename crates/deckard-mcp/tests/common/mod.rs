@@ -213,15 +213,17 @@ impl MockState {
     }
 
     fn propose(&mut self, intent: &Intent) -> Decision {
-        // The daemon's pre-check order: locked, then chain, then the shared evaluate.
-        if self.locked {
-            return Decision::Deny {
-                reason: "locked".into(),
-            };
-        }
+        // The daemon's pre-check order: chain (needs no key), then locked, then the shared
+        // evaluate. Chain-first is what makes a `locked` reply conclusive for the sidecar's
+        // connect-time chain probe — keep this in lockstep with deckard-signerd's `propose`.
         if intent.chain_id != MOCK_CHAIN {
             return Decision::Deny {
                 reason: "chain_mismatch".into(),
+            };
+        }
+        if self.locked {
+            return Decision::Deny {
+                reason: "locked".into(),
             };
         }
         let id = request_id_for(intent);

@@ -95,8 +95,11 @@ impl Sidecar {
     /// The probe is a deliberately-undecodable `Send` (non-empty calldata): the daemon's
     /// `chain_mismatch` pre-check runs before the policy gate, and the policy gate's
     /// `undecodable` deny stores no pending record — so the probe is side-effect-free and
-    /// can never be executed. A `locked` answer is inconclusive (the locked check runs
-    /// first); real calls surface their own locked error, so the probe just passes through.
+    /// can never be executed. A `locked` answer is now CONCLUSIVE for chain identity: the
+    /// daemon checks `chain_mismatch` before `locked` (the chain check needs no key), so a
+    /// wrong chain would have returned `chain_mismatch` first — a `locked` reply therefore
+    /// implies the chain matched. We cache the probe success and let the real call surface
+    /// its own locked error.
     async fn ensure_chain(&self) -> Result<(), Failure> {
         if self.chain_checked.load(Ordering::Relaxed) {
             return Ok(());
@@ -120,7 +123,9 @@ impl Sidecar {
                 ))
             }
             SignerResponse::Decision(Decision::Deny { reason }) if reason == "locked" => {
-                // Inconclusive — don't cache; the actual call will surface `locked` itself.
+                // Conclusive: the daemon checks chain BEFORE locked, so a `locked` reply
+                // means the chain matched. Cache the success; the real call surfaces `locked`.
+                self.chain_checked.store(true, Ordering::Relaxed);
                 Ok(())
             }
             _ => {

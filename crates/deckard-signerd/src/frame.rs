@@ -15,11 +15,21 @@ pub async fn read_frame<R>(r: &mut R) -> anyhow::Result<Option<Vec<u8>>>
 where
     R: AsyncReadExt + Unpin,
 {
+    // Read the length prefix one fill at a time so we can tell a clean between-frames EOF
+    // (zero bytes before any prefix byte) from a malformed one (peer sent 1-3 prefix bytes then
+    // hung up). `read_exact` collapses both into `UnexpectedEof`, which would mis-report a
+    // truncated prefix as a clean close.
     let mut len_buf = [0u8; 4];
-    match r.read_exact(&mut len_buf).await {
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(e) => return Err(e.into()),
+    let mut filled = 0;
+    while filled < len_buf.len() {
+        let n = r.read(&mut len_buf[filled..]).await?;
+        if n == 0 {
+            if filled == 0 {
+                return Ok(None); // clean EOF: peer closed between frames
+            }
+            anyhow::bail!("truncated length prefix: {filled} of 4 bytes before EOF");
+        }
+        filled += n;
     }
     let len = u32::from_be_bytes(len_buf) as usize;
     anyhow::ensure!(
@@ -86,6 +96,19 @@ mod tests {
     async fn clean_eof_is_none() {
         let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
         assert!(read_frame(&mut cursor).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn partial_length_prefix_is_an_error() {
+        // 1-3 bytes of the 4-byte prefix then EOF is a truncated frame, NOT a clean close
+        // (only a zero-byte read BEFORE any prefix byte is clean).
+        for partial in [vec![0u8], vec![0u8, 0u8], vec![0u8, 0u8, 1u8]] {
+            let mut cursor = std::io::Cursor::new(partial);
+            assert!(
+                read_frame(&mut cursor).await.is_err(),
+                "a truncated length prefix must be an error, not a clean EOF"
+            );
+        }
     }
 
     #[tokio::test]

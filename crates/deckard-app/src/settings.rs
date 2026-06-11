@@ -117,11 +117,21 @@ pub(crate) fn resolve_rpc(env: Option<&str>, setting: &str) -> String {
 }
 
 /// Pure resolver for [`Settings::effective_chain_id`]: a parseable env override wins, else the
-/// persisted setting, else [`DEFAULT_CHAIN_ID`]. A non-numeric env value is ignored (falls
-/// through) rather than failing — a bad override should not brick the app.
+/// persisted setting, else [`DEFAULT_CHAIN_ID`]. Only an unset-or-empty env value falls through;
+/// a non-empty value that is NOT a valid `u64` is a loud startup failure (matching the wording of
+/// `deckard-signerd` and `deckard-mcp`, which both hard-error on the same input). Silently
+/// ignoring a typo'd override (e.g. `DECKARD_CHAIN_ID=sepolia`) would resolve toward MAINNET —
+/// the wrong direction — and the supervisor pins the daemon's env to this resolved id.
+///
+/// Fatal-at-startup boundary: an unparsable explicit override is operator misconfiguration the
+/// app cannot recover from, so a clear panic is correct here (the app crate permits this at
+/// genuinely-unrecoverable startup boundaries — see `deckard-core/src/eth.rs`).
+#[allow(clippy::expect_used)]
 pub(crate) fn resolve_chain_id(env: Option<&str>, setting: Option<u64>) -> u64 {
-    if let Some(id) = env.and_then(|s| s.trim().parse::<u64>().ok()) {
-        return id;
+    if let Some(raw) = env.map(str::trim).filter(|s| !s.is_empty()) {
+        return raw
+            .parse::<u64>()
+            .unwrap_or_else(|_| panic!("DECKARD_CHAIN_ID must be a u64, got {raw:?}"));
     }
     setting.unwrap_or(DEFAULT_CHAIN_ID)
 }
@@ -223,11 +233,19 @@ mod tests {
     fn chain_id_resolution_prefers_env_then_setting_then_default() {
         assert_eq!(resolve_chain_id(Some("11155111"), Some(5)), 11_155_111);
         assert_eq!(resolve_chain_id(Some(" 11155111 "), None), 11_155_111);
-        // A non-numeric env override is ignored (must not brick the app) → setting/default.
-        assert_eq!(resolve_chain_id(Some("mainnet"), Some(5)), 5);
-        assert_eq!(resolve_chain_id(Some("mainnet"), None), DEFAULT_CHAIN_ID);
+        // Unset OR empty/whitespace env falls through to setting/default.
+        assert_eq!(resolve_chain_id(Some(""), Some(5)), 5);
+        assert_eq!(resolve_chain_id(Some("   "), None), DEFAULT_CHAIN_ID);
         assert_eq!(resolve_chain_id(None, Some(5)), 5);
         assert_eq!(resolve_chain_id(None, None), DEFAULT_CHAIN_ID);
+    }
+
+    #[test]
+    #[should_panic(expected = "DECKARD_CHAIN_ID must be a u64")]
+    fn chain_id_resolution_rejects_unparsable_env_override() {
+        // A typo'd demo env like `DECKARD_CHAIN_ID=sepolia` must be a loud startup failure, not a
+        // silent fall-through toward mainnet (parity with signerd + mcp, which both hard-error).
+        let _ = resolve_chain_id(Some("sepolia"), Some(5));
     }
 
     #[test]

@@ -375,14 +375,20 @@ impl Daemon {
         // Pre-checks the Policy can't express (the mock has none of these states, which is
         // why feeding both the same (Intent, Policy) yields identical decisions — the parity
         // contract). These run before `evaluate`.
-        if matches!(self.state, VaultState::Locked) {
-            return Decision::Deny {
-                reason: "locked".into(),
-            };
-        }
+        // Chain check FIRST, before the lock gate: it needs no key, so a wrong-chain daemon
+        // answers `chain_mismatch` even while locked. This makes the MCP sidecar's connect-time
+        // chain probe conclusive (instead of inconclusive-when-locked) — otherwise a sidecar
+        // attached to a locked wrong-chain daemon could pass its probe and e.g. read that
+        // daemon's policy via PolicyGet (which deliberately succeeds while locked). It also
+        // means a `locked` deny now implies the chain matched.
         if intent.chain_id != self.cfg.chain_id {
             return Decision::Deny {
                 reason: "chain_mismatch".into(),
+            };
+        }
+        if matches!(self.state, VaultState::Locked) {
+            return Decision::Deny {
+                reason: "locked".into(),
             };
         }
         // v1 admits a native Send and a Shield (the privacy hero). The Shield's RelayAdapt

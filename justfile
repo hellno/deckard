@@ -125,8 +125,20 @@ demo:
         echo "  Diagnose with: just demo-check" >&2
         exit 1
     fi
-    CHAIN_HEX="$(cast chain-id --rpc-url "{{demo_rpc_url}}" 2>/dev/null || echo "?")"
-    echo "→ anvil ready (chain id ${CHAIN_HEX}; expected {{demo_chain_id}})."
+    # 7b. ENFORCE the fork's chain identity. `cast chain-id` prints DECIMAL (same as the
+    #     demo-check upstream probe), so compare against the decimal {{demo_chain_id}}. If
+    #     RPC_URL_SEPOLIA points at a wrong-chain upstream, the fork's chain id won't be
+    #     11155111 — but the app/daemon/MCP are still forced to {{demo_chain_id}}, so the demo
+    #     would run on a false chain contract. Fail loudly instead (the EXIT trap tears anvil down).
+    CHAIN_ID="$(cast chain-id --rpc-url "{{demo_rpc_url}}" 2>/dev/null || echo "?")"
+    if [[ "${CHAIN_ID}" != "{{demo_chain_id}}" ]]; then
+        echo "error: demo anvil reports chain ${CHAIN_ID}, expected {{demo_chain_id}} (Sepolia)." >&2
+        echo "  RPC_URL_SEPOLIA must point at a Sepolia archive node — a wrong-chain upstream" >&2
+        echo "  would force the app/daemon/MCP onto a false chain contract." >&2
+        echo "  Diagnose with: just demo-check" >&2
+        exit 1
+    fi
+    echo "→ anvil ready (chain id ${CHAIN_ID} = {{demo_chain_id}}, Sepolia fork)."
 
     echo
     echo "  Demo world:  config=${DEMO_DIR}  socket={{demo_socket}}"

@@ -145,6 +145,38 @@ async fn propose_decision_matrix() {
 }
 
 #[tokio::test]
+async fn locked_wrong_chain_denies_chain_mismatch_not_locked() {
+    // The chain check runs before the lock gate (it needs no key), so a LOCKED daemon
+    // configured for a different chain than the intent answers `chain_mismatch`, not `locked`.
+    // This is what makes the MCP sidecar's connect-time chain probe conclusive even while the
+    // daemon is locked (a `locked` deny then implies the chain matched).
+    let dir = TempDir::new("locked-wrong-chain");
+    let (_wallet, to) = seal_account0(dir.path());
+    // Daemon on CHAIN (31337), never unlocked → Locked.
+    let d = spawn_daemon(dir.path(), DUMMY_RPC, CHAIN, &[]);
+    let client = SignerClient::new(d.socket_path.clone());
+
+    // Intent targets a DIFFERENT chain (1) while the daemon is still locked.
+    let mut wrong_chain = send(to, 1_000);
+    wrong_chain.chain_id = 1;
+    assert_eq!(
+        client.propose(&wrong_chain).await.unwrap(),
+        Decision::Deny {
+            reason: "chain_mismatch".into()
+        },
+        "a locked, wrong-chain daemon must deny chain_mismatch (not locked)"
+    );
+
+    // Sanity: a SAME-chain intent on the still-locked daemon does report `locked`.
+    assert_eq!(
+        client.propose(&send(to, 1_000)).await.unwrap(),
+        Decision::Deny {
+            reason: "locked".into()
+        }
+    );
+}
+
+#[tokio::test]
 async fn off_allowlist_denies() {
     let dir = TempDir::new("allowlist");
     let (_wallet, to) = seal_account0(dir.path());
