@@ -97,6 +97,146 @@ known, deliberate v1 simplification (it also gives us execute-idempotency for fr
 moving the broadcast off-lock is the first post-launch daemon change and is seeded as
 a red-team issue.
 
+## Security tour — the attack surface, component by component
+
+The sections above are the boundary-level argument; this is the same argument walked
+one surface at a time. For each: **what an attacker controls**, **what stops them in the
+code today**, **what's deferred**. Every claim names the file that backs it. Where a
+surface is already covered above, this links rather than repeats.
+
+### 1. The MCP client (a prompt-injected Claude, a malicious MCP client, a confused deputy)
+
+*Controls:* the full argument to any tool, the order and timing of calls, and — for a
+truly hostile client, not just an injected-but-honest one — the raw CBOR it speaks to
+the sidecar's stdin. It does **not** control the daemon or any key.
+
+*Stopped by:*
+- **The tool surface is 6 read/propose tools, no `propose`/`resolve`/`simulate`**
+  (`crates/deckard-mcp/src/server.rs`): `wallet_address`, `wallet_balance`,
+  `policy_get`, `shield`, `execute`, `revoke_all`. There is no tool that submits an
+  arbitrary intent (a raw `propose` would let the client hand the daemon junk calldata)
+  and no tool that approves a request — so an injected agent literally has no hand that
+  can self-authorize a guarded write. `shield` takes a typed `amount_eth` string and the
+  *daemon* builds the intent against the canonical RelayAdapt address; the client never
+  supplies a `to`.
+- **Secret-shaped flags are refused before clap parses them**
+  (`crates/deckard-mcp/src/secrets.rs`, `reject_secret_flags`): any `--…key`,
+  `--…seed`, `--…token`, `--passphrase=…` etc. is rejected delimiter-aware (every
+  `-`/`_` component is checked), and the flag's **value is never echoed** into the
+  refusal — so a pasted credential can't be laundered into a tool transcript or shell
+  history even by mistake. The sidecar is key-less by architecture; this is the
+  belt-and-suspenders.
+- **A connect-time chain probe runs before any real intent**
+  (`crates/deckard-mcp/src/sidecar.rs`, `ensure_chain`): a deliberately-undecodable
+  `Send` whose only purpose is to make the daemon answer `chain_mismatch` (checked
+  before the policy gate, before `locked`, and storing no pending record). A demo
+  sidecar pointed at the mainnet daemon (or vice versa) fails with an actionable error
+  instead of silently proposing on the wrong chain. The probe is side-effect-free and
+  can never itself be executed.
+- **Typed failures never echo a payload** (`crates/deckard-mcp/src/failure.rs`): every
+  error an agent can hit is a static `problem + cause + fix`; the two retry-traps
+  (`broadcast_timeout`, `already_executed`) say *do NOT retry* explicitly, because an
+  LLM's default instinct on error is to retry and a blind retry of a broadcast can
+  double-spend. The one path that *could* carry daemon text (`from_deny_reason`'s
+  fallthrough) only forwards a `reason` that was already URL-redacted daemon-side, and
+  the `unexpected` helper deliberately drops the response body it can't vouch for.
+
+*Deferred:* nothing on this surface is load-bearing for the boundary — the client is
+untrusted *by design* and the daemon is the enforcement point. Tool-surface growth
+(send, unshield) re-opens this section and each new tool inherits the no-self-approve
+rule.
+
+### 2. The daemon socket (the wire an attacker would reach for)
+
+*Controls:* anything a same-uid process can: open the socket, send well-formed or
+malformed frames, flood requests. A *different*-uid process controls nothing — it can't
+connect.
+
+*Stopped by:*
+- **Peer-uid check + filesystem perms** (`crates/deckard-signerd/src/socket.rs`,
+  `crates/deckard-signerd/src/auth.rs`, `server.rs`): the socket is `0600` inside a
+  `0700` dir (chmod'd explicitly, not left to umask), and every accepted connection is
+  gated on `peer_cred().uid()` matching our euid — a foreign uid, *including root*, is
+  dropped. A single-instance `flock` keeps a second daemon from racing on the socket.
+- **Bounded framing** (`crates/deckard-signerd/src/frame.rs`): a 4-byte big-endian
+  length prefix caps each CBOR body at 1 MiB, so a hostile client can't make the daemon
+  allocate unbounded memory; a *truncated* prefix (1–3 bytes then EOF) is an explicit
+  error, distinct from a clean between-frames close, so a half-frame can't be
+  mis-handled. A frame that won't decode gets one `malformed_request` reply and the
+  connection closes — and the raw frame bytes are `zeroize`d after decode because an
+  `Unlock` frame carries the passphrase (`server.rs`).
+- **One mutex serializes every request** (`crates/deckard-signerd/src/server.rs`,
+  `daemon.rs`): `propose` and `execute` can't race, which is also what gives execute its
+  idempotency for free. (The cost of holding it across broadcast is the STOP-latency
+  tradeoff — see its section above.)
+- **Per-request TOCTOU re-checks at `execute`** (`crates/deckard-signerd/src/daemon.rs`,
+  `execute`): an `Allow` is not a ticket. At sign time the daemon re-checks the vault is
+  still unlocked (a STOP that landed first wins → `revoked`), the request hasn't already
+  broadcast (`already_executed` idempotency keyed on the stored `broadcast` hash), it
+  isn't past its approval TTL (`expired`), and — for an *auto*-allow, not a
+  human-approved overage — that it's **still** within the caps against the current
+  `spent_today` (`cap_exceeded`). Two within-cap proposals therefore can't both slip past
+  the daily cap.
+
+*Deferred:* the socket has no second principal today, so there is no resolver
+authentication — `Resolve` is honored from any same-uid caller (the boundary section
+above; red-team issue #2). Cross-restart spend persistence is also deferred
+(`policy_store.rs`): `spent_today` is in-memory and resets on restart.
+
+### 3. The policy store (the fence an attacker would want to widen)
+
+*Controls:* an attacker who can already write your config dir is same-uid and past the
+boundary — but the *failure modes* of loading the file still matter, because a corrupt
+or absent policy must never silently become a permissive one.
+
+*Stopped by* (`crates/deckard-signerd/src/policy_store.rs`): the file is read **once at
+boot** into memory (there is no `SetPolicy` mutation API on the wire, so a connected
+client can't widen the fence at runtime). A missing file falls back to the built-in
+default **quietly** (normal first run); a file that *exists but won't parse* falls back
+**loudly** — a `⚠ POLICY FALLBACK` line naming the path and the default it's now running
+— precisely so a typo'd `policy.json` can't silently drop you onto the any-recipient
+default. On every load, `spent_today_wei` is forced to zero and `revoked` to false: the
+daemon never trusts an on-disk spend counter and always **boots armed** (the brake is a
+live STOP, not a persisted flag). The demo policy is install-if-absent, never an
+overwrite.
+
+### 4. The keystore at rest
+
+Out of scope for this file by design — the Argon2id + XChaCha20-Poly1305 envelope, the
+no-oracle unlock, and the "stated honestly" live-malware limit are in
+[SECURITY.md](SECURITY.md). The only runtime note: a wrong passphrase, a tampered
+vault, and a read error all collapse to one `BadPassphrase` outcome with no key held
+(`daemon.rs`, `unlock`) — no unlock oracle leaks across the socket.
+
+### 5. The app approval path (the human-in-the-loop an attacker would want to skip)
+
+*Controls:* an attacker who reaches this path is, again, same-uid (the app is the
+designated resolver; see the boundary section). The interesting question is whether the
+*honest* path is sound.
+
+*Stopped by:*
+- **Hold-to-confirm → `Resolve{approved: true}` → `Execute`**
+  (`crates/deckard-app/src/shell.rs`): the completed hold *is* the human approval; the
+  app is the wire contract's designated resolver, so it sends `Resolve{approved: true}`
+  only after the hold completes, and leaving the Shield surface cancels an in-progress
+  hold so a stale timer can't fire a confirm after the screen is gone.
+- **The mainnet guardrail downgrade happens daemon-side, not app-side**
+  (`crates/deckard-signerd/src/daemon.rs`, `propose` + `mainnet_guardrail_active`): on
+  chain 1 without the override, every auto-`Allow` becomes `Pending` *in the daemon*, so
+  the human-approval requirement doesn't depend on the app rendering a card correctly —
+  a buggy or bypassed UI still can't produce a hands-free mainnet write. `Deny` is never
+  upgraded.
+- **Chain-id resolution fails loud** (`crates/deckard-app/src/settings.rs`,
+  `resolve_chain_id`): the daemon's chain is resolved `env > settings > default(mainnet)`
+  *once* at startup and pinned into the daemon's env, so the reader and signer agree. An
+  unparsable `DECKARD_CHAIN_ID` is a deliberate startup panic — silently ignoring a typo
+  like `sepolia` would resolve **toward mainnet**, the wrong direction.
+
+*Deferred:* the reader/signer RPC split is a known seam — a Settings RPC re-point
+respawns only the read provider; the daemon keeps its launch RPC
+(`shell.rs::respawn_provider`, documented inline). There's no send UI yet so nothing
+broadcasts through a diverged endpoint, but it's worth attacking (red-team issue #3).
+
 ## Residual risks, ranked
 
 | # | Risk | Status |
