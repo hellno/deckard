@@ -4,8 +4,15 @@
 //! pre-checks; the mock calls it in `propose`), so this pins that they never drift.
 //!
 //! The vectors all use an unlocked daemon, a matching chain id, and `kind = Send`, so the
-//! daemon's pre-checks (`locked`/`chain_mismatch`/`unsupported_v1`) don't fire and both sides
-//! reduce to `evaluate` — exactly the apples-to-apples parity contract.
+//! daemon's pre-checks (`locked`/`chain_mismatch`/`unsupported_v1`/`shield_to_mismatch`)
+//! don't fire and both sides reduce to `evaluate` — exactly the apples-to-apples parity
+//! contract.
+//!
+//! Explicit carve-out: the daemon's chain-1 guardrail (auto-Allow → `NeedsApproval` on
+//! mainnet, `tests/guardrail.rs`) is a PROCESS-level check on daemon state (the configured
+//! chain id and the operator override), exactly like `locked` — it lives outside `evaluate`
+//! by design, so the mock is not expected to mirror it. These vectors use chain 31337,
+//! where it never fires.
 
 use alloy_primitives::{Address, Bytes, B256, U256};
 use deckard_contract::{

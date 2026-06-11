@@ -32,18 +32,6 @@ use crate::theme;
 use crate::wallet;
 use crate::{GoBack, NewItem, OpenSettings, ToggleMask, TogglePalette, ToggleTheme, APP_NAME};
 
-/// The chain the supervised daemon signs for. v1 is mainnet-first (the default RPC is
-/// mainnet); multi-chain app config that re-points both the reader and the daemon is a
-/// fast-follow.
-const DAEMON_CHAIN_ID: u64 = 1;
-
-/// The chain a **shield** deposit targets (T5 config seam, decision D1). It MUST equal the
-/// daemon's chain or `propose` denies `chain_mismatch` — so it defaults to
-/// [`DAEMON_CHAIN_ID`]. Railgun supports mainnet (1) and Sepolia (11155111); to record a
-/// shield on Sepolia, relaunch the daemon + reader on Sepolia and set this to `11155111`
-/// (a single switch point, kept out of the render path).
-const SHIELD_CHAIN_ID: u64 = DAEMON_CHAIN_ID;
-
 /// How long the user must hold the shield confirm before it signs — the deliberate-gesture
 /// duration (DESIGN: confirm is a hold, never a tap). The amber fill-sweep (`shield_view`)
 /// runs for the same span so the bar fills exactly as the action fires.
@@ -73,6 +61,13 @@ fn humanize_deny(reason: &str) -> String {
         "over_cap" | "cap_exceeded" => "it exceeds the agent's spending cap".into(),
         "off_allowlist" => "the recipient isn't on the allowlist".into(),
         "undecodable" => "the deposit calldata didn't validate".into(),
+        "shield_to_mismatch" => {
+            "the deposit doesn't target the Railgun contract for this chain".into()
+        }
+        "not_approved" => "this deposit hasn't been approved yet — review it again".into(),
+        "unknown_request" => {
+            "the signer session was reset — review the deposit again".into()
+        }
         "erc20_unsupported_v1" => "only native-ETH shields are supported in v1".into(),
         "unsupported_v1" => "that action isn't supported in v1".into(),
         "broadcast_timeout" => {
@@ -82,6 +77,14 @@ fn humanize_deny(reason: &str) -> String {
         "already_executed" => "this deposit was already submitted".into(),
         other => other.to_string(),
     }
+}
+
+/// True for a daemon `reason` that means the unlock **session ended** — the key was zeroized
+/// by a STOP (an external `RevokeAll` from an MCP client, or the daemon is otherwise `Locked`).
+/// The app must return to the unlock gate, not just show an inline error: a propose against a
+/// locked daemon answers `locked`; an execute of a prior request answers `revoked`.
+fn is_session_ended(reason: &str) -> bool {
+    matches!(reason, "locked" | "revoked")
 }
 
 /// Run `prework` (which seals + writes the keystore for create/import/migrate, or is a no-op
@@ -128,6 +131,11 @@ pub struct ShieldProposal {
     pub intent: Intent,
     pub request_id: RequestId,
     pub recipient: String,
+    /// True when the daemon answered `NeedsApproval` (over-cap, or the mainnet guardrail
+    /// downgrading an auto-allow). The completed hold-to-confirm IS the human approval —
+    /// the app is the wire contract's designated resolver — so confirm sends
+    /// `Resolve{approved: true}` before `Execute`.
+    pub needs_resolve: bool,
 }
 
 /// The auth gate that wraps the whole app. Until it reaches `Ready`, the portfolio and
@@ -266,6 +274,11 @@ pub struct Shell {
     /// The RPC URL the current worker was spawned with — so we don't tear it down on a
     /// no-op blur of the RPC field.
     current_rpc: String,
+    /// The chain the supervised daemon signs for, resolved ONCE at startup
+    /// (`DECKARD_CHAIN_ID` env > settings > [`settings::DEFAULT_CHAIN_ID`]). Threaded to the
+    /// daemon launch, the shield builder (`propose` denies `chain_mismatch` otherwise), and the
+    /// Railgun sync so they never disagree. `just demo` sets it to Sepolia (11155111).
+    chain_id: u64,
 }
 
 impl Shell {
@@ -412,12 +425,33 @@ impl Shell {
         // The network worker is always live (it serves the watch-only path too), but the
         // wallet portfolio isn't fetched until the vault is unlocked.
         let current_rpc = settings.effective_rpc();
+        // One resolved runtime chain id (env > settings > default), threaded to the daemon
+        // launch, the shield builder, and the Railgun sync.
+        let chain_id = settings.effective_chain_id();
         let eth = EthProvider::spawn(current_rpc.clone());
+
+        // Log the resolved runtime config once (the RPC is REDACTED to scheme://host — it may
+        // carry an API key). Makes "which chain / RPC / mode am I on?" answerable from the log,
+        // which matters most exactly when an env override re-points the demo off mainnet.
+        eprintln!(
+            "deckard: runtime — chain {chain_id} · rpc {} · verified-reads {} · fork-mode {}",
+            deckard_signerd::config::redact_url(&current_rpc),
+            if deckard_core::verified_reads_enabled() {
+                "on"
+            } else {
+                "off"
+            },
+            if crate::settings::is_fork_mode(&current_rpc, chain_id) {
+                "yes (DEMO FORK)"
+            } else {
+                "no"
+            },
+        );
 
         // Spawn + supervise the process-isolated signer daemon. It owns the key; the app is a
         // key-less client that unlocks/signs over the socket. The daemon broadcasts via the
-        // same RPC the app reads from.
-        let signer = AppSigner::launch(current_rpc.clone(), DAEMON_CHAIN_ID);
+        // same RPC the app reads from, on the same resolved chain.
+        let signer = AppSigner::launch(current_rpc.clone(), chain_id);
 
         // The mask is a persisted preference (default off); seed it from settings.
         let mask = settings.mask_balances;
@@ -477,6 +511,7 @@ impl Shell {
             synced_block: None,
             view_epoch: 0,
             current_rpc,
+            chain_id,
         }
     }
 
@@ -839,7 +874,7 @@ impl Shell {
             return;
         }
         let client = self.signer.client();
-        let chain_id = SHIELD_CHAIN_ID;
+        let chain_id = self.chain_id;
         let rpc = self.settings.effective_rpc();
         let epoch = self.auth_epoch;
         let task =
@@ -918,6 +953,23 @@ impl Shell {
         self.wallet_address
             .map(|a| a.to_string())
             .unwrap_or_default()
+    }
+
+    /// Whether the app is pointed at a local development fork rather than a public network —
+    /// drives the status-strip "DEMO FORK — not mainnet" caution (rendered in `shell_chrome`).
+    pub(crate) fn fork_mode(&self) -> bool {
+        crate::settings::is_fork_mode(&self.current_rpc, self.chain_id)
+    }
+
+    /// An external STOP (e.g. an MCP client calling `revoke_all`) zeroized the key — this
+    /// unlock session is dead. Tear down to the unlock gate with clear copy rather than leave a
+    /// Ready screen that would silently fail every funds action. Reachable because the app and
+    /// an MCP client share one daemon (the two-client reality); a re-unlock re-arms.
+    fn handle_session_revoked(&mut self, cx: &mut Context<Self>) {
+        self.lock(cx);
+        self.auth_error =
+            Some("The signer was stopped (STOP). Unlock your wallet to continue.".into());
+        cx.notify();
     }
 
     /// Auto-focus the primary input for the current auth step (so the user — and the
@@ -1181,8 +1233,9 @@ impl Shell {
         let recipient_snapshot = recipient.clone();
         cx.notify();
         let client = self.signer.client();
+        let chain_id = self.chain_id;
         let task = cx.background_spawn(async move {
-            let intent = signer::build_shield_intent(SHIELD_CHAIN_ID, &recipient, value_wei)?;
+            let intent = signer::build_shield_intent(chain_id, &recipient, value_wei)?;
             let decision = client.propose_blocking(&intent)?;
             Ok::<(Intent, Decision), anyhow::Error>((intent, decision))
         });
@@ -1202,17 +1255,28 @@ impl Shell {
                             intent,
                             request_id,
                             recipient: recipient_snapshot,
+                            needs_resolve: false,
                         });
                     }
-                    Ok((_, Decision::NeedsApproval { .. })) => {
-                        this.shield_error = Some(
-                            "This is over the agent cap — a human approval card is required (lands with the approvals flow)."
-                                .into(),
-                        );
+                    // NeedsApproval (over-cap, or the daemon's mainnet guardrail): the
+                    // review card + hold-to-confirm ARE the human approval surface — the
+                    // hold resolves the pending record, then executes.
+                    Ok((intent, Decision::NeedsApproval { request_id })) => {
+                        this.shield_proposal = Some(ShieldProposal {
+                            intent,
+                            request_id,
+                            recipient: recipient_snapshot,
+                            needs_resolve: true,
+                        });
                     }
                     Ok((_, Decision::Deny { reason })) => {
-                        this.shield_error =
-                            Some(format!("Can't shield: {}", humanize_deny(&reason)));
+                        // An external STOP/lock ends the session — bounce to the unlock gate.
+                        if is_session_ended(&reason) {
+                            this.handle_session_revoked(cx);
+                        } else {
+                            this.shield_error =
+                                Some(format!("Can't shield: {}", humanize_deny(&reason)));
+                        }
                     }
                     Err(e) => this.shield_error = Some(short_err(e)),
                 }
@@ -1226,7 +1290,12 @@ impl Shell {
     /// Sign + broadcast the reviewed shield off-thread (the hold-to-confirm completed). On
     /// success the deposit is on its way to a private note; surface the broadcast.
     pub fn confirm_shield(&mut self, cx: &mut Context<Self>) {
-        let Some(ShieldProposal { request_id, .. }) = self.shield_proposal.clone() else {
+        let Some(ShieldProposal {
+            request_id,
+            needs_resolve,
+            ..
+        }) = self.shield_proposal.clone()
+        else {
             return;
         };
         if self.shield_busy {
@@ -1236,7 +1305,11 @@ impl Shell {
         self.shield_error = None;
         cx.notify();
         let client = self.signer.client();
-        let task = cx.background_spawn(async move { client.execute_blocking(request_id) });
+        // For a NeedsApproval proposal the completed hold IS the approval: resolve, then
+        // execute (signer::approve_and_execute_blocking). An Allow goes straight to execute.
+        let task = cx.background_spawn(async move {
+            signer::approve_and_execute_blocking(&client, request_id, needs_resolve)
+        });
         cx.spawn(async move |this, cx| {
             let res = task.await;
             this.update(cx, |this, cx| {
@@ -1258,8 +1331,13 @@ impl Shell {
                         this.watch_shielded_sync(true, cx);
                     }
                     Ok(ExecuteResult::Denied { reason }) => {
-                        this.shield_error =
-                            Some(format!("Shield denied: {}", humanize_deny(&reason)));
+                        // An external STOP/lock ends the session — bounce to the unlock gate.
+                        if is_session_ended(&reason) {
+                            this.handle_session_revoked(cx);
+                        } else {
+                            this.shield_error =
+                                Some(format!("Shield denied: {}", humanize_deny(&reason)));
+                        }
                     }
                     Err(e) => this.shield_error = Some(short_err(e)),
                 }
@@ -1510,5 +1588,30 @@ impl Render for Shell {
             .on_action(cx.listener(Self::on_toggle_palette))
             .on_action(cx.listener(Self::on_toggle_mask))
             .child(body)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_session_ended;
+
+    #[test]
+    fn session_ended_matches_only_stop_states() {
+        // A locked daemon answers `locked` to a propose; an execute after STOP answers
+        // `revoked`. Both must bounce the app back to the unlock gate.
+        assert!(is_session_ended("locked"));
+        assert!(is_session_ended("revoked"));
+        // Ordinary policy denials stay inline (the app stays Ready, shows the reason).
+        for inline in [
+            "over_cap",
+            "off_allowlist",
+            "chain_mismatch",
+            "shield_to_mismatch",
+            "not_approved",
+            "already_executed",
+            "broadcast_timeout",
+        ] {
+            assert!(!is_session_ended(inline), "{inline} must stay inline");
+        }
     }
 }

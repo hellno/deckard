@@ -427,6 +427,24 @@ impl Shell {
                 .child(div().text_color(color).child(st.to_string()))
         });
 
+        // Fork-mode caution (DESIGN §Color rule 7 / Trust): an amber alert icon + the risk
+        // text, inline — NO keyline or banner box. Per rule 7 the amber ICON carries the signal
+        // and the text stays NEUTRAL (matching the canonical Receive network warning), so amber
+        // keeps its <1% discipline. Surfaced only on a local dev fork so the operator can never
+        // mistake demo funds for the real mainnet wallet.
+        let fork_caution = self.fork_mode().then(|| {
+            let amber = theme::amber(theme.is_dark());
+            h_flex()
+                .items_center()
+                .gap_1p5()
+                .child(Icon::new(IconName::TriangleAlert).text_color(amber).small())
+                .child(
+                    div()
+                        .text_color(theme.foreground)
+                        .child("DEMO FORK — not mainnet"),
+                )
+        });
+
         h_flex()
             .h(px(25.0))
             .flex_shrink_0()
@@ -441,6 +459,7 @@ impl Shell {
                 h_flex()
                     .items_center()
                     .gap_3()
+                    .children(fork_caution)
                     .children(shield_chip)
                     .child(div().text_color(status_color).child(status_line)),
             )

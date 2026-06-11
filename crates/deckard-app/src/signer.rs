@@ -7,6 +7,9 @@
 //! The keystore is only ever touched in-process by *onboarding* (to write `vault.bin`), never
 //! to sign.
 
+use std::ffi::OsString;
+use std::path::PathBuf;
+
 use alloy_primitives::{Address, B256, U256};
 use deckard_contract::{Decision, ExecuteResult, Intent, RequestId, UnlockOutcome};
 use deckard_signerd::{DaemonSupervisor, SignerClient};
@@ -34,9 +37,12 @@ pub struct AppSigner {
 
 impl AppSigner {
     /// Launch + supervise the daemon and return a key-less handle to it. `rpc_url`/`chain_id`
-    /// are passed to the daemon so it broadcasts on the same chain the app reads from.
+    /// are passed to the daemon so it broadcasts on the same chain the app reads from. The
+    /// socket path honors `DECKARD_SOCKET_PATH` (see [`resolve_socket_path`]).
     pub fn launch(rpc_url: String, chain_id: u64) -> Self {
-        let socket_path = deckard_signerd::socket::default_socket_path();
+        let socket_path = resolve_socket_path();
+        // The supervisor exports this exact path to the daemon child (DECKARD_SOCKET_PATH), and
+        // the client below binds the same one — so both ends always agree, demo or not.
         let supervisor = DaemonSupervisor::spawn(socket_path.clone(), rpc_url, chain_id);
         let client = SignerClient::new(socket_path);
         Self {
@@ -49,6 +55,24 @@ impl AppSigner {
     /// shell uses this for unlock/lock/send so the work runs off the UI thread.
     pub fn client(&self) -> SignerClient {
         self.client.clone()
+    }
+}
+
+/// Resolve the daemon socket path: the `DECKARD_SOCKET_PATH` override, else the per-uid
+/// default. The app MUST honor the override — if it didn't, a demo daemon on its own socket
+/// would lose the single-instance flock to an everyday Deckard, and the demo app would
+/// silently attach to the **mainnet** daemon. `just demo` sets a dedicated socket under the
+/// demo config dir so the two never collide.
+fn resolve_socket_path() -> PathBuf {
+    socket_path_from(std::env::var_os("DECKARD_SOCKET_PATH"))
+}
+
+/// Pure core of [`resolve_socket_path`]: a non-empty override wins; otherwise the per-uid
+/// default. Split out so the precedence is unit-testable without mutating process env.
+fn socket_path_from(override_path: Option<OsString>) -> PathBuf {
+    match override_path {
+        Some(p) if !p.is_empty() => PathBuf::from(p),
+        _ => deckard_signerd::socket::default_socket_path(),
     }
 }
 
@@ -83,6 +107,23 @@ pub fn send_blocking(client: &SignerClient, intent: &Intent) -> anyhow::Result<S
             }
         }
     }
+}
+
+/// Execute a reviewed proposal, key-less. For a `NeedsApproval` proposal (over-cap, or the
+/// daemon's mainnet guardrail downgrading an auto-allow), the completed hold-to-confirm IS
+/// the human approval — the app is the wire contract's designated human-facing resolver —
+/// so this first sends `Resolve{approved: true}` to flip the `Pending` record to `Allowed`,
+/// then `Execute`. For an `Allow` proposal it goes straight to `Execute` (byte-identical to
+/// the old path). Blocking; called from a background thread.
+pub fn approve_and_execute_blocking(
+    client: &SignerClient,
+    request_id: RequestId,
+    needs_resolve: bool,
+) -> anyhow::Result<ExecuteResult> {
+    if needs_resolve {
+        client.resolve_blocking(request_id, true)?;
+    }
+    client.execute_blocking(request_id)
 }
 
 /// Build a key-less Railgun **shield** intent from a free-text `0zk…` recipient (T5). Parses
@@ -236,6 +277,76 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The mainnet-guardrail regression guard: a `NeedsApproval` shield completes via the
+    /// resolve path — the app sends `Resolve{approved: true}` (the hold-to-confirm is the
+    /// human approval) and THEN `Execute`, over the socket, signing nothing in-process.
+    #[test]
+    fn approve_and_execute_resolves_then_executes_over_the_socket() {
+        let dir =
+            std::env::temp_dir().join(format!("deckard-appresolve-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("signerd.sock");
+
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_srv = Arc::clone(&seen);
+        let sock_srv = sock.clone();
+        let (ready_tx, ready_rx) = mpsc::channel();
+
+        // Recording server: two per-call connections (Resolve, then Execute).
+        let server = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                let listener = tokio::net::UnixListener::bind(&sock_srv).unwrap();
+                ready_tx.send(()).unwrap();
+                for _ in 0..2 {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let buf = frame::read_frame(&mut stream).await.unwrap().unwrap();
+                    let req: SignerRequest = frame::decode(&buf).unwrap();
+                    let resp = match &req {
+                        SignerRequest::Resolve { approved, .. } => {
+                            assert!(*approved, "hold-to-confirm must approve, not deny");
+                            seen_srv.lock().unwrap().push("Resolve".into());
+                            SignerResponse::Ack
+                        }
+                        SignerRequest::Execute { .. } => {
+                            seen_srv.lock().unwrap().push("Execute".into());
+                            SignerResponse::Execute(ExecuteResult::Broadcast {
+                                tx_hash: B256::repeat_byte(0xCD),
+                            })
+                        }
+                        other => panic!("unexpected request on the wire: {other:?}"),
+                    };
+                    let body = frame::encode(&resp).unwrap();
+                    frame::write_frame(&mut stream, &body).await.unwrap();
+                }
+            });
+        });
+
+        ready_rx.recv().unwrap();
+
+        let client = SignerClient::new(sock);
+        let result =
+            approve_and_execute_blocking(&client, RequestId::repeat_byte(0x77), true).unwrap();
+
+        assert_eq!(
+            result,
+            ExecuteResult::Broadcast {
+                tx_hash: B256::repeat_byte(0xCD)
+            }
+        );
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec!["Resolve".to_string(), "Execute".to_string()]
+        );
+
+        server.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn parse_eth_to_wei_handles_decimals_and_rejects_junk() {
         // Whole + fractional ETH parse to exact wei.
@@ -267,6 +378,20 @@ mod tests {
         ] {
             assert!(parse_eth_to_wei(bad).is_err(), "{bad:?} must be rejected");
         }
+    }
+
+    #[test]
+    fn socket_path_honors_the_override_else_falls_back_to_default() {
+        // An explicit override is used verbatim (the demo's dedicated socket).
+        let forced = OsString::from("/tmp/deckard-demo/signerd.sock");
+        assert_eq!(
+            socket_path_from(Some(forced.clone())),
+            PathBuf::from(&forced)
+        );
+        // Empty / unset → the per-uid default (a real path, not the override).
+        let default = deckard_signerd::socket::default_socket_path();
+        assert_eq!(socket_path_from(None), default);
+        assert_eq!(socket_path_from(Some(OsString::new())), default);
     }
 
     #[test]

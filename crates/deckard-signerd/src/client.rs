@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use tokio::net::UnixStream;
+use zeroize::Zeroize;
 
 use deckard_contract::{
     ApprovalStatus, Decision, ExecuteResult, Intent, RailgunViewGrant, RequestId, SignerRequest,
@@ -42,12 +43,19 @@ impl SignerClient {
     /// daemon is given a moment to bind).
     pub async fn request(&self, req: &SignerRequest) -> anyhow::Result<SignerResponse> {
         let mut stream = self.connect().await?;
-        let body = frame::encode(req)?;
+        let mut body = frame::encode(req)?;
         frame::write_frame(&mut stream, &body).await?;
-        let resp = frame::read_frame(&mut stream)
+        // Scrub the encoded request: an `Unlock` frame carries the passphrase bytes, which must
+        // not linger in the client heap after they've gone over the socket.
+        body.zeroize();
+        let mut resp = frame::read_frame(&mut stream)
             .await?
             .ok_or_else(|| anyhow::anyhow!("daemon closed without responding"))?;
-        frame::decode(&resp)
+        let decoded = frame::decode(&resp);
+        // Scrub the raw response: a `RailgunViewGrant` reply carries viewing-key bytes, which
+        // must not linger in the client heap past the decode (mirrors the server's inbound scrub).
+        resp.zeroize();
+        decoded
     }
 
     /// Connect, retrying with capped backoff until [`CONNECT_DEADLINE`] — so the first call

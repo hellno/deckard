@@ -83,8 +83,9 @@ jobs:
 
   # Cross-platform compile proof. The app (Metal renderer) + the macOS-only objc2 tray are the only
   # things that genuinely need macOS coverage, and that's a compile/link concern, not a logic one
-  # (logic is tested on Linux). So we build the two shipping binaries and lint the macOS-only tray
-  # path — no redundant tests, and no Foundry (the anvil tests run on Linux; this also removes the
+  # (logic is tested on Linux). So we build the shipping binaries (app + daemon + the MCP sidecar
+  # Claude Desktop registers — macOS is the demo platform) and lint the macOS-only tray path — no
+  # redundant tests, and no Foundry (the anvil tests run on Linux; this also removes the
   # GitHub-API 403 flake from the 10x-billed runner).
   macos:
     needs: quick
@@ -92,7 +93,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --locked -p deckard-app -p deckard-signerd
+      - run: cargo build --locked -p deckard-app -p deckard-signerd -p deckard-mcp
       - run: cargo build --locked -p deckard-app --features tray
       - run: cargo clippy --locked -p deckard-app --all-targets --features tray -- -D warnings
 
