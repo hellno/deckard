@@ -127,7 +127,10 @@ pub(crate) fn sanitize_reason(s: &str) -> String {
                 // `... for url (https://…)`), then redact from the scheme on.
                 let scheme_start = token[..at]
                     .rfind(|c: char| !c.is_ascii_alphanumeric() && c != '+' && c != '-' && c != '.')
-                    .map(|i| i + 1)
+                    // `rfind` returns the byte index of the char's START — advance past the
+                    // whole char (it may be multibyte, e.g. a curly quote) or we'd slice
+                    // mid-codepoint and panic.
+                    .map(|i| i + token[i..].chars().next().map_or(1, char::len_utf8))
                     .unwrap_or(0);
                 format!(
                     "{}{}",
@@ -179,5 +182,19 @@ mod tests {
         assert!(!out.contains("TOPSECRET"), "query key leaked: {out}");
         // Plain text passes through (modulo whitespace normalization).
         assert_eq!(sanitize_reason("no url here"), "no url here");
+    }
+
+    #[test]
+    fn sanitize_survives_multibyte_punctuation_before_scheme() {
+        // A multibyte char (curly quote) directly before the scheme must not cause a
+        // mid-codepoint slice panic — `rfind` returns the char's START byte index.
+        assert_eq!(
+            sanitize_reason("error “https://eth.example.com/v3/SECRETKEY” returned 401"),
+            "error “https://eth.example.com returned 401"
+        );
+        // Same with an ellipsis glued to the front.
+        let out = sanitize_reason("…http://user:pw@rpc.example.com/key fail");
+        assert!(!out.contains("pw"), "userinfo leaked: {out}");
+        assert!(out.contains("…http://rpc.example.com"), "got: {out}");
     }
 }
