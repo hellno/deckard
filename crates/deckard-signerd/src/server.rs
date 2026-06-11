@@ -80,8 +80,10 @@ async fn handle_conn(mut stream: UnixStream, daemon: Arc<Mutex<Daemon>>) -> anyh
         // the long bootstrap never serializes ahead of the security brake (STOP/Lock) or any
         // other request. The cell is idempotent and separately locked — after this returns,
         // the daemon's `balance` handler does only the quick verified read under its mutex.
+        // Skipped in demo/local-fork mode (`DECKARD_VERIFIED_READS=0`): Helios is mainnet-only,
+        // so priming it against a fork would stall here for nothing — the handler reads raw.
         #[cfg(feature = "verified-reads")]
-        if matches!(req, SignerRequest::Balance { .. }) {
+        if matches!(req, SignerRequest::Balance { .. }) && deckard_core::verified_reads_enabled() {
             let (cell, (cl, el, data_dir)) = {
                 let d = daemon.lock().await;
                 (d.helios_cell(), d.helios_bootstrap_args())

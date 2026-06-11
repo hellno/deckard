@@ -8,16 +8,14 @@
 
 use std::path::PathBuf;
 
-use directories::ProjectDirs;
 use gpui_component::ThemeMode;
 use serde::{Deserialize, Serialize};
 
-// Reverse-DNS used for the config dir. Matches the bundle identifier
-// (`com.deckard.app`) and the wallet keystore dir, so settings + keystore share one
-// location. (qualifier, organization, application)
-const QUALIFIER: &str = "com";
-const ORGANIZATION: &str = "deckard";
-const APPLICATION: &str = "Deckard";
+/// The settings filename inside the shared config dir.
+const SETTINGS_FILE: &str = "settings.json";
+
+/// The chain the daemon signs for when neither env nor settings pick one (mainnet).
+pub const DEFAULT_CHAIN_ID: u64 = 1;
 
 /// Persisted theme preference. We keep our own enum (rather than reusing
 /// gpui-component's `ThemeMode`) so the on-disk format is ours to control.
@@ -59,6 +57,11 @@ pub struct Settings {
     /// **default OFF** — for a demo recording it stays off, or the capture itself is
     /// blocked. Only takes effect in a `--features tray` macOS build (reuses that dep).
     pub capture_block: bool,
+    /// The chain the daemon signs for, when no `DECKARD_CHAIN_ID` env override is set. `None`
+    /// (the default) = mainnet ([`DEFAULT_CHAIN_ID`]). There's no settings UI for this yet —
+    /// it's the middle tier of `env > settings > default` so multi-chain config has a home —
+    /// but `just demo` drives the chain via the env override, not this field.
+    pub chain_id: Option<u64>,
 }
 
 impl Default for Settings {
@@ -71,26 +74,97 @@ impl Default for Settings {
             watch_address: String::new(),
             mask_balances: false,
             capture_block: false,
+            chain_id: None,
         }
     }
 }
 
 impl Settings {
-    /// The effective RPC URL: the user's custom one, or the bundled default.
+    /// The effective RPC URL: the `DECKARD_RPC_URL` env override > the user's custom setting >
+    /// the bundled default. The env tier lets `just demo` (and the supervised daemon, which
+    /// reads the same var) point every process at the local fork without editing settings.
     pub fn effective_rpc(&self) -> String {
-        let trimmed = self.rpc_url.trim();
-        if trimmed.is_empty() {
-            deckard_core::DEFAULT_RPC.to_string()
-        } else {
-            trimmed.to_string()
-        }
+        resolve_rpc(
+            std::env::var("DECKARD_RPC_URL").ok().as_deref(),
+            &self.rpc_url,
+        )
     }
+
+    /// The effective chain id the daemon signs for: the `DECKARD_CHAIN_ID` env override >
+    /// the persisted [`Settings::chain_id`] > [`DEFAULT_CHAIN_ID`]. Threaded to the signer
+    /// launch, the shield builder, and the Railgun sync so they never disagree (the supervisor
+    /// passes this resolved id to the daemon instead of clobbering the env with a hardcoded 1).
+    pub fn effective_chain_id(&self) -> u64 {
+        resolve_chain_id(
+            std::env::var("DECKARD_CHAIN_ID").ok().as_deref(),
+            self.chain_id,
+        )
+    }
+}
+
+/// Pure resolver for [`Settings::effective_rpc`]: env override (if non-empty) > the setting
+/// (if non-empty) > the bundled default. Split out so the precedence is unit-testable.
+pub(crate) fn resolve_rpc(env: Option<&str>, setting: &str) -> String {
+    if let Some(url) = env.map(str::trim).filter(|s| !s.is_empty()) {
+        return url.to_string();
+    }
+    let setting = setting.trim();
+    if setting.is_empty() {
+        deckard_core::DEFAULT_RPC.to_string()
+    } else {
+        setting.to_string()
+    }
+}
+
+/// Pure resolver for [`Settings::effective_chain_id`]: a parseable env override wins, else the
+/// persisted setting, else [`DEFAULT_CHAIN_ID`]. A non-numeric env value is ignored (falls
+/// through) rather than failing — a bad override should not brick the app.
+pub(crate) fn resolve_chain_id(env: Option<&str>, setting: Option<u64>) -> u64 {
+    if let Some(id) = env.and_then(|s| s.trim().parse::<u64>().ok()) {
+        return id;
+    }
+    setting.unwrap_or(DEFAULT_CHAIN_ID)
+}
+
+/// True when the app is pointed at a **local development fork** rather than a public network:
+/// the resolved RPC is a loopback address AND the chain isn't mainnet. Both conditions matter —
+/// a local mainnet archive node (loopback, chain 1) is still real mainnet data, and a remote
+/// testnet (public host, chain ≠ 1) isn't a fork. Drives the status-strip "DEMO FORK — not
+/// mainnet" caution (DESIGN: an amber alert icon + risk text inline, never a colored slab).
+pub(crate) fn is_fork_mode(rpc_url: &str, chain_id: u64) -> bool {
+    chain_id != DEFAULT_CHAIN_ID && rpc_is_loopback(rpc_url)
+}
+
+/// Whether an RPC URL points at the local loopback interface (a local anvil fork lives at
+/// `127.0.0.1` / `localhost`). Parses `scheme://[user@]host[:port]/…` defensively: anything
+/// unrecognized is treated as non-loopback (fail toward "this is a real network").
+pub(crate) fn rpc_is_loopback(url: &str) -> bool {
+    let after_scheme = url.split("://").nth(1).unwrap_or(url);
+    let authority = after_scheme.split(['/', '?', '#']).next().unwrap_or("");
+    let host_port = authority.rsplit('@').next().unwrap_or(authority);
+    // IPv6 literal `[::1]` / `[::1]:port` → take what's inside the brackets; otherwise
+    // `host[:port]` → drop a single trailing `:port` (IPv4 / hostnames have at most one colon).
+    let host = if let Some(rest) = host_port.strip_prefix('[') {
+        rest.split(']').next().unwrap_or(rest)
+    } else {
+        host_port.rsplit_once(':').map_or(host_port, |(h, _)| h)
+    };
+    // Parse as an IP so the whole 127.0.0.0/8 + ::1 range counts but a *hostname* like
+    // `127.0.0.1.evil.com` (which resolves wherever an attacker wants) never matches.
+    host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
 }
 
 impl Settings {
     fn path() -> Option<PathBuf> {
-        ProjectDirs::from(QUALIFIER, ORGANIZATION, APPLICATION)
-            .map(|dirs| dirs.config_dir().join("settings.json"))
+        // Route through deckard-core so settings.json lands in the SAME dir as the vault +
+        // policy — and honors `DECKARD_CONFIG_DIR`, so `just demo` keeps every file in one
+        // isolated directory (the default resolves to the same platform path as before, so
+        // existing users' settings are found unchanged).
+        deckard_core::config_dir().map(|dir| dir.join(SETTINGS_FILE))
     }
 
     /// Human-readable path, shown in the settings UI so users know where prefs live.
@@ -120,5 +194,72 @@ impl Settings {
         if let Ok(json) = serde_json::to_string_pretty(self) {
             let _ = std::fs::write(&path, json);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rpc_resolution_prefers_env_then_setting_then_default() {
+        let default = deckard_core::DEFAULT_RPC;
+        // Env override wins over everything, even a custom setting.
+        assert_eq!(
+            resolve_rpc(Some("http://127.0.0.1:8545"), "https://my.rpc"),
+            "http://127.0.0.1:8545"
+        );
+        // Blank/whitespace env is ignored → the setting is used.
+        assert_eq!(resolve_rpc(Some("   "), "https://my.rpc"), "https://my.rpc");
+        assert_eq!(resolve_rpc(None, "https://my.rpc"), "https://my.rpc");
+        // Neither env nor setting → the bundled default.
+        assert_eq!(resolve_rpc(None, ""), default);
+        assert_eq!(resolve_rpc(Some(""), "  "), default);
+        // Trimmed.
+        assert_eq!(resolve_rpc(Some(" https://x "), ""), "https://x");
+    }
+
+    #[test]
+    fn chain_id_resolution_prefers_env_then_setting_then_default() {
+        assert_eq!(resolve_chain_id(Some("11155111"), Some(5)), 11_155_111);
+        assert_eq!(resolve_chain_id(Some(" 11155111 "), None), 11_155_111);
+        // A non-numeric env override is ignored (must not brick the app) → setting/default.
+        assert_eq!(resolve_chain_id(Some("mainnet"), Some(5)), 5);
+        assert_eq!(resolve_chain_id(Some("mainnet"), None), DEFAULT_CHAIN_ID);
+        assert_eq!(resolve_chain_id(None, Some(5)), 5);
+        assert_eq!(resolve_chain_id(None, None), DEFAULT_CHAIN_ID);
+    }
+
+    #[test]
+    fn loopback_detection_covers_anvil_urls() {
+        for local in [
+            "http://127.0.0.1:8545",
+            "http://localhost:8545",
+            "http://127.0.0.1",
+            "https://localhost/",
+            "http://[::1]:8545",
+            "http://user@127.0.0.1:8545/path",
+        ] {
+            assert!(rpc_is_loopback(local), "{local} should be loopback");
+        }
+        for remote in [
+            "https://ethereum-rpc.publicnode.com",
+            "https://mainnet.infura.io/v3/KEY",
+            "https://127.0.0.1.evil.com", // host is 127.0.0.1.evil.com, not loopback
+        ] {
+            assert!(!rpc_is_loopback(remote), "{remote} should NOT be loopback");
+        }
+    }
+
+    #[test]
+    fn fork_mode_needs_both_loopback_and_non_mainnet() {
+        // The demo: local fork on Sepolia → fork mode.
+        assert!(is_fork_mode("http://127.0.0.1:8545", 11_155_111));
+        // A local mainnet archive node is still real mainnet data → NOT a fork.
+        assert!(!is_fork_mode("http://127.0.0.1:8545", DEFAULT_CHAIN_ID));
+        // A remote testnet isn't a local fork.
+        assert!(!is_fork_mode("https://sepolia.example.com", 11_155_111));
+        // Plain mainnet over a public RPC.
+        assert!(!is_fork_mode(deckard_core::DEFAULT_RPC, DEFAULT_CHAIN_ID));
     }
 }

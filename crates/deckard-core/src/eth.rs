@@ -197,6 +197,22 @@ impl ReadPath {
     /// Build the read path on the worker thread, inside the worker's tokio runtime.
     #[cfg(feature = "verified-reads")]
     async fn build(rpc_url: &str) -> Self {
+        // Demo / local-fork mode: when verified reads are disabled at runtime
+        // (`DECKARD_VERIFIED_READS=0`), skip the Helios bootstrap entirely. Embedded Helios is
+        // mainnet-only and would stall a Balance read against a Sepolia fork; instead read the
+        // raw fork RPC directly, honestly tagged Unsynced (never a fabricated Verified).
+        if !crate::env::verified_reads_enabled() {
+            let provider = rpc_url
+                .parse()
+                .ok()
+                .map(|url| ProviderBuilder::new().connect_http(url).erased());
+            return Self {
+                provider,
+                unverified_reason: Some("verification disabled (demo mode)".to_string()),
+                _helios: None,
+            };
+        }
+
         // The configured RPC is now the EXECUTION-layer endpoint Helios proves against
         // (it must serve eth_getProof) — never read directly. CL drives the sync.
         let data_dir = crate::config::config_dir()

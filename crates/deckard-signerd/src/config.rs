@@ -45,7 +45,9 @@ impl Config {
             Err(_) => 1,
         };
 
-        let config_dir = match std::env::var_os("DECKARD_CONFIG_DIR") {
+        // An empty `DECKARD_CONFIG_DIR=` is treated as unset (parity with `deckard_core::config_dir`),
+        // so it falls through to the platform dir instead of resolving the vault CWD-relative.
+        let config_dir = match std::env::var_os("DECKARD_CONFIG_DIR").filter(|d| !d.is_empty()) {
             Some(d) => PathBuf::from(d),
             None => deckard_core::config_dir()
                 .ok_or_else(|| anyhow::anyhow!("no platform config directory available"))?,
@@ -86,8 +88,9 @@ impl Config {
 }
 
 /// Reduce an RPC URL to `scheme://host[:port]` so an embedded API key (e.g. an Infura
-/// project secret in the path/query) never reaches a log line.
-pub(crate) fn redact_url(url: &str) -> String {
+/// project secret in the path/query) never reaches a log line. Public so the GUI app
+/// (which also logs its resolved RPC at startup) shares this one redaction implementation.
+pub fn redact_url(url: &str) -> String {
     let (scheme, rest) = match url.split_once("://") {
         Some(parts) => parts,
         None => return "<redacted>".to_string(),

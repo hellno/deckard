@@ -7,6 +7,9 @@
 //! The keystore is only ever touched in-process by *onboarding* (to write `vault.bin`), never
 //! to sign.
 
+use std::ffi::OsString;
+use std::path::PathBuf;
+
 use alloy_primitives::{Address, B256, U256};
 use deckard_contract::{Decision, ExecuteResult, Intent, RequestId, UnlockOutcome};
 use deckard_signerd::{DaemonSupervisor, SignerClient};
@@ -34,9 +37,12 @@ pub struct AppSigner {
 
 impl AppSigner {
     /// Launch + supervise the daemon and return a key-less handle to it. `rpc_url`/`chain_id`
-    /// are passed to the daemon so it broadcasts on the same chain the app reads from.
+    /// are passed to the daemon so it broadcasts on the same chain the app reads from. The
+    /// socket path honors `DECKARD_SOCKET_PATH` (see [`resolve_socket_path`]).
     pub fn launch(rpc_url: String, chain_id: u64) -> Self {
-        let socket_path = deckard_signerd::socket::default_socket_path();
+        let socket_path = resolve_socket_path();
+        // The supervisor exports this exact path to the daemon child (DECKARD_SOCKET_PATH), and
+        // the client below binds the same one — so both ends always agree, demo or not.
         let supervisor = DaemonSupervisor::spawn(socket_path.clone(), rpc_url, chain_id);
         let client = SignerClient::new(socket_path);
         Self {
@@ -49,6 +55,24 @@ impl AppSigner {
     /// shell uses this for unlock/lock/send so the work runs off the UI thread.
     pub fn client(&self) -> SignerClient {
         self.client.clone()
+    }
+}
+
+/// Resolve the daemon socket path: the `DECKARD_SOCKET_PATH` override, else the per-uid
+/// default. The app MUST honor the override — if it didn't, a demo daemon on its own socket
+/// would lose the single-instance flock to an everyday Deckard, and the demo app would
+/// silently attach to the **mainnet** daemon. `just demo` sets a dedicated socket under the
+/// demo config dir so the two never collide.
+fn resolve_socket_path() -> PathBuf {
+    socket_path_from(std::env::var_os("DECKARD_SOCKET_PATH"))
+}
+
+/// Pure core of [`resolve_socket_path`]: a non-empty override wins; otherwise the per-uid
+/// default. Split out so the precedence is unit-testable without mutating process env.
+fn socket_path_from(override_path: Option<OsString>) -> PathBuf {
+    match override_path {
+        Some(p) if !p.is_empty() => PathBuf::from(p),
+        _ => deckard_signerd::socket::default_socket_path(),
     }
 }
 
@@ -354,6 +378,20 @@ mod tests {
         ] {
             assert!(parse_eth_to_wei(bad).is_err(), "{bad:?} must be rejected");
         }
+    }
+
+    #[test]
+    fn socket_path_honors_the_override_else_falls_back_to_default() {
+        // An explicit override is used verbatim (the demo's dedicated socket).
+        let forced = OsString::from("/tmp/deckard-demo/signerd.sock");
+        assert_eq!(
+            socket_path_from(Some(forced.clone())),
+            PathBuf::from(&forced)
+        );
+        // Empty / unset → the per-uid default (a real path, not the override).
+        let default = deckard_signerd::socket::default_socket_path();
+        assert_eq!(socket_path_from(None), default);
+        assert_eq!(socket_path_from(Some(OsString::new())), default);
     }
 
     #[test]

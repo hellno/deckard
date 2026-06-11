@@ -640,6 +640,24 @@ impl Daemon {
     /// serve eth_getProof); Nimbus drives the CL sync (deckard-core's default).
     #[cfg(feature = "verified-reads")]
     async fn read_public_balance(&mut self, addr: Address) -> (U256, ReadStatus) {
+        // Demo / local-fork mode: when verified reads are disabled at runtime
+        // (`DECKARD_VERIFIED_READS=0`), skip Helios entirely. Embedded Helios is mainnet-only
+        // and re-bootstraps on every failed Balance — against a Sepolia fork it never verifies
+        // and stalls the read. Fall back to a raw fork RPC read, honestly tagged Unsynced
+        // (matches the feature-off path below; the server skips priming for the same reason).
+        if !deckard_core::verified_reads_enabled() {
+            return match signing::read_balance(&self.cfg.rpc_url, addr).await {
+                Ok(wei) => (
+                    wei,
+                    ReadStatus::unsynced("verification disabled (demo mode)"),
+                ),
+                Err(e) => (
+                    U256::ZERO,
+                    ReadStatus::unsynced(format!("read failed: {}", one_line(&e))),
+                ),
+            };
+        }
+
         // The server primes the cell off-lock before dispatch, so this is normally a fast
         // already-built borrow. `ensure` here is a defensive no-op fallback for callers
         // (e.g. unit tests) that drive `handle` directly without the server priming first.

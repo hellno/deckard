@@ -117,9 +117,19 @@ fn run_worker(
             return;
         };
         let provider = ProviderBuilder::new().connect_http(url).erased();
+        // Live mainnet: stream Subsquid UNPINNED to head. Local-fork / demo mode
+        // (`DECKARD_DEMO_FORK_BLOCK` set): pin Subsquid at the fork block so it stops where the
+        // real chain's index ends and the RpcSyncer takes over from there — the only way to see
+        // the FORK-LOCAL shield event (Subsquid never indexed the fork). Mirrors `shield_e2e`'s
+        // `SubsquidSyncer::new(...).with_latest_block(FORK_BLOCK)`.
+        let subsquid = SubsquidSyncer::new(&chain.subsquid_endpoint);
+        let subsquid = match crate::env::demo_fork_block() {
+            Some(block) => subsquid.with_latest_block(block),
+            None => subsquid,
+        };
         let syncer = Arc::new(
             ChainedSyncer::new()
-                .then(SubsquidSyncer::new(&chain.subsquid_endpoint))
+                .then(subsquid)
                 .then(RpcSyncer::new(chain.clone(), provider.clone()).with_batch_size(1000)),
         );
         let mut railgun = match RailgunBuilder::new(chain, provider)
