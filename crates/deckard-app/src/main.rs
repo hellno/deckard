@@ -50,7 +50,9 @@ gpui::actions!(
         NewItem,
         GoBack,
         TogglePalette,
-        ToggleMask
+        ToggleMask,
+        PaletteNext,
+        PalettePrev
     ]
 );
 
@@ -103,6 +105,13 @@ fn main() {
                 KeyBinding::new("secondary-[", GoBack, None),
                 KeyBinding::new("secondary-k", TogglePalette, None),
                 KeyBinding::new("secondary-shift-m", ToggleMask, None),
+                // Tab / Shift-Tab navigate the palette. Scoped to the `CommandPalette` context so
+                // they SHADOW gpui-component `Root`'s global `tab`→focus-traversal (a deeper-context
+                // binding wins by depth). Without this, Tab moves focus OUT of the open palette onto a
+                // hidden input behind the scrim — keystrokes would then land in an invisible wallet
+                // field. (`Root` binds `tab` in its own context, which is always live.)
+                KeyBinding::new("tab", PaletteNext, Some("CommandPalette")),
+                KeyBinding::new("shift-tab", PalettePrev, Some("CommandPalette")),
             ]);
 
             // 4. Global action handlers. View-local actions (NewItem, OpenSettings,

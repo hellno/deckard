@@ -407,14 +407,11 @@ impl Shell {
                 self.close_palette(window, cx);
             }
             "up" => {
-                self.palette_selected = self.palette_selected.saturating_sub(1);
+                self.palette_select_prev();
                 cx.notify();
             }
             "down" => {
-                let n = self.palette_results.len();
-                if n > 0 {
-                    self.palette_selected = (self.palette_selected + 1).min(n - 1);
-                }
+                self.palette_select_next();
                 cx.notify();
             }
             "enter" => {

@@ -32,7 +32,10 @@ use crate::settings::{Settings, ThemeModePref};
 use crate::signer::{self, AppSigner};
 use crate::theme;
 use crate::wallet;
-use crate::{GoBack, NewItem, OpenSettings, ToggleMask, TogglePalette, ToggleTheme, APP_NAME};
+use crate::{
+    GoBack, NewItem, OpenSettings, PaletteNext, PalettePrev, ToggleMask, TogglePalette,
+    ToggleTheme, APP_NAME,
+};
 
 /// How long the user must hold the shield confirm before it signs — the deliberate-gesture
 /// duration (DESIGN: confirm is a hold, never a tap). The amber fill-sweep (`shield_view`)
@@ -1633,6 +1636,37 @@ impl Shell {
         self.toggle_mask(cx);
     }
 
+    // Tab / Shift-Tab in the palette (bound in the `CommandPalette` context so they fire only while
+    // it's focused, shadowing Root's focus-traversal). They mirror ↓/↑ in `on_palette_key`.
+    fn on_palette_next(&mut self, _: &PaletteNext, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.palette_open {
+            return;
+        }
+        self.palette_select_next();
+        cx.notify();
+    }
+
+    fn on_palette_prev(&mut self, _: &PalettePrev, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.palette_open {
+            return;
+        }
+        self.palette_select_prev();
+        cx.notify();
+    }
+
+    /// Move the palette selection down/up, clamped to the current results. Shared by ↑/↓ in
+    /// `on_palette_key` and the Tab/Shift-Tab actions; the caller notifies.
+    pub(crate) fn palette_select_next(&mut self) {
+        let n = self.palette_results.len();
+        if n > 0 {
+            self.palette_selected = (self.palette_selected + 1).min(n - 1);
+        }
+    }
+
+    pub(crate) fn palette_select_prev(&mut self) {
+        self.palette_selected = self.palette_selected.saturating_sub(1);
+    }
+
     /// Clear a prior session's shield inputs once after lock, then pre-fill the recipient with
     /// the user's own 0zk address once the grant arrives (still editable). Runs from `render`,
     /// the only place with a `Window` for `set_value`.
@@ -1782,6 +1816,8 @@ impl Render for Shell {
             .on_action(cx.listener(Self::on_toggle_theme))
             .on_action(cx.listener(Self::on_toggle_palette))
             .on_action(cx.listener(Self::on_toggle_mask))
+            .on_action(cx.listener(Self::on_palette_next))
+            .on_action(cx.listener(Self::on_palette_prev))
             .child(body)
     }
 }
