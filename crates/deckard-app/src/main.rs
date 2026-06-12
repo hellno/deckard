@@ -11,6 +11,8 @@ mod capture;
 mod money;
 mod onboarding;
 mod palette;
+mod palette_commands;
+mod palette_usage;
 mod receive;
 mod settings;
 mod settings_view;

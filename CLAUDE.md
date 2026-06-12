@@ -46,3 +46,10 @@ before you're done. (For UI work you must build the app: `just check`.)
 ## Language
 In docs, UI copy, and refusal/error strings: prefer plain words over crypto jargon, and explain a
 term once where it first appears (e.g. "shield — move funds to a private balance").
+
+## Command palette reachability
+Every user-facing action must be reachable from the ⌘K palette. When you add an action, add a
+`Command` to `crates/deckard-app/src/palette_commands.rs` (id, title, fuzzy aliases, shortcut,
+optional curated icon) and handle its `id` in `Shell::run_palette_command` (`shell.rs`). The palette
+is the universal control plane; an action that isn't in it is invisible to a keyboard-first operator.
+QA and review flag any action that ships without its command.

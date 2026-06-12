@@ -47,6 +47,11 @@ anyhow = "1"
 qrcode = "0.14"
 # Scrub the pending recovery phrase from memory after onboarding.
 zeroize = "1"
+# Command-palette fuzzy matcher: fzf-quality scoring + match positions for highlighting.
+# The same engine Zed migrated its command palette / file finder onto (MPL-2.0; used as an
+# unmodified dependency, so no source-disclosure obligation). Low-level scorer only — the
+# palette's tiny static command set never needs the high-level threaded `nucleo` worker.
+nucleo-matcher = "0.3"
 
 # --- Optional: menu-bar / tray apps (`--features tray`) — cross-platform ---
 # tray-icon draws a native status item on every OS: NSStatusItem (macOS),

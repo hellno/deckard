@@ -172,6 +172,27 @@ pub struct Shell {
     pub watch_input: Entity<InputState>,
     pub created: usize,
     pub palette_open: bool,
+    /// The palette's self-managed fuzzy query (NOT a gpui-component `InputState` — a focused
+    /// single-line input would consume ↑/↓ before our key handler ever sees them). Owned as a
+    /// plain `String`, edited in `palette.rs`'s `on_palette_key`.
+    pub palette_query: String,
+    /// The highlighted result row (0-based into `palette_results`); ↑/↓ move it, Enter runs it.
+    pub palette_selected: usize,
+    /// The ranked, displayable results for the current query — recomputed by `repalette` on
+    /// every query edit (and on open) via the pure `palette_commands::rank`.
+    pub palette_results: Vec<crate::palette_commands::Ranked>,
+    /// The palette panel's focus handle — `track_focus`'d so the panel (with its
+    /// `key_context("CommandPalette")`) receives every keystroke while open.
+    pub palette_focus: gpui::FocusHandle,
+    /// Whatever had focus when the palette opened, so closing can restore it (codex m7: a
+    /// command that doesn't change focus shouldn't strand the user in the dismissed overlay).
+    pub palette_prev_focus: Option<gpui::FocusHandle>,
+    /// Persisted per-command frecency so the empty palette surfaces the most-used actions first.
+    /// `record`'d when a command runs (best-effort disk write; never load-bearing).
+    pub palette_usage: crate::palette_usage::PaletteUsage,
+    /// The reused nucleo matcher (its scratch buffers amortize across queries). Pure-data ranking
+    /// borrows it; it holds no palette state of its own.
+    pub palette_matcher: nucleo_matcher::Matcher,
     /// Privacy mask: when true, every money surface renders fixed bullets instead of a
     /// figure (DESIGN §Trust). Initialised from `Settings.mask_balances` and persisted on
     /// every toggle — the inverse of the seed reveal's momentary, default-hidden model.
@@ -488,6 +509,13 @@ impl Shell {
             watch_input,
             created: 0,
             palette_open: false,
+            palette_query: String::new(),
+            palette_selected: 0,
+            palette_results: Vec::new(),
+            palette_focus: cx.focus_handle(),
+            palette_prev_focus: None,
+            palette_usage: crate::palette_usage::PaletteUsage::load(),
+            palette_matcher: nucleo_matcher::Matcher::new(nucleo_matcher::Config::DEFAULT),
             mask,
             agent_acting: false,
             agent_policy: None,
@@ -1494,8 +1522,89 @@ impl Shell {
         self.toggle_mode(cx);
     }
 
-    fn on_toggle_palette(&mut self, _: &TogglePalette, _: &mut Window, cx: &mut Context<Self>) {
-        self.palette_open = !self.palette_open;
+    fn on_toggle_palette(
+        &mut self,
+        _: &TogglePalette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_palette(window, cx);
+    }
+
+    /// Open or close the command palette. Both the ⌘K binding (`on_toggle_palette`) and the
+    /// breadcrumb ⌘K affordance route here, so the open path is identical from either entry —
+    /// it MUST capture focus + recompute results + focus the panel, or the overlay renders inert.
+    pub fn toggle_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette_open {
+            // Toggling closed restores the focus we captured on open.
+            self.close_palette(window, cx);
+        } else {
+            // Remember what had focus so closing can return there, then open with a clean
+            // query, recompute the (frecency-ordered) results, and focus the palette panel so
+            // its `key_context("CommandPalette")` listener starts receiving keys immediately.
+            self.palette_prev_focus = window.focused(cx);
+            self.palette_query.clear();
+            self.palette_selected = 0;
+            self.repalette(cx);
+            self.palette_open = true;
+            window.focus(&self.palette_focus, cx);
+            cx.notify();
+        }
+    }
+
+    /// Recompute the palette results from the current query (pure `palette_commands::rank` over
+    /// the static registry, with the frecency store + reused matcher). Clamp the selection so it
+    /// can never point past the (possibly shorter) new result list.
+    pub(crate) fn repalette(&mut self, _cx: &mut Context<Self>) {
+        self.palette_results = crate::palette_commands::rank(
+            &self.palette_query,
+            crate::palette_commands::COMMANDS,
+            &self.palette_usage,
+            crate::palette_usage::now_unix_secs(),
+            &mut self.palette_matcher,
+        );
+        self.palette_selected = self
+            .palette_selected
+            .min(self.palette_results.len().saturating_sub(1));
+    }
+
+    /// Run the palette command with stable `id`: record the use (frecency), perform the action
+    /// (the bodies migrated from the old click-only palette), then close the palette. Unknown ids
+    /// are a no-op (still closes) — the registry and this match are kept in lockstep.
+    pub fn run_palette_command(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette_usage.record(id);
+        match id {
+            "portfolio" => {
+                self.select(Selection::Wallet, cx);
+                self.open(Surface::Home, cx);
+            }
+            "receive" => self.open(Surface::Receive, cx),
+            "shield" => self.open_shield(cx),
+            "settings" => self.open(Surface::Settings, cx),
+            "copy" => {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                    self.wallet_address_string(),
+                ));
+                cx.notify();
+            }
+            "theme" => self.toggle_mode(cx),
+            "mask" => self.toggle_mask(cx),
+            "agent" => self.toggle_agent_acting(cx),
+            // `lock` returns to the unlock gate and already clears `palette_open`; closing again
+            // below is a harmless no-op (the prev-focus restore targets a now-replaced view).
+            "lock" => self.lock(cx),
+            _ => {}
+        }
+        self.close_palette(window, cx);
+    }
+
+    /// Close the palette and restore the focus captured on open (codex m7) so dismissing the
+    /// overlay never strands the keyboard in a now-hidden panel. Idempotent.
+    pub fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette_open = false;
+        if let Some(prev) = self.palette_prev_focus.take() {
+            window.focus(&prev, cx);
+        }
         cx.notify();
     }
 

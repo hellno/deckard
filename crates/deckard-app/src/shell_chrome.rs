@@ -27,7 +27,7 @@ use crate::shell::{Selection, Shell, Surface};
 use crate::theme;
 
 /// Middle-truncate an address for a tight row, e.g. `0xA1b2…9F3c`.
-fn short_addr(a: &str) -> String {
+pub(crate) fn short_addr(a: &str) -> String {
     if a.len() >= 12 {
         format!("{}…{}", &a[..6], &a[a.len() - 4..])
     } else {
@@ -327,9 +327,11 @@ impl Shell {
                             .text_color(muted)
                             .cursor_pointer()
                             .child("⌘K")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.palette_open = !this.palette_open;
-                                cx.notify();
+                            // Route through the shared toggle so the breadcrumb opens the palette
+                            // exactly like ⌘K does — capturing focus, recomputing results, and
+                            // focusing the panel (a bare `palette_open = true` renders it inert).
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.toggle_palette(window, cx);
                             })),
                     )
                     .child(

@@ -209,7 +209,11 @@ data components must define **empty / loading / error**. Defaults:
 - **Context menu** — popover with hover-highlighted items, consistent group gaps, destructive items
   in red, keyboard hints right-aligned where shortcuts exist.
 - **Command palette (⌘K)** — the universal control plane across every surface (send, swap, switch
-  project, pause agent, approve, jump to asset, lock). Opens <50ms, fuzzy, shows shortcuts.
+  project, pause agent, approve, jump to asset, lock). Opens <50ms. A self-managed fuzzy query
+  (nucleo) over the command registry, ranked by match score + frecency; matched characters lift in
+  weight (not hue); the selected row is a brightness lift, never a keyline; curated icons only (most
+  rows are text); shows shortcuts. Every new action registers a `Command`
+  (CLAUDE.md §Command palette reachability).
 
 ### Required states the build must include (flagged missing in review)
 - **Disabled** primary action when input is incomplete/invalid (e.g. empty amount, unanswered seed
