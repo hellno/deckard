@@ -1501,17 +1501,32 @@ impl Shell {
     }
 
     // --- Action handlers (wired in `render`) ---
+    //
+    // While the palette is open it OWNS the keyboard: gpui dispatches these global ⌘-shortcuts
+    // (None-context bindings) BEFORE the palette panel's `on_key_down`, so without a guard they'd
+    // fire behind the open overlay (e.g. ⌘, opening Settings under the palette). Each gates on
+    // `palette_open` so the shortcut is inert while the palette is up — its action is reachable as a
+    // palette command instead. ⌘K (`on_toggle_palette`) and ⌘Q (Quit) are intentionally NOT gated.
 
     fn on_new_item(&mut self, _: &NewItem, _: &mut Window, cx: &mut Context<Self>) {
+        if self.palette_open {
+            return;
+        }
         self.created += 1;
         cx.notify();
     }
 
     fn on_open_settings(&mut self, _: &OpenSettings, _: &mut Window, cx: &mut Context<Self>) {
+        if self.palette_open {
+            return;
+        }
         self.open(Surface::Settings, cx);
     }
 
     fn on_go_back(&mut self, _: &GoBack, _: &mut Window, cx: &mut Context<Self>) {
+        if self.palette_open {
+            return;
+        }
         // Back = leave any action surface and return to the selection's Home view.
         if self.surface != Surface::Home {
             self.open(Surface::Home, cx);
@@ -1519,6 +1534,9 @@ impl Shell {
     }
 
     fn on_toggle_theme(&mut self, _: &ToggleTheme, _: &mut Window, cx: &mut Context<Self>) {
+        if self.palette_open {
+            return;
+        }
         self.toggle_mode(cx);
     }
 
@@ -1609,6 +1627,9 @@ impl Shell {
     }
 
     fn on_toggle_mask(&mut self, _: &ToggleMask, _: &mut Window, cx: &mut Context<Self>) {
+        if self.palette_open {
+            return;
+        }
         self.toggle_mask(cx);
     }
 

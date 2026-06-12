@@ -246,9 +246,11 @@ impl Shell {
             .child(self.palette_icon(cmd, muted, agent, agent_tint));
 
         // The title row: matched chars (positions) are a brightness/weight lift, the rest muted.
-        // (Positions index the static title's chars; the live label shares the title's prefix for
-        // the dynamic commands, so highlighting the same indices stays correct.)
-        let label_row = self.highlighted_label(&label, positions, fg, muted);
+        // Positions index the STATIC title; a dynamic relabel (mask/theme/agent) can differ in
+        // length, so only apply them when the displayed label IS the title — otherwise render flat
+        // (a title-match highlight on the shorter "Stop agent activity" label would bold stray chars).
+        let title_positions: &[usize] = if label == cmd.title { positions } else { &[] };
+        let label_row = self.highlighted_label(&label, title_positions, fg, muted);
 
         let mut text_col = h_flex().items_center().gap_1p5().min_w_0().child(label_row);
         if matched_alias.is_some() {
