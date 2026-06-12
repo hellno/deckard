@@ -52,6 +52,31 @@ pub(crate) fn demo_fork_block_from(value: Option<&str>) -> Option<u64> {
     value.and_then(|s| s.trim().parse::<u64>().ok())
 }
 
+/// Whether an env override forces the macOS screen-capture block **off** (screen capture
+/// ALLOWED), regardless of the persisted `capture_block` privacy setting. **Default OFF** —
+/// the trust feature is honored unless an operator opts in with
+/// `DECKARD_ALLOW_SCREEN_CAPTURE=1`. The one intended use is an automated agent recording the
+/// demo GIF: it can launch the app with capture guaranteed un-blocked instead of having to
+/// reach into the settings UI first. Recognizes `1` / `true` / `yes` / `on` (case-insensitive,
+/// trimmed); anything else (including unset/empty) leaves the block under the setting's control.
+pub fn screen_capture_allowed() -> bool {
+    screen_capture_allowed_from(
+        std::env::var("DECKARD_ALLOW_SCREEN_CAPTURE")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// Pure core of [`screen_capture_allowed`] — takes the raw env value so it is testable without
+/// touching process-global state. Only an explicit truthy spelling enables the override, so the
+/// trust default (block honored per setting) is fail-safe against typos and stray values.
+pub(crate) fn screen_capture_allowed_from(value: Option<&str>) -> bool {
+    matches!(
+        value.map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,5 +105,23 @@ mod tests {
         assert_eq!(demo_fork_block_from(Some("not-a-number")), None);
         assert_eq!(demo_fork_block_from(Some("10822990")), Some(10_822_990));
         assert_eq!(demo_fork_block_from(Some("  10822990 ")), Some(10_822_990));
+    }
+
+    #[test]
+    fn screen_capture_allowed_defaults_off_and_parses_truthy_values() {
+        // Unset / empty / unknown / falsey → the capture block stays under the setting's
+        // control (override OFF). The trust default is fail-safe against typos.
+        assert!(!screen_capture_allowed_from(None));
+        assert!(!screen_capture_allowed_from(Some("")));
+        assert!(!screen_capture_allowed_from(Some("0")));
+        assert!(!screen_capture_allowed_from(Some("false")));
+        assert!(!screen_capture_allowed_from(Some("nope")));
+        // Only the documented truthy spellings, case/whitespace-insensitive, enable it.
+        for on in ["1", "true", "yes", "on", " ON ", "True", "Yes"] {
+            assert!(
+                screen_capture_allowed_from(Some(on)),
+                "{on:?} should allow screen capture"
+            );
+        }
     }
 }

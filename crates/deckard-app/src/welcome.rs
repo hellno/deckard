@@ -46,6 +46,53 @@ fn short_addr(a: &str) -> String {
     }
 }
 
+/// The agent policy card's rows, built from the daemon's LIVE policy — the same fence
+/// `deckard_policy_get` shows an MCP client. Pure so the mapping is testable: an empty
+/// allowlist honestly reads "any", the approval mode is spelled out, and a STOP
+/// (`revoked`) is never hidden. `masked` bullets only the spent-today figure — that is
+/// activity; the caps are config the user set, not a balance to hide.
+fn agent_policy_rows(p: &deckard_contract::Policy, masked: bool) -> Vec<(&'static str, String)> {
+    use deckard_contract::ApprovalMode;
+    let eth = |wei: U256| format!("{} ETH", deckard_core::format_amount(wei, 18, 6));
+    vec![
+        ("Per-transaction cap", eth(p.per_tx_cap_wei)),
+        ("Daily budget", format!("{} / day", eth(p.daily_cap_wei))),
+        (
+            "Spent today",
+            crate::money::mask_money(masked, &eth(p.spent_today_wei)),
+        ),
+        (
+            "Recipients",
+            if p.allow_to.is_empty() {
+                "any (no allowlist)".to_string()
+            } else {
+                format!("{} allowed", p.allow_to.len())
+            },
+        ),
+        (
+            "Auto-shield inbound",
+            format!("≥ {}", eth(p.auto_shield_min_wei)),
+        ),
+        (
+            "Approval",
+            match p.require_approval {
+                ApprovalMode::Never => "auto within caps · over cap denied",
+                ApprovalMode::OverCap => "auto within caps · ask over cap",
+                ApprovalMode::Always => "ask for every move",
+            }
+            .to_string(),
+        ),
+        (
+            "STOP brake",
+            if p.revoked {
+                "engaged — unlock to re-arm".to_string()
+            } else {
+                "ready".to_string()
+            },
+        ),
+    ]
+}
+
 impl Shell {
     /// The selected wallet's home — a left-anchored, scrollable main pane:
     /// wallet-name H1 + address subtitle, the balance hero, Send/Receive/Swap,
@@ -543,11 +590,13 @@ impl Shell {
             )
     }
 
-    /// Agent home — a static, demo-scoped policy-card placeholder (DESIGN §Policy
-    /// card): 2-column label/value pairs grouped by whitespace in one faint frame,
-    /// no interior grid lines. Agent "Atlas" is the openly-narrated manual stand-in
-    /// for v1 (real Claude-Desktop-via-MCP is fast-follow), so the values are
-    /// static. The agent identity (cyan) lives only on the squircle glyph.
+    /// Agent home — the policy card (DESIGN §Policy card): 2-column label/value pairs
+    /// grouped by whitespace in one faint frame, no interior grid lines. The values are
+    /// the daemon's LIVE policy (fetched via `PolicyGet` — the same fence
+    /// `deckard_policy_get` shows an MCP client), never invented: rows DESIGN sketches
+    /// for features that don't exist yet (session-key expiry, an autonomy line) are
+    /// omitted rather than faked. The agent identity (cyan) lives only on the squircle
+    /// glyph.
     pub fn render_agent_home(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let fg = theme.foreground;
@@ -562,7 +611,7 @@ impl Shell {
         // One policy row: label left (muted), value right (mono, primary). No
         // per-row hairline — grouping is whitespace.
         let mono_for_row = mono.clone();
-        let policy_row = move |label: &'static str, value: &'static str| {
+        let policy_row = move |label: &'static str, value: String| {
             h_flex()
                 .w_full()
                 .justify_between()
@@ -622,7 +671,9 @@ impl Shell {
                                     )),
                             ),
                     )
-                    // Policy card: one faint frame, no interior grid lines.
+                    // Policy card: one faint frame, no interior grid lines. The rows are
+                    // the daemon's live fence; until the first fetch lands the card says
+                    // so instead of showing invented numbers.
                     .child(
                         v_flex()
                             .w_full()
@@ -632,14 +683,23 @@ impl Shell {
                             .border_1()
                             .border_color(border)
                             .bg(surface)
-                            .child(policy_row("Per-transaction cap", "0.10 ETH"))
-                            .child(policy_row("Period budget", "1.00 ETH / week"))
-                            .child(policy_row("Allowed assets", "ETH"))
-                            .child(policy_row("Session key", "expires in 6d"))
-                            .child(policy_row("Autonomy", "act < $50 · ask above")),
+                            .map(|card| match self.agent_policy.as_ref() {
+                                Some(p) => card.children(
+                                    agent_policy_rows(p, self.mask)
+                                        .into_iter()
+                                        .map(|(label, value)| policy_row(label, value)),
+                                ),
+                                None => card.child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(muted)
+                                        .child("Reading the signer's policy…"),
+                                ),
+                            }),
                     )
                     // Demo control: narrate Atlas "acting" to show the one ambient motion
-                    // (the breathing squircle). Real activity arrives with the MCP agent.
+                    // (the breathing squircle). A real activity feed needs a daemon-side
+                    // event stream — still to come; the policy above is already live.
                     .child(
                         Button::new("toggle-agent-acting")
                             .ghost()
@@ -650,11 +710,11 @@ impl Shell {
                             })
                             .on_click(cx.listener(|this, _, _, cx| this.toggle_agent_acting(cx))),
                     )
-                    .child(
-                        div().text_xs().text_color(muted).child(
-                            "Atlas is a manual stand-in for the demo. Controls land with MCP.",
-                        ),
-                    ),
+                    .child(div().text_xs().text_color(muted).child(
+                        "Atlas acts through the key-less deckard-mcp sidecar. The signer \
+                         checks every move against this policy — edit policy.json in the \
+                         Deckard config dir to change the fence.",
+                    )),
             )
     }
 }
@@ -859,4 +919,63 @@ fn render_row(
         .child(div().text_sm().child(money(
             raw, decimals, max_frac, None, masked, mono, fg, muted,
         )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use deckard_contract::{ApprovalMode, Policy};
+
+    fn policy() -> Policy {
+        Policy {
+            per_tx_cap_wei: U256::from(100_000_000_000_000_000u128), // 0.1 ETH
+            daily_cap_wei: U256::from(500_000_000_000_000_000u128),  // 0.5 ETH
+            spent_today_wei: U256::from(20_000_000_000_000_000u128), // 0.02 ETH
+            allow_to: vec![],
+            auto_shield_min_wei: U256::from(10_000_000_000_000_000u128), // 0.01 ETH
+            require_approval: ApprovalMode::OverCap,
+            revoked: false,
+            allow_swap_tokens: vec![],
+        }
+    }
+
+    /// The card maps the live policy honestly: real numbers, "any" for an empty
+    /// allowlist, the approval mode spelled out, the brake ready.
+    #[test]
+    fn policy_rows_render_the_live_fence() {
+        let rows = agent_policy_rows(&policy(), false);
+        let get = |label: &str| {
+            rows.iter()
+                .find(|(l, _)| *l == label)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(|| panic!("missing row {label:?}"))
+        };
+        assert_eq!(get("Per-transaction cap"), "0.1 ETH");
+        assert_eq!(get("Daily budget"), "0.5 ETH / day");
+        assert_eq!(get("Spent today"), "0.02 ETH");
+        assert_eq!(get("Recipients"), "any (no allowlist)");
+        assert_eq!(get("Auto-shield inbound"), "≥ 0.01 ETH");
+        assert_eq!(get("Approval"), "auto within caps · ask over cap");
+        assert_eq!(get("STOP brake"), "ready");
+    }
+
+    /// The mask bullets ONLY the spent-today activity figure — caps are the user's own
+    /// config and stay readable — and a STOP is surfaced, never hidden.
+    #[test]
+    fn policy_rows_mask_activity_and_surface_a_stop() {
+        let mut p = policy();
+        p.revoked = true;
+        p.allow_to = vec![deckard_core::Address::repeat_byte(0x22)];
+        let rows = agent_policy_rows(&p, true);
+        let get = |label: &str| {
+            rows.iter()
+                .find(|(l, _)| *l == label)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(|| panic!("missing row {label:?}"))
+        };
+        assert_eq!(get("Spent today"), crate::money::MASK_BULLETS);
+        assert_eq!(get("Per-transaction cap"), "0.1 ETH"); // config, not a balance
+        assert_eq!(get("Recipients"), "1 allowed");
+        assert_eq!(get("STOP brake"), "engaged — unlock to re-arm");
+    }
 }

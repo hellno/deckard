@@ -99,9 +99,10 @@ money flows without real ETH. It starts a local **anvil fork of Sepolia** (pinne
 3. In another terminal, **`just demo-fund`** — funds the wallet the app onboarded with
    10 ETH on the fork. (No arg = asks the demo daemon for its address; the app must be
    running + unlocked. Or pass one: `just demo-fund 0x…`.)
-4. **`deckard-mcp install --demo`** — prints the Claude Desktop registration (key-less;
-   it embeds only the demo env block). Merge it / re-run with `--write`, then restart
-   Claude Desktop.
+4. **`cargo build -p deckard-mcp && ./target/debug/deckard-mcp install --demo`** — builds
+   the sidecar (it isn't on PATH) and prints the Claude Desktop registration (key-less;
+   it embeds only the demo env block, plus the binary's absolute path — so don't move the
+   checkout afterwards). Merge it / re-run with `--write`, then restart Claude Desktop.
 5. **Ask Claude to "shield 0.02 ETH."** Claude calls `deckard_shield` → `deckard_execute`;
    the daemon enforces policy and signs; the split-balance bar flips public → private
    on screen.
@@ -114,9 +115,10 @@ Claude Desktop is macOS-only, so on Linux drive the **same daemon** through the
 ```sh
 just demo                       # terminal 1: fork + app (create + unlock a throwaway wallet)
 just demo-fund                  # terminal 2: fund it
-deckard-mcp shield --amount-eth 0.02   # propose -> prints a request_id
-deckard-mcp execute <request_id>       # sign + broadcast
-deckard-mcp policy                     # read the active fence
+cargo build -p deckard-mcp      # one-time: builds ./target/debug/deckard-mcp (not on PATH)
+./target/debug/deckard-mcp shield --amount-eth 0.02   # propose -> prints a request_id
+./target/debug/deckard-mcp execute <request_id>       # sign + broadcast
+./target/debug/deckard-mcp policy                     # read the active fence
 ```
 
 > The CLI reads the demo env from your shell. If you didn't launch it from a shell that
@@ -163,6 +165,7 @@ is the odd one out — it's anvil's upstream fork source, read only by `just dem
 | `DECKARD_RPC_URL` | app, daemon | public RPC | **Yes** — may carry an API key; redacted in logs |
 | `DECKARD_VERIFIED_READS` | core (app/daemon) | on (`1`) | No |
 | `DECKARD_DEMO_FORK_BLOCK` | core (app/daemon) | unset (live, unpinned) | No |
+| `DECKARD_ALLOW_SCREEN_CAPTURE` | app (capture block) | off (block honored per setting) | No |
 | `DECKARD_SIGNERD_BIN` | app (daemon resolution) | sibling of app binary | No |
 | `RPC_URL_SEPOLIA` | `just demo` / `just demo-check` only (anvil `--fork-url`) | unset (required for demo) | **Yes** — archive RPC, may carry an API key |
 

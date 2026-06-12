@@ -158,6 +158,14 @@ Privacy & Security → Screen Recording) to whatever captures the screen, and **
 permission if you script the click-through. Without both, the capture is black or the synthetic input
 is dropped.
 
+Deckard also **blocks its own window from capture by default** (a privacy feature — see
+`crates/deckard-app/src/capture.rs`). Set **`DECKARD_ALLOW_SCREEN_CAPTURE=1`** in the recording
+session to hold that block off; the app prints `screen-capture block DISABLED …` at startup, so the
+override is never silent. `just demo` inherits the variable from your shell, so
+`export DECKARD_ALLOW_SCREEN_CAPTURE=1` before launching. This is what makes an agent-scripted
+capture possible (drive the window with `screencapture` + `cliclick`, then assemble the frames with
+the two-pass `palettegen` recipe below — that is how the current `docs/demo.gif` was recorded).
+
 1. **Build + run the final app:**
 
    ```bash

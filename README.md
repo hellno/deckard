@@ -18,9 +18,9 @@ That is the whole design; if you can cross a boundary it claims, that's a vulner
 
 ![Deckard demo](docs/demo.gif)
 
-> _Draft demo from the current build: onboarding → verified split-balance → command palette →
-> receive → shield-to-private. The final cut is swapped in once the in-flight UI polish lands
-> ([`docs/RELEASING.md`](docs/RELEASING.md) §4)._
+> _From the current build on a local Sepolia fork: funded wallet (100% public) → command palette →
+> shield review (clear-signing) → the public-to-private flip. UI polish is still in flight; the
+> final cut lands with it ([`docs/RELEASING.md`](docs/RELEASING.md) §4)._
 
 > Forked from the [`deck`](https://github.com/hellno/deck) GPUI starter (0BSD, which permits
 > relicensing). Now its own project: Rust + [GPUI](https://www.gpui.rs/), licensed AGPL-3.0-or-later.
@@ -69,7 +69,9 @@ just demo            # terminal 1: anvil fork of Sepolia + the app & daemon (lea
                      #   -> in the app: CREATE A THROWAWAY WALLET (never a real seed) and UNLOCK it
 
 just demo-fund       # terminal 2: fund the onboarded wallet with 10 ETH on the fork
-deckard-mcp install --demo   # print the Claude Desktop registration (key-less; demo env only)
+
+cargo build -p deckard-mcp   # one-time: the sidecar isn't on PATH; builds ./target/debug/deckard-mcp
+./target/debug/deckard-mcp install --demo   # print the Claude Desktop registration (key-less; demo env only)
                      #   -> merge it / re-run with --write, then RESTART Claude Desktop
 ```
 
@@ -92,9 +94,10 @@ export RPC_URL_SEPOLIA=https://eth-sepolia.g.alchemy.com/v2/<your-key>
 
 just demo                                # terminal 1: fork + app (create + UNLOCK a throwaway wallet)
 just demo-fund                           # terminal 2: fund it
-deckard-mcp shield --amount-eth 0.02     # propose -> prints a request_id
-deckard-mcp execute <request_id>         # sign + broadcast
-deckard-mcp policy                       # read the active fence
+cargo build -p deckard-mcp               # one-time: builds ./target/debug/deckard-mcp (not on PATH)
+./target/debug/deckard-mcp shield --amount-eth 0.02   # propose -> prints a request_id
+./target/debug/deckard-mcp execute <request_id>       # sign + broadcast
+./target/debug/deckard-mcp policy                     # read the active fence
 ```
 
 > The demo policy caps per-tx at **0.1 ETH**; a shield **within** cap auto-allows on the Sepolia

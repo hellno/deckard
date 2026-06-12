@@ -80,7 +80,7 @@ pub use cow_client::{
     put_app_data, swap_order_from_quote, AccountOrder, AppDataDoc, CowError, OrderCreation,
     OrderStatusResponse, QuoteOrderParameters, QuoteRequest, QuoteResponse, DEFAULT_SLIPPAGE_BPS,
 };
-pub use env::{demo_fork_block, verified_reads_enabled};
+pub use env::{demo_fork_block, screen_capture_allowed, verified_reads_enabled};
 pub use eth::{EthProvider, Read, DEFAULT_RPC};
 #[cfg(feature = "verified-reads")]
 pub use helios::{launch_verified, VerifiedReader, DEFAULT_CONSENSUS_RPC};
