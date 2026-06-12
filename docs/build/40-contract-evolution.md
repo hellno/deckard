@@ -53,12 +53,15 @@ exactly the mechanisms below.
    "supported but failed" (RFC 9987's one great trick; ssh-agent's
    `SSH_AGENT_EXTENSION_FAILURE`). Concretely: unknown variant → frame-decode error;
    known-but-denied → `Decision::Deny { reason }` from the frozen vocabulary.
-5. **Independent-spec posture, in-repo home (decision 2026-06-11).** The protocol spec text, CDDL,
-   golden test vectors, and conformance asserts live in this repo and `deckard-contract` ships to
-   crates.io. A standalone spec repo is **gated on a second implementer showing up**; a thin ERC
-   (capability names + the JSON display encoding only, 5792-style) is gated further still. This is
-   the WalletConnect / eth-infinitism bundler-spec path: spec repo + reference impl + compliance
-   suite first, formal standards later.
+5. **Independent-spec posture, in-repo home (decision 2026-06-11; publication deferred
+   2026-06-12).** What lands now is the *substance*: the rules above, `Hello`, the capability
+   registry table, and the tests that pin them. The *publication artifacts* — extractable spec
+   text, CDDL, golden vectors, crates.io release — are *deferred until external-implementer
+   demand* (they add reach, not correctness, and can land later with zero rework). A standalone
+   spec repo is **gated on a second implementer showing up**; a thin ERC (capability names + the
+   JSON display encoding only, 5792-style) is gated further still. This is the WalletConnect /
+   eth-infinitism bundler-spec path: spec repo + reference impl + compliance suite first, formal
+   standards later.
 
 ## Concrete interface
 
@@ -80,7 +83,7 @@ Baseline capability names (registered at adoption): `core` (the 30-mcp-shape soc
 shipped), `mcp.v0.1` (the 6-tool profile). The registry is a table in the spec doc:
 `name · status (active/reserved) · since spec_version · defining doc`.
 
-**Publication artifacts** (the work items this doc creates):
+**Publication artifacts — DEFERRED (2026-06-12), recorded here so the later work has a spec:**
 - `docs/spec/agent-custody-protocol.md` — the extractable spec: RFC 2119 conformance language,
   the trust model (key-less client / policy-gated key-holding daemon / human approval surface),
   message semantics, the Deny-reason vocabulary, the capability registry, and the five rules
@@ -91,6 +94,9 @@ shipped), `mcp.v0.1` (the 6-tool profile). The registry is a table in the spec d
   conformance currency. Noise's known gap is *no official test vectors* — do not repeat it.
 - `deckard-contract` published to crates.io (publishing adds no dependencies; the crate is already
   the freeze boundary).
+
+None of these are in the implementation issue. The trigger to un-defer is a concrete second
+implementer (or a credible request for one), at which point this list is the scope.
 
 ## Invariants (frozen here)
 
@@ -108,17 +114,17 @@ shipped), `mcp.v0.1` (the 6-tool profile). The registry is a table in the spec d
 Scenario "evolution rules hold" (mock daemon + real daemon, parity-asserted):
   E1 Hello                         assert: spec_version matches /^\d{4}-\d{2}-\d{2}$/;
                                            capabilities ⊇ {"core","mcp.v0.1"}
-  E2 old-peer valve: replay a pre-Hello client session (golden vectors)
+  E2 old-peer valve: replay a pre-Hello client session (the existing round-trip
+     test fixtures in deckard-contract)
                                    assert: byte-identical responses (freeze holds)
   E3 unknown-variant frame sent to the daemon
                                    assert: frame-decode error, connection survives,
                                            no panic, nothing signed
   E4 struct frame with an extra unknown map key
                                    assert: decodes; unknown key ignored (rule 3 pinned)
-  E5 cddl validate vectors/*.hex against wire.cddl
-                                   assert: all pass; CI job exists
-  E6 cargo publish --dry-run -p deckard-contract
-                                   assert: clean
+  --- deferred with the publication artifacts ---
+  E5 cddl validate vectors/*.hex against wire.cddl        (deferred)
+  E6 cargo publish --dry-run -p deckard-contract          (deferred)
 ```
 
 ## Risks & fallbacks
@@ -126,8 +132,9 @@ Scenario "evolution rules hold" (mock daemon + real daemon, parity-asserted):
 - **Premature standardization** (tempo took 81 releases to settle its surface). *Mitigation:* the
   spec is dated and explicitly pre-1.0; rules 2–3 make additive iteration cheap; the standalone
   repo and ERC are gated on external demand, not calendar.
-- **CDDL/serde drift.** *Mitigation:* golden vectors are the single source of truth — both the
-  CDDL check and the Rust round-trip tests consume the same files (E5).
+- **CDDL/serde drift** (when the publication artifacts un-defer). *Mitigation:* golden vectors
+  become the single source of truth — both the CDDL check and the Rust round-trip tests consume
+  the same files (E5). Until then the Rust round-trip tests alone carry the freeze.
 - **`Hello` as fingerprinting surface.** It is reachable by any same-uid local process.
   *Accepted:* it reveals only capability names, which the binary's existence already reveals.
 - **crates.io name squatting / supply-chain.** *Mitigation:* publish early (E6 is cheap), pin by

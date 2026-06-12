@@ -33,8 +33,9 @@ room, with a clock running (MetaMask's Advanced Permissions + "Agent Wallet" ent
   survives daemon compromise.
 - `60-x402.md` later phases — x402's exact/EVM scheme lists **ERC-7710 delegation** as a
   settlement method, so the delegation stack chosen here can carry machine payments too.
-- The public-proof artifacts: this spec, the on-camera revocation beat, a Walletbeat upstream
-  contribution proposing the session-key attribute the rubric currently lacks.
+- The public-proof artifacts: this spec and the on-camera revocation beat. (A Walletbeat upstream
+  contribution proposing the session-key attribute the rubric lacks was considered and **cut
+  2026-06-12** — revisit once the beat is shipped evidence.)
 
 ## Architecture / approach
 
@@ -78,12 +79,14 @@ SessionGrant {
 SessionRevoke { key_id: KeyId },          // -> Ack (on-chain revoke + local kill)
 
 struct SessionScope {
-    per_tx_cap_wei:  U256,
-    period_cap:      Option<(U256, Period)>, // e.g. 0.2 ETH / Day
+    per_tx_cap_wei:  U256,                 // the ONE spend cap in v1 (decision 2026-06-12)
     expiry_unix:     u64,                  // REQUIRED; no unbounded grants, ever
     allow_to:        Vec<Address>,         // REQUIRED non-empty; no any-target grants in v1
     token:           Option<Address>,      // None = native; Some = single ERC-20
 }
+// Deferred from v1 (cut 2026-06-12, both backends support them — pure additions later):
+// period caps (e.g. 0.2 ETH / Day) and per-method (selector) granularity. expiry + allow_to are
+// NOT caps and NOT cuttable: a grant without them is unbounded authority, the anti-pattern.
 ```
 
 - The **session key is generated and held by the daemon** in v1 (a second, lesser keystore
@@ -118,24 +121,23 @@ struct SessionScope {
 ## In-public deliverables (the point of this doc)
 
 1. This spec, public in-repo (done by merging it).
-2. The **revocation beat**: on the demo fork, the agent's session key transacts within caps →
+2. The **revocation beat**: on the demo fork, the agent's session key transacts within the cap →
    over-cap attempt **reverts on-chain** → human revokes (one tx) → next attempt reverts —
    recorded as the session-keys sibling of the Helios walk-away demo.
-3. **Walletbeat upstream contribution**: propose the scoped-permissions/session-key attribute
-   (`permissions-management` currently calls account permissions future work) — define the rubric,
-   don't just score on it.
-4. KB correction (file `01-landscape-2026.md`): MetaMask Advanced Permissions did **not** ship
+3. KB correction (file `01-landscape-2026.md`): MetaMask Advanced Permissions did **not** ship
    2026-04-06; Early Access opened **2026-06-08** (alongside "MetaMask Agent Wallet"), GA targeted
    summer 2026.
+
+(Cut 2026-06-12: the Walletbeat rubric contribution — revisit with shipped evidence.)
 
 ## Acceptance test (agent-runnable asserts, anvil Sepolia fork)
 
 ```
 Scenario "chain-enforced leash" (chosen backend deployed on the fork):
-  S1 SessionGrant{cap 0.05 ETH, daily 0.2, expiry 24h, allowlist [A]}
+  S1 SessionGrant{cap 0.05 ETH, expiry 24h, allowlist [A]}
                                   assert: Decision == NeedsApproval; card lists delegate
                                           identity + every scope field; approve → grant live
-  S2 session key → plain EIP-1559 tx within caps to A (no bundler process anywhere)
+  S2 session key → plain EIP-1559 tx within the cap to A (no bundler process anywhere)
                                   assert: lands; gas paid by session EOA
   S3 over-cap attempt             assert: REVERTS on-chain (fence #2, not a daemon Deny)
   S4 target B ∉ allowlist         assert: reverts on-chain
@@ -166,13 +168,9 @@ Scenario "chain-enforced leash" (chosen backend deployed on the fork):
 
 ## Open questions
 
-- Does `SessionScope` need per-method (selector) granularity in v1 (both backends support it), or
-  is target-allowlist + caps enough for the first grant card?
 - Funding the session EOA: at grant time (simple, visible) or lazily per low-gas pre-flight?
 - Should `RevokeAll`'s queued on-chain revokes broadcast even while the vault is locked
   (pre-signed revoke txs), or is "revoke on next unlock" honest enough for v1?
-- Walletbeat contribution timing: with this spec (rubric-first) or with the shipped beat
-  (evidence-first)?
 
 ## Sources
 
