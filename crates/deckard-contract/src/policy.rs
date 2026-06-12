@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::decision::{Decision, RequestId};
 use crate::intent::{Intent, IntentKind};
+use crate::swap_order::SwapOrder;
 
 /// The agent-readable policy. All caps are in wei.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -28,6 +29,10 @@ pub struct Policy {
     pub require_approval: ApprovalMode,
     /// Set true by `revoke_all` / STOP. Re-checked at execute time (TOCTOU guard).
     pub revoked: bool,
+    /// Per-token swap allowlist (sell+buy must both be present). **EMPTY = any token allowed.**
+    /// Daemon config populates it from `tokens_for(chain_id)`; agent-readable via PolicyGet.
+    #[serde(default)]
+    pub allow_swap_tokens: Vec<Address>,
 }
 
 /// When the policy gate raises a native approval card.
@@ -104,6 +109,51 @@ pub fn evaluate(intent: &Intent, policy: &Policy) -> Decision {
     }
 }
 
+/// The swap-order decision function — pure, like [`evaluate`]. Swaps NEVER auto-allow in v1:
+/// a valid order is ALWAYS `NeedsApproval`. `now` is unix-secs (injected so the fn stays pure).
+/// `wallet` is the daemon's unlocked address (the receiver/owner binding).
+pub fn evaluate_order(order: &SwapOrder, policy: &Policy, wallet: Address, now: u64) -> Decision {
+    if policy.revoked {
+        return Decision::Deny {
+            reason: "revoked".into(),
+        };
+    }
+    if order.receiver == Address::ZERO {
+        return Decision::Deny {
+            reason: "receiver_zero".into(),
+        };
+    }
+    if order.receiver != wallet {
+        return Decision::Deny {
+            reason: "receiver_not_wallet".into(),
+        };
+    }
+    // A zero sell amount is a garbage order (nothing to sell) and would let the shaped-approve
+    // gate admit an `approve(relayer, 0)`; refuse it outright. (`buy_amount_min == 0` is left
+    // valid: a max-slippage market sell is legitimate and the human sees it on the card.)
+    if order.sell_amount.is_zero() {
+        return Decision::Deny {
+            reason: "zero_amount".into(),
+        };
+    }
+    if !policy.allow_swap_tokens.is_empty()
+        && (!policy.allow_swap_tokens.contains(&order.sell_token)
+            || !policy.allow_swap_tokens.contains(&order.buy_token))
+    {
+        return Decision::Deny {
+            reason: "off_swap_list".into(),
+        };
+    }
+    if order.valid_to as u64 > now.saturating_add(86_400) {
+        return Decision::Deny {
+            reason: "valid_to_too_far".into(),
+        };
+    }
+    Decision::NeedsApproval {
+        request_id: RequestId::ZERO,
+    }
+}
+
 /// Shape check: does the calldata match the kind? The real Railgun adapter calldata is
 /// validated downstream (`10-kohaku-shield.md`); this only enforces the coarse invariant
 /// the policy gate relies on.
@@ -124,5 +174,201 @@ fn calldata_ok(intent: &Intent) -> bool {
         IntentKind::ContractCall | IntentKind::Shield | IntentKind::Unshield => {
             !intent.calldata.is_empty()
         }
+    }
+}
+
+#[cfg(test)]
+mod evaluate_order_tests {
+    use super::*;
+    use alloy_primitives::B256;
+
+    const NOW: u64 = 1_700_000_000;
+    const WALLET_BYTE: u8 = 0x11;
+
+    /// The wallet the daemon binds owner/receiver to in these vectors.
+    fn wallet() -> Address {
+        Address::repeat_byte(WALLET_BYTE)
+    }
+
+    /// A base policy: not revoked, empty swap allowlist (any token allowed). The other
+    /// caps are irrelevant to `evaluate_order` (it never inspects them).
+    fn base_policy() -> Policy {
+        Policy {
+            per_tx_cap_wei: U256::from(50u64),
+            daily_cap_wei: U256::from(1000u64),
+            spent_today_wei: U256::ZERO,
+            allow_to: vec![],
+            auto_shield_min_wei: U256::from(10u64),
+            require_approval: ApprovalMode::OverCap,
+            revoked: false,
+            allow_swap_tokens: vec![],
+        }
+    }
+
+    /// A well-formed order whose receiver == wallet and whose `valid_to` sits inside the
+    /// 24h horizon. Sub-tests mutate one field at a time off this baseline.
+    fn base_order() -> SwapOrder {
+        SwapOrder {
+            chain_id: 11155111,
+            owner: wallet(),
+            sell_token: Address::repeat_byte(0xA1),
+            buy_token: Address::repeat_byte(0xB2),
+            sell_amount: U256::from(1_000_000u64),
+            buy_amount_min: U256::from(900_000u64),
+            receiver: wallet(),
+            valid_to: (NOW + 3600) as u32,
+            app_data: B256::repeat_byte(0xCD),
+        }
+    }
+
+    #[test]
+    fn revoked_denies() {
+        let mut p = base_policy();
+        p.revoked = true;
+        assert_eq!(
+            evaluate_order(&base_order(), &p, wallet(), NOW),
+            Decision::Deny {
+                reason: "revoked".into()
+            }
+        );
+    }
+
+    #[test]
+    fn receiver_zero_denies() {
+        let order = SwapOrder {
+            receiver: Address::ZERO,
+            ..base_order()
+        };
+        assert_eq!(
+            evaluate_order(&order, &base_policy(), wallet(), NOW),
+            Decision::Deny {
+                reason: "receiver_zero".into()
+            }
+        );
+    }
+
+    #[test]
+    fn receiver_not_wallet_denies() {
+        let order = SwapOrder {
+            receiver: Address::repeat_byte(0x22),
+            ..base_order()
+        };
+        assert_eq!(
+            evaluate_order(&order, &base_policy(), wallet(), NOW),
+            Decision::Deny {
+                reason: "receiver_not_wallet".into()
+            }
+        );
+    }
+
+    #[test]
+    fn zero_sell_amount_denies() {
+        let order = SwapOrder {
+            sell_amount: alloy_primitives::U256::ZERO,
+            ..base_order()
+        };
+        assert_eq!(
+            evaluate_order(&order, &base_policy(), wallet(), NOW),
+            Decision::Deny {
+                reason: "zero_amount".into()
+            }
+        );
+    }
+
+    #[test]
+    fn empty_swap_list_allows_any_token() {
+        // Empty allowlist = any token: a well-formed order needs approval, never denied.
+        assert!(matches!(
+            evaluate_order(&base_order(), &base_policy(), wallet(), NOW),
+            Decision::NeedsApproval { .. }
+        ));
+    }
+
+    #[test]
+    fn sell_off_list_denies() {
+        let mut p = base_policy();
+        // buy_token present, sell_token absent.
+        p.allow_swap_tokens = vec![Address::repeat_byte(0xB2)];
+        assert_eq!(
+            evaluate_order(&base_order(), &p, wallet(), NOW),
+            Decision::Deny {
+                reason: "off_swap_list".into()
+            }
+        );
+    }
+
+    #[test]
+    fn buy_off_list_denies() {
+        let mut p = base_policy();
+        // sell_token present, buy_token absent.
+        p.allow_swap_tokens = vec![Address::repeat_byte(0xA1)];
+        assert_eq!(
+            evaluate_order(&base_order(), &p, wallet(), NOW),
+            Decision::Deny {
+                reason: "off_swap_list".into()
+            }
+        );
+    }
+
+    #[test]
+    fn both_off_list_denies() {
+        let mut p = base_policy();
+        p.allow_swap_tokens = vec![Address::repeat_byte(0xEE)];
+        assert_eq!(
+            evaluate_order(&base_order(), &p, wallet(), NOW),
+            Decision::Deny {
+                reason: "off_swap_list".into()
+            }
+        );
+    }
+
+    #[test]
+    fn both_on_list_needs_approval() {
+        let mut p = base_policy();
+        p.allow_swap_tokens = vec![Address::repeat_byte(0xA1), Address::repeat_byte(0xB2)];
+        assert!(matches!(
+            evaluate_order(&base_order(), &p, wallet(), NOW),
+            Decision::NeedsApproval { .. }
+        ));
+    }
+
+    #[test]
+    fn valid_to_at_horizon_is_allowed() {
+        // Boundary: valid_to == now + 86_400 (exactly 24h) is INSIDE the horizon.
+        let order = SwapOrder {
+            valid_to: (NOW + 86_400) as u32,
+            ..base_order()
+        };
+        assert!(matches!(
+            evaluate_order(&order, &base_policy(), wallet(), NOW),
+            Decision::NeedsApproval { .. }
+        ));
+    }
+
+    #[test]
+    fn valid_to_one_past_horizon_denies() {
+        // Boundary: valid_to == now + 86_401 is one second too far.
+        let order = SwapOrder {
+            valid_to: (NOW + 86_401) as u32,
+            ..base_order()
+        };
+        assert_eq!(
+            evaluate_order(&order, &base_policy(), wallet(), NOW),
+            Decision::Deny {
+                reason: "valid_to_too_far".into()
+            }
+        );
+    }
+
+    #[test]
+    fn well_formed_order_needs_approval_with_zero_placeholder() {
+        // A valid order never auto-allows: it is ALWAYS NeedsApproval, and the pure fn
+        // returns the ZERO placeholder id (the stateful caller mints the real one).
+        assert_eq!(
+            evaluate_order(&base_order(), &base_policy(), wallet(), NOW),
+            Decision::NeedsApproval {
+                request_id: RequestId::ZERO
+            }
+        );
     }
 }

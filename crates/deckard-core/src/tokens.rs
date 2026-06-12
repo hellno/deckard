@@ -68,3 +68,52 @@ pub const DEFAULT_TOKENS: &[TokenInfo] = &[
         decimals: 18,
     },
 ];
+
+/// The Sepolia (chain 11155111) swap-test set: the tokens the CoW Protocol orderbook
+/// supports on Sepolia. Used by the Swap v1 path; not for mainnet balance reads.
+///
+/// GOTCHA: the Sepolia *test* USDC at `0xbe72…D8Cb` is an 18-decimals mock, NOT the
+/// 6-decimals mainnet USDC. Hard-code 18 here — using 6 would misprice every Sepolia
+/// USDC amount by 10^12. (Mainnet USDC in `DEFAULT_TOKENS` is correctly 6.)
+pub const SEPOLIA_TOKENS: &[TokenInfo] = &[
+    TokenInfo {
+        address: address!("0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14"),
+        symbol: "WETH",
+        name: "Wrapped Ether",
+        decimals: 18,
+    },
+    TokenInfo {
+        address: address!("0x0625aFB445C3B6B7B929342a04A22599fd5dBB59"),
+        symbol: "COW",
+        name: "CoW Protocol Token",
+        decimals: 18,
+    },
+    TokenInfo {
+        address: address!("0xbe72E441BF55620febc26715db68d3494213D8Cb"),
+        symbol: "USDC",
+        name: "USD Coin (Sepolia test)",
+        decimals: 18, // test USDC is 18 decimals, NOT the 6 of mainnet USDC — see module note
+    },
+    TokenInfo {
+        address: address!("0x58Eb19eF91e8A6327FEd391b51aE1887b833cc91"),
+        symbol: "USDT",
+        name: "Tether USD (Sepolia test)",
+        decimals: 6,
+    },
+    TokenInfo {
+        address: address!("0xd3f3d46FeBCD4CdAa2B83799b7A5CdcB69d135De"),
+        symbol: "GNO",
+        name: "Gnosis Token",
+        decimals: 18,
+    },
+];
+
+/// The curated token list for a chain: mainnet (1) → [`DEFAULT_TOKENS`], Sepolia
+/// (11155111) → [`SEPOLIA_TOKENS`], any other chain → empty (no bundled list).
+pub fn tokens_for(chain_id: u64) -> &'static [TokenInfo] {
+    match chain_id {
+        1 => DEFAULT_TOKENS,
+        11155111 => SEPOLIA_TOKENS,
+        _ => &[],
+    }
+}

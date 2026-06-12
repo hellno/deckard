@@ -50,6 +50,7 @@ fn write_policy(dir: &std::path::Path, mode: ApprovalMode) {
         auto_shield_min_wei: U256::from(10_000_000_000_000_000u64),
         require_approval: mode,
         revoked: false,
+        allow_swap_tokens: vec![],
     };
     std::fs::write(
         dir.join("policy.json"),

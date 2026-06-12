@@ -12,12 +12,12 @@ use tokio::net::UnixStream;
 use zeroize::Zeroize;
 
 use deckard_contract::{
-    ApprovalStatus, Decision, ExecuteResult, Intent, RailgunViewGrant, RequestId, SignerRequest,
-    SignerResponse, UnlockOutcome,
+    ApprovalStatus, Decision, ExecuteResult, Intent, PendingRecord, RailgunViewGrant, RequestId,
+    SignOrderResult, SignerRequest, SignerResponse, SwapOrder, UnlockOutcome,
 };
 
 use crate::frame;
-use crate::request_id::request_id_for;
+use crate::request_id::{request_id_for, request_id_for_order};
 
 /// How long to keep retrying `connect` before giving up — covers the brief window where the
 /// app has spawned the daemon but it hasn't bound the socket yet.
@@ -203,6 +203,95 @@ impl SignerClient {
     /// derived locally (the daemon assigns the very same id).
     pub fn request_id_for_intent(intent: &Intent) -> RequestId {
         request_id_for(intent)
+    }
+
+    // --- swap order helpers (the agent proposes/signs/cancels CoW orders) ------------------
+
+    /// Propose a swap order → a `Decision`. A valid order is always `NeedsApproval` (swaps
+    /// never auto-allow in v1). The daemon binds the order's owner/receiver to the unlocked
+    /// wallet, so the returned id is for the BOUND order — derive it locally via
+    /// [`request_id_for_swap_order`](Self::request_id_for_swap_order) only after binding.
+    pub async fn propose_order(&self, order: &SwapOrder) -> anyhow::Result<Decision> {
+        match self
+            .request(&SignerRequest::ProposeOrder {
+                order: order.clone(),
+            })
+            .await?
+        {
+            SignerResponse::Decision(d) => Ok(d),
+            other => Err(unexpected("ProposeOrder", other)),
+        }
+    }
+
+    /// Blocking [`propose_order`](Self::propose_order).
+    pub fn propose_order_blocking(&self, order: &SwapOrder) -> anyhow::Result<Decision> {
+        match self.request_blocking(&SignerRequest::ProposeOrder {
+            order: order.clone(),
+        })? {
+            SignerResponse::Decision(d) => Ok(d),
+            other => Err(unexpected("ProposeOrder", other)),
+        }
+    }
+
+    /// Sign a stored, approved order's EIP-712 digest → its 65-byte signature (no HTTP).
+    pub async fn sign_order(&self, request_id: RequestId) -> anyhow::Result<SignOrderResult> {
+        match self
+            .request(&SignerRequest::SignOrder { request_id })
+            .await?
+        {
+            SignerResponse::SignOrder(r) => Ok(r),
+            other => Err(unexpected("SignOrder", other)),
+        }
+    }
+
+    /// Blocking [`sign_order`](Self::sign_order).
+    pub fn sign_order_blocking(&self, request_id: RequestId) -> anyhow::Result<SignOrderResult> {
+        match self.request_blocking(&SignerRequest::SignOrder { request_id })? {
+            SignerResponse::SignOrder(r) => Ok(r),
+            other => Err(unexpected("SignOrder", other)),
+        }
+    }
+
+    /// Broadcast an `invalidateOrder` cancel for a stored order → an [`ExecuteResult`].
+    pub async fn cancel_order(&self, request_id: RequestId) -> anyhow::Result<ExecuteResult> {
+        match self
+            .request(&SignerRequest::CancelOrder { request_id })
+            .await?
+        {
+            SignerResponse::Execute(r) => Ok(r),
+            other => Err(unexpected("CancelOrder", other)),
+        }
+    }
+
+    /// Blocking [`cancel_order`](Self::cancel_order).
+    pub fn cancel_order_blocking(&self, request_id: RequestId) -> anyhow::Result<ExecuteResult> {
+        match self.request_blocking(&SignerRequest::CancelOrder { request_id })? {
+            SignerResponse::Execute(r) => Ok(r),
+            other => Err(unexpected("CancelOrder", other)),
+        }
+    }
+
+    /// List every in-flight pending record WITH its payload — the GUI approval inbox.
+    pub async fn pending_list(&self) -> anyhow::Result<Vec<PendingRecord>> {
+        match self.request(&SignerRequest::PendingList).await? {
+            SignerResponse::Pending(records) => Ok(records),
+            other => Err(unexpected("PendingList", other)),
+        }
+    }
+
+    /// Blocking [`pending_list`](Self::pending_list).
+    pub fn pending_list_blocking(&self) -> anyhow::Result<Vec<PendingRecord>> {
+        match self.request_blocking(&SignerRequest::PendingList)? {
+            SignerResponse::Pending(records) => Ok(records),
+            other => Err(unexpected("PendingList", other)),
+        }
+    }
+
+    /// The deterministic request id for a swap order — lets a client poll/sign an order it
+    /// proposed. NOTE: the daemon binds `owner`/`receiver` to the unlocked wallet before
+    /// hashing, so the caller must bind the same fields before deriving a matching id.
+    pub fn request_id_for_swap_order(order: &SwapOrder) -> RequestId {
+        request_id_for_order(order)
     }
 }
 

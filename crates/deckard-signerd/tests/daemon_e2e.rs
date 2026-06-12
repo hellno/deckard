@@ -189,6 +189,7 @@ async fn off_allowlist_denies() {
         auto_shield_min_wei: U256::from(10_000_000_000_000_000u64),
         require_approval: ApprovalMode::OverCap,
         revoked: false,
+        allow_swap_tokens: vec![],
     };
     std::fs::write(
         dir.path().join("policy.json"),

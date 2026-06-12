@@ -22,7 +22,8 @@ use tokio::process::{Child, ChildStdin, Command};
 
 use deckard_contract::{
     evaluate, ApprovalMode, ApprovalStatus, Decision, ExecuteResult, Intent, Policy,
-    RailgunViewGrant, ReadStatus, RequestId, SignerRequest, SignerResponse, UnlockOutcome,
+    RailgunViewGrant, ReadStatus, RequestId, SignOrderResult, SignerRequest, SignerResponse,
+    UnlockOutcome,
 };
 use deckard_signerd::{frame, request_id_for};
 
@@ -104,6 +105,7 @@ pub fn demo_policy() -> Policy {
         auto_shield_min_wei: U256::from(10_000_000_000_000_000u128),
         require_approval: ApprovalMode::OverCap,
         revoked: false,
+        allow_swap_tokens: vec![], // empty = any token; swap tools land in the MCP child (#26)
     }
 }
 
@@ -209,6 +211,19 @@ impl MockState {
                     })
                 }
             }
+            // Swap (CoW) requests are exercised by the dedicated swap-trust-path + MCP-swap
+            // children (#24/#26); this MCP acceptance mock predates them and only needs to stay
+            // exhaustive. It answers honestly: it does not implement the swap path.
+            SignerRequest::ProposeOrder { .. } => SignerResponse::Decision(Decision::Deny {
+                reason: "swap_unsupported_in_mock".into(),
+            }),
+            SignerRequest::SignOrder { .. } => SignerResponse::SignOrder(SignOrderResult::Denied {
+                reason: "swap_unsupported_in_mock".into(),
+            }),
+            SignerRequest::CancelOrder { .. } => SignerResponse::Execute(ExecuteResult::Denied {
+                reason: "swap_unsupported_in_mock".into(),
+            }),
+            SignerRequest::PendingList => SignerResponse::Pending(Vec::new()),
         }
     }
 

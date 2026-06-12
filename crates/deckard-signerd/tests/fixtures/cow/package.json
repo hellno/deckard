@@ -1,0 +1,15 @@
+{
+  "name": "deckard-cow-kat-gen",
+  "private": true,
+  "type": "module",
+  "description": "Dev-only generator for the GPv2 Order EIP-712 known-answer vectors (tests/cow_kat.rs). Not part of the cargo build.",
+  "scripts": {
+    "gen": "tsx gen.ts"
+  },
+  "dependencies": {
+    "ethers": "^6.13.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0"
+  }
+}

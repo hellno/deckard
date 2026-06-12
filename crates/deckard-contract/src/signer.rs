@@ -7,7 +7,8 @@ use alloy_primitives::Address;
 use crate::decision::{Decision, RequestId};
 use crate::intent::Intent;
 use crate::policy::Policy;
-use crate::rpc::{ApprovalStatus, BalanceReport, ExecuteResult, UnlockOutcome};
+use crate::rpc::{ApprovalStatus, BalanceReport, ExecuteResult, SignOrderResult, UnlockOutcome};
+use crate::swap_order::SwapOrder;
 
 /// The daemon-socket API expressed as a trait, so callers can hold a `Box<dyn Signer>` and
 /// swap the mock for the real UDS client without changing a line. Object-safe: every method
@@ -36,4 +37,10 @@ pub trait Signer {
     fn status(&self, request_id: RequestId) -> ApprovalStatus;
     /// STOP: revoke all agent authority for the session and drop in-flight approvals.
     fn revoke_all(&self);
+    /// Swap-order policy check only — NEVER signs. Returns a [`Decision`].
+    fn propose_order(&self, order: &SwapOrder) -> Decision;
+    /// Sign a stored, approved order (EIP-712). Re-checks `revoked` at sign time (TOCTOU).
+    fn sign_order(&self, request_id: RequestId) -> SignOrderResult;
+    /// Broadcast an `invalidateOrder` cancel for a stored order.
+    fn cancel_order(&self, request_id: RequestId) -> ExecuteResult;
 }
