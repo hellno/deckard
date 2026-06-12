@@ -65,6 +65,7 @@ allow = [
 exceptions = [
     { allow = ["AGPL-3.0-or-later"], crate = "deckard-app" },
     { allow = ["AGPL-3.0-or-later"], crate = "deckard-core" },
+    { allow = ["AGPL-3.0-or-later"], crate = "deckard-mcp" },
     { allow = ["AGPL-3.0-or-later"], crate = "deckard-contract" },
     { allow = ["AGPL-3.0-or-later"], crate = "deckard-signerd" },
 ]
