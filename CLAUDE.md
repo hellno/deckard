@@ -42,3 +42,7 @@ before you're done. (For UI work you must build the app: `just check`.)
   for any genuinely-unrecoverable boundary, don't reach for a bare `unwrap`.
 
 **Always, every crate:** never log or `Debug`-print a seed, key, or passphrase — secrets stay in `Zeroizing`.
+
+## Language
+In docs, UI copy, and refusal/error strings: prefer plain words over crypto jargon, and explain a
+term once where it first appears (e.g. "shield — move funds to a private balance").

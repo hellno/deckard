@@ -39,9 +39,11 @@ hands the wheel to Claude Desktop.
 > is **slow** (many minutes; can exceed ~10 min on a cold machine). `just demo` runs that build
 > before the app window appears. Subsequent runs are incremental and fast.
 
-> **Fresh-clone to first shielded transaction: _measurement pending the launch gate_** (the cold
-> GPUI build above is stated separately, not folded into this number).
-> <!-- TTHW: measured at launch gate, fill before flipping public -->
+> **Quick prompt to first shielded transaction: under a minute.** Measured 2026-06-12 on a
+> running `just demo` (fresh `claude -p` session, the quick prompt below, doc fetched over the
+> network): policy read at ~20 s, shield proposed at ~28 s, transaction broadcast at ~32 s,
+> agent done at ~38 s. The cold GPUI build above is stated separately, not folded into this
+> number.
 
 ### Prerequisites
 
@@ -75,9 +77,16 @@ cargo build -p deckard-mcp   # one-time: the sidecar isn't on PATH; builds ./tar
                      #   -> merge it / re-run with --write, then RESTART Claude Desktop
 ```
 
-Then, in Claude Desktop, **ask Claude to "shield 0.02 ETH."** Claude calls `deckard_shield` →
-`deckard_execute`; the daemon enforces policy and signs; the split-balance bar flips public →
-private on screen.
+Then paste the **quick prompt** into a fresh Claude Desktop chat:
+
+```text
+Read https://github.com/hellno/deckard/blob/main/docs/build/31-agent-quickstart.md — then
+check my Deckard wallet policy and shield 0.02 ETH, staying inside the policy caps.
+```
+
+Claude reads the [agent quickstart](docs/build/31-agent-quickstart.md), calls
+`deckard_policy_get` → `deckard_shield` → `deckard_execute`; the daemon enforces policy and
+signs; the split-balance bar flips public → private on screen.
 
 > Stuck? Run **`just demo-check`** — it verifies foundry, `RPC_URL_SEPOLIA`, the local fork, the
 > signerd build, and that the app is running + unlocked on the right chain, then prints the exact
@@ -212,6 +221,7 @@ UI work.
 
 ## Where to read more
 
+- [`docs/build/31-agent-quickstart.md`](docs/build/31-agent-quickstart.md) — the canonical agent-facing quickstart: install one-liner, the 6 tools, policy fields, every deny reason with its fix, demo constants.
 - [`docs/build/30-mcp-shape.md`](docs/build/30-mcp-shape.md) — the MCP / daemon-socket wire contract and the `mcp.v0.1` 6-tool profile.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md#demo--local-chain-dev-loop) — the demo / local-chain dev loop in full, with the `DECKARD_*` env-var table.
 - [`THREAT-MODEL.md`](THREAT-MODEL.md) — what the agent surface defends against, what it does not, and the residual risks.

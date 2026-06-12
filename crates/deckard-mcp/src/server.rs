@@ -181,3 +181,61 @@ pub async fn serve_stdio(sidecar: Sidecar) -> anyhow::Result<()> {
     service.waiting().await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+    use std::path::Path;
+
+    /// Lowercase `deckard_*` tokens in a text — the documented convention for MCP tool
+    /// names (env vars are UPPERCASE and crate names use hyphens, so neither matches).
+    fn tool_tokens(text: &str) -> BTreeSet<String> {
+        text.split(|c: char| !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'))
+            .filter(|w| w.starts_with("deckard_") && w.len() > "deckard_".len())
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn registered_tools() -> BTreeSet<String> {
+        DeckardMcp::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect()
+    }
+
+    fn repo_file(rel: &str) -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(rel);
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    }
+
+    /// Drift guard for the canonical agent quickstart (issue #27): the tool names the doc
+    /// teaches are exactly the registered tool names — add or rename a tool without
+    /// updating the page and the build fails.
+    #[test]
+    fn quickstart_doc_lists_exactly_the_registered_tools() {
+        let doc = repo_file("docs/build/31-agent-quickstart.md");
+        assert_eq!(
+            tool_tokens(&doc),
+            registered_tools(),
+            "docs/build/31-agent-quickstart.md and the deckard-mcp tool registry disagree \
+             — update the doc's tool list to match the registered tools"
+        );
+    }
+
+    /// The README quick-prompt path may mention a subset of the tools, but never one that
+    /// doesn't exist.
+    #[test]
+    fn readme_mentions_only_registered_tools() {
+        let mentioned = tool_tokens(&repo_file("README.md"));
+        let registered = registered_tools();
+        let ghosts: Vec<_> = mentioned.difference(&registered).collect();
+        assert!(
+            ghosts.is_empty(),
+            "README.md names tools that are not registered: {ghosts:?}"
+        );
+    }
+}

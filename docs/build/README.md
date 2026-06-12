@@ -19,6 +19,7 @@ live on mainnet, agent-driven (Claude Desktop via MCP), shielded via Railgun, ve
 | [`10-kohaku-shield.md`](10-kohaku-shield.md) | The **hero action**: auto-shield via Kohaku's pure-Rust `railgun` crate. **R1 retired** — full shield→unshield runs from our edge, and shield is *instant* (no client proof; ZK proving is on the spend). |
 | [`20-helios-sidecar.md`](20-helios-sidecar.md) | **Trustless reads + walkaway** via embedded `helios-ethereum` 0.11.1 (git-only). **R2 proven** + verified reads **integrated** into `EthProvider`/signerd behind `verified-reads`. |
 | [`30-mcp-shape.md`](30-mcp-shape.md) | The **agent surface** (one binary = CLI + MCP server, key-less) **and the freeze-first contract**. Contract + daemon socket built; the `deckard-mcp` binary is not yet. |
+| [`31-agent-quickstart.md`](31-agent-quickstart.md) | The **canonical agent-facing quickstart**: install one-liner, the 6 `mcp.v0.1` tools, policy fields, every deny reason with its fix, demo constants. The tool list is drift-guarded by a test in `deckard-mcp`. |
 
 ## Build order (what gates what)
 

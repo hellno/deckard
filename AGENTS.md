@@ -47,6 +47,10 @@ bare `unwrap`.
 
 **Always:** never log or `Debug`-print a seed, key, or passphrase. Secrets live in `Zeroizing`.
 
+## Language
+In docs, UI copy, and refusal/error strings: prefer plain words over crypto jargon, and explain a
+term once where it first appears (e.g. "shield — move funds to a private balance").
+
 ## Design
 Before any visual/UI change, read `DESIGN.md` (and the constraints in `CLAUDE.md`). Ground design in
 the real reference screenshots, not remembered descriptions.
