@@ -18,7 +18,9 @@ Legend: ✅ done + tested · 🟡 partial / integrated-not-finished · 🧪 spik
 > What is **still** honestly true: the network-dependent `signerd/shield_e2e` remains `#[ignore]` (needs a local
 > `anvil`/fork + archive RPC, not run by default `cargo test`); the MCP acceptance suite runs by default but drives a
 > **mock signerd** (deterministic tx hash, no live broadcast); the **demo `.gif` re-record is pending**; the README's
-> **TTHW measurement is pending** (fresh-clone gate); **Send UI stays gated**
+> **TTHW measurement is pending** — the harness for it is now in place (the README quick prompt + the agent
+> quickstart `docs/build/31-agent-quickstart.md`, issue #27): run the quick prompt in a fresh agent session against a
+> running `just demo` and record the minutes here; **Send UI stays gated**
 > ("next release") and **Swap is a disabled TODO** (Send + Swap is the first post-launch milestone). "Tested" below
 > still includes some mocked-transport / fake-daemon unit tests — noted per row.
 
