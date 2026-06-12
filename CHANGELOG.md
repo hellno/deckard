@@ -42,6 +42,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Agent-path shields now show up on refresh.** The in-app refresh re-scans the shielded
+  balance too (`refresh_portfolio` previously refetched only the public portfolio, so a
+  shield driven through `deckard-mcp` stayed invisible until the next unlock).
+- **The Atlas policy card renders the signer's live policy.** The agent home previously
+  showed hardcoded placeholder values (a weekly budget, a session-key expiry, an autonomy
+  line — none of which exist); it now fetches the daemon's policy via `PolicyGet` and
+  renders the same fence `deckard_policy_get` shows an MCP client, including spent-today,
+  the approval mode, and the STOP state.
+- **README/CONTRIBUTING quickstarts now build `deckard-mcp` before invoking it.** The
+  previous instructions called a binary that is not on `PATH` in a fresh clone.
+
 ### Security
 
 - **Reason / RPC redaction.** Denial reasons and the logged RPC URL are sanitized so that
