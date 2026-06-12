@@ -181,6 +181,11 @@ pub struct Shell {
     /// The capture-block state last pushed to the OS, so `render` only re-issues the
     /// native `setSharingType` call when `capture_block && mask` actually changes.
     capture_applied: bool,
+    /// Recording override (`DECKARD_ALLOW_SCREEN_CAPTURE`): when set, force the capture block
+    /// OFF regardless of the `capture_block` setting, so an automated agent can record the demo
+    /// GIF without touching the settings UI. Resolved once at launch; default false (the setting
+    /// governs) — a normal build never disables the trust feature behind the user's back.
+    pub allow_screen_capture: bool,
 
     // --- shield trigger flow (T5) ---
     /// Deposit amount (ETH, free text) and the `0zk…` recipient. Free-text recipient is v1;
@@ -448,6 +453,16 @@ impl Shell {
             },
         );
 
+        // Recording override: disabling a trust feature must never be silent. Resolve it once
+        // here and say so loudly when active (it only flips on for an explicit env opt-in).
+        let allow_screen_capture = deckard_core::screen_capture_allowed();
+        if allow_screen_capture {
+            eprintln!(
+                "deckard: screen-capture block DISABLED via DECKARD_ALLOW_SCREEN_CAPTURE — \
+                 recording mode (the privacy capture-block is held off this session)"
+            );
+        }
+
         // Spawn + supervise the process-isolated signer daemon. It owns the key; the app is a
         // key-less client that unlocks/signs over the socket. The daemon broadcasts via the
         // same RPC the app reads from, on the same resolved chain.
@@ -469,6 +484,7 @@ impl Shell {
             mask,
             agent_acting: false,
             capture_applied: false,
+            allow_screen_capture,
             shield_amount,
             shield_recipient,
             shield_proposal: None,
@@ -1466,7 +1482,9 @@ impl Shell {
     /// Called once per `render`; the change-guard makes it a no-op on most frames. On a
     /// non-macOS or non-`tray` build `apply_capture_block` is itself an inert no-op.
     fn sync_capture_block(&mut self) {
-        let desired = self.settings.capture_block && self.mask;
+        // `allow_screen_capture` (the DECKARD_ALLOW_SCREEN_CAPTURE recording override) forces the
+        // block off even when the setting + mask would otherwise engage it.
+        let desired = self.settings.capture_block && self.mask && !self.allow_screen_capture;
         if desired != self.capture_applied {
             crate::capture::apply_capture_block(desired);
             self.capture_applied = desired;

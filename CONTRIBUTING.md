@@ -163,6 +163,7 @@ is the odd one out — it's anvil's upstream fork source, read only by `just dem
 | `DECKARD_RPC_URL` | app, daemon | public RPC | **Yes** — may carry an API key; redacted in logs |
 | `DECKARD_VERIFIED_READS` | core (app/daemon) | on (`1`) | No |
 | `DECKARD_DEMO_FORK_BLOCK` | core (app/daemon) | unset (live, unpinned) | No |
+| `DECKARD_ALLOW_SCREEN_CAPTURE` | app (capture block) | off (block honored per setting) | No |
 | `DECKARD_SIGNERD_BIN` | app (daemon resolution) | sibling of app binary | No |
 | `RPC_URL_SEPOLIA` | `just demo` / `just demo-check` only (anvil `--fork-url`) | unset (required for demo) | **Yes** — archive RPC, may carry an API key |
 
