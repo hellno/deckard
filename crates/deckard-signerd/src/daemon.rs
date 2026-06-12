@@ -20,9 +20,9 @@ use tokio::sync::Mutex as AsyncMutex;
 use zeroize::Zeroizing;
 
 use deckard_contract::{
-    evaluate, evaluate_order, ApprovalStatus, BalanceReport, Decision, ExecuteResult, Intent,
-    IntentKind, PendingPayloadView, PendingRecord, Policy, ReadStatus, RequestId, SignOrderResult,
-    SignerRequest, SignerResponse, SwapOrder, UnlockOutcome,
+    deny_reasons, evaluate, evaluate_order, ApprovalStatus, BalanceReport, Decision, ExecuteResult,
+    Intent, IntentKind, PendingPayloadView, PendingRecord, Policy, ReadStatus, RequestId,
+    SignOrderResult, SignerRequest, SignerResponse, SwapOrder, UnlockOutcome,
 };
 // Only the `shield`-gated view-grant handler constructs this; an unconditional import would
 // warn in the no-default-features build (e.g. deckard-mcp's dependency edge).
@@ -255,7 +255,7 @@ impl Daemon {
                 VaultState::Unlocked { address, .. } => SignerResponse::Address(*address),
                 // No Address-specific error variant exists; signal locked Deny-style.
                 VaultState::Locked => SignerResponse::Decision(Decision::Deny {
-                    reason: "locked".into(),
+                    reason: deny_reasons::LOCKED.into(),
                 }),
             },
             SignerRequest::Balance { shielded } => {
@@ -287,13 +287,13 @@ impl Daemon {
             VaultState::Unlocked { vault, .. } => vault,
             VaultState::Locked => {
                 return SignerResponse::Decision(Decision::Deny {
-                    reason: "locked".into(),
+                    reason: deny_reasons::LOCKED.into(),
                 })
             }
         };
         if !deckard_core::known_answer_ok() {
             return SignerResponse::Decision(Decision::Deny {
-                reason: "derivation_unverified".into(),
+                reason: deny_reasons::DERIVATION_UNVERIFIED.into(),
             });
         }
         match vault.railgun_view_grant(chain_id, index) {
@@ -302,7 +302,7 @@ impl Daemon {
                 viewing_key,
             }),
             Err(e) => SignerResponse::Decision(Decision::Deny {
-                reason: format!("railgun_keys: {}", one_line(&e)),
+                reason: deny_reasons::railgun_keys(one_line(&e)),
             }),
         }
     }
@@ -311,7 +311,7 @@ impl Daemon {
     #[cfg(not(feature = "shield"))]
     fn railgun_view_grant(&self, _chain_id: u64, _index: u32) -> SignerResponse {
         SignerResponse::Decision(Decision::Deny {
-            reason: "shield_unavailable".into(),
+            reason: deny_reasons::SHIELD_UNAVAILABLE.into(),
         })
     }
 
@@ -367,7 +367,7 @@ impl Daemon {
                 )
             {
                 req.status = ApprovalStatus::Denied {
-                    reason: "revoked".into(),
+                    reason: deny_reasons::REVOKED.into(),
                 };
             }
         }
@@ -384,7 +384,7 @@ impl Daemon {
                     req.approved = true; // explicit human consent: not re-capped at execute
                 } else {
                     req.status = ApprovalStatus::Denied {
-                        reason: "user_denied".into(),
+                        reason: deny_reasons::USER_DENIED.into(),
                     };
                 }
             }
@@ -409,12 +409,12 @@ impl Daemon {
         // means a `locked` deny now implies the chain matched.
         if intent.chain_id != self.cfg.chain_id {
             return Decision::Deny {
-                reason: "chain_mismatch".into(),
+                reason: deny_reasons::CHAIN_MISMATCH.into(),
             };
         }
         if matches!(self.state, VaultState::Locked) {
             return Decision::Deny {
-                reason: "locked".into(),
+                reason: deny_reasons::LOCKED.into(),
             };
         }
         // SHAPED APPROVE (swap v1): a `ContractCall` carrying an exact `approve(spender,amount)`
@@ -442,7 +442,7 @@ impl Daemon {
         // / ContractCall stay a fast-follow.
         if !matches!(intent.kind, IntentKind::Send | IntentKind::Shield) {
             return Decision::Deny {
-                reason: "unsupported_v1".into(),
+                reason: deny_reasons::UNSUPPORTED_V1.into(),
             };
         }
         // v1 spine is native ETH only; an ERC-20 (`token = Some`) Send is a fast-follow.
@@ -450,7 +450,7 @@ impl Daemon {
         // wrapBase), so it passes this guard.
         if intent.token.is_some() {
             return Decision::Deny {
-                reason: "erc20_unsupported_v1".into(),
+                reason: deny_reasons::ERC20_UNSUPPORTED_V1.into(),
             };
         }
         // A Shield must target the chain's RelayAdapt contract. The contract crate's policy
@@ -458,7 +458,7 @@ impl Daemon {
         // within-cap "Shield" to an arbitrary address would be signed (see [`relay_adapt`]).
         if intent.kind == IntentKind::Shield && relay_adapt(intent.chain_id) != Some(intent.to) {
             return Decision::Deny {
-                reason: "shield_to_mismatch".into(),
+                reason: deny_reasons::SHIELD_TO_MISMATCH.into(),
             };
         }
 
@@ -486,7 +486,7 @@ impl Daemon {
         if let Some(existing) = self.requests.get(&id) {
             return match &existing.status {
                 _ if existing.broadcast.is_some() => Decision::Deny {
-                    reason: "already_executed".into(),
+                    reason: deny_reasons::ALREADY_EXECUTED.into(),
                 },
                 ApprovalStatus::Pending => Decision::NeedsApproval { request_id: id },
                 ApprovalStatus::Allowed => Decision::Allow,
@@ -494,7 +494,7 @@ impl Daemon {
                     reason: reason.clone(),
                 },
                 ApprovalStatus::Expired => Decision::Deny {
-                    reason: "expired".into(),
+                    reason: deny_reasons::EXPIRED.into(),
                 },
             };
         }
@@ -516,7 +516,7 @@ impl Daemon {
         let status = if always_needs_card {
             if self.policy.revoked {
                 return Decision::Deny {
-                    reason: "revoked".into(),
+                    reason: deny_reasons::REVOKED.into(),
                 };
             }
             ApprovalStatus::Pending
@@ -574,12 +574,12 @@ impl Daemon {
         // on the card. Bounding it here is the only place the value is gated.
         if intent.value != U256::ZERO {
             return Some(Decision::Deny {
-                reason: "approve_with_value".into(),
+                reason: deny_reasons::APPROVE_WITH_VALUE.into(),
             });
         }
         if spender != deckard_core::GPV2_VAULT_RELAYER {
             return Some(Decision::Deny {
-                reason: "approve_wrong_spender".into(),
+                reason: deny_reasons::APPROVE_WRONG_SPENDER.into(),
             });
         }
         let has_matching_order = self.requests.values().any(|req| match &req.payload {
@@ -590,7 +590,7 @@ impl Daemon {
         });
         if !has_matching_order {
             return Some(Decision::Deny {
-                reason: "approve_no_matching_order".into(),
+                reason: deny_reasons::APPROVE_NO_MATCHING_ORDER.into(),
             });
         }
         None
@@ -610,7 +610,7 @@ impl Daemon {
         // `chain_mismatch` even while locked.
         if order.chain_id != self.cfg.chain_id {
             return Decision::Deny {
-                reason: "chain_mismatch".into(),
+                reason: deny_reasons::CHAIN_MISMATCH.into(),
             };
         }
         // We need the unlocked wallet to bind owner/receiver, so a locked daemon can't propose.
@@ -618,7 +618,7 @@ impl Daemon {
             VaultState::Unlocked { address, .. } => *address,
             VaultState::Locked => {
                 return Decision::Deny {
-                    reason: "locked".into(),
+                    reason: deny_reasons::LOCKED.into(),
                 }
             }
         };
@@ -635,7 +635,7 @@ impl Daemon {
         if let Some(existing) = self.requests.get(&id) {
             return match &existing.status {
                 _ if existing.broadcast.is_some() => Decision::Deny {
-                    reason: "already_executed".into(),
+                    reason: deny_reasons::ALREADY_EXECUTED.into(),
                 },
                 ApprovalStatus::Pending => Decision::NeedsApproval { request_id: id },
                 ApprovalStatus::Allowed => Decision::Allow,
@@ -643,7 +643,7 @@ impl Daemon {
                     reason: reason.clone(),
                 },
                 ApprovalStatus::Expired => Decision::Deny {
-                    reason: "expired".into(),
+                    reason: deny_reasons::EXPIRED.into(),
                 },
             };
         }
@@ -683,7 +683,7 @@ impl Daemon {
             let vault = match &self.state {
                 VaultState::Locked => {
                     return SignOrderResult::Denied {
-                        reason: "revoked".into(),
+                        reason: deny_reasons::REVOKED.into(),
                     }
                 }
                 VaultState::Unlocked { vault, .. } => vault,
@@ -691,7 +691,7 @@ impl Daemon {
             let req = match self.requests.get(&request_id) {
                 None => {
                     return SignOrderResult::Denied {
-                        reason: "unknown_request".into(),
+                        reason: deny_reasons::UNKNOWN_REQUEST.into(),
                     }
                 }
                 Some(req) => req,
@@ -700,20 +700,20 @@ impl Daemon {
                 PendingPayload::Order(order) => order,
                 PendingPayload::Tx(_) => {
                     return SignOrderResult::Denied {
-                        reason: "not_an_order".into(),
+                        reason: deny_reasons::NOT_AN_ORDER.into(),
                     }
                 }
             };
             if req.signature.is_some() {
                 return SignOrderResult::Denied {
-                    reason: "already_signed".into(),
+                    reason: deny_reasons::ALREADY_SIGNED.into(),
                 };
             }
             match &req.status {
                 ApprovalStatus::Allowed => {}
                 ApprovalStatus::Pending => {
                     return SignOrderResult::Denied {
-                        reason: "not_approved".into(),
+                        reason: deny_reasons::NOT_APPROVED.into(),
                     }
                 }
                 ApprovalStatus::Denied { reason } => {
@@ -723,7 +723,7 @@ impl Daemon {
                 }
                 ApprovalStatus::Expired => {
                     return SignOrderResult::Denied {
-                        reason: "expired".into(),
+                        reason: deny_reasons::EXPIRED.into(),
                     }
                 }
             }
@@ -731,7 +731,7 @@ impl Daemon {
             // record's status if the brake landed via a policy path; refuse on the live flag.
             if self.policy.revoked {
                 return SignOrderResult::Denied {
-                    reason: "revoked".into(),
+                    reason: deny_reasons::REVOKED.into(),
                 };
             }
             let digest = deckard_core::order_digest(order);
@@ -739,7 +739,7 @@ impl Daemon {
                 Ok(s) => s,
                 Err(e) => {
                     return SignOrderResult::Denied {
-                        reason: format!("signer_error: {}", one_line(&e)),
+                        reason: deny_reasons::signer_error(one_line(&e)),
                     }
                 }
             };
@@ -752,7 +752,7 @@ impl Daemon {
             Ok(sig) => sig,
             Err(e) => {
                 return SignOrderResult::Denied {
-                    reason: format!("sign_failed: {}", one_line(&e)),
+                    reason: deny_reasons::sign_failed(one_line(&e)),
                 }
             }
         };
@@ -774,12 +774,12 @@ impl Daemon {
         match self.requests.get(&request_id) {
             None => {
                 return ExecuteResult::Denied {
-                    reason: "unknown_request".into(),
+                    reason: deny_reasons::UNKNOWN_REQUEST.into(),
                 }
             }
             Some(req) if !matches!(req.payload, PendingPayload::Order(_)) => {
                 return ExecuteResult::Denied {
-                    reason: "not_an_order".into(),
+                    reason: deny_reasons::NOT_AN_ORDER.into(),
                 }
             }
             Some(_) => {}
@@ -798,7 +798,7 @@ impl Daemon {
             let vault = match &self.state {
                 VaultState::Locked => {
                     return ExecuteResult::Denied {
-                        reason: "revoked".into(),
+                        reason: deny_reasons::REVOKED.into(),
                     }
                 }
                 VaultState::Unlocked { vault, .. } => vault,
@@ -808,13 +808,13 @@ impl Daemon {
                     PendingPayload::Order(order) => order,
                     PendingPayload::Tx(_) => {
                         return ExecuteResult::Denied {
-                            reason: "not_an_order".into(),
+                            reason: deny_reasons::NOT_AN_ORDER.into(),
                         }
                     }
                 },
                 None => {
                     return ExecuteResult::Denied {
-                        reason: "unknown_request".into(),
+                        reason: deny_reasons::UNKNOWN_REQUEST.into(),
                     }
                 }
             };
@@ -825,7 +825,7 @@ impl Daemon {
                 Ok(s) => s,
                 Err(e) => {
                     return ExecuteResult::Denied {
-                        reason: format!("signer_error: {}", one_line(&e)),
+                        reason: deny_reasons::signer_error(one_line(&e)),
                     }
                 }
             };
@@ -846,12 +846,12 @@ impl Daemon {
             Ok(Ok(hash)) => hash,
             Ok(Err(e)) => {
                 return ExecuteResult::Denied {
-                    reason: format!("broadcast_failed: {}", one_line(&e)),
+                    reason: deny_reasons::broadcast_failed(one_line(&e)),
                 }
             }
             Err(_elapsed) => {
                 return ExecuteResult::Denied {
-                    reason: "broadcast_timeout".into(),
+                    reason: deny_reasons::BROADCAST_TIMEOUT.into(),
                 }
             }
         };
@@ -915,7 +915,7 @@ impl Daemon {
                 // STOP landed first — refuse even a previously-approved request.
                 VaultState::Locked => {
                     return ExecuteResult::Denied {
-                        reason: "revoked".into(),
+                        reason: deny_reasons::REVOKED.into(),
                     }
                 }
                 VaultState::Unlocked { vault, .. } => vault,
@@ -923,14 +923,14 @@ impl Daemon {
             let req = match self.requests.get(&request_id) {
                 None => {
                     return ExecuteResult::Denied {
-                        reason: "unknown_request".into(),
+                        reason: deny_reasons::UNKNOWN_REQUEST.into(),
                     }
                 }
                 Some(req) => req,
             };
             if req.broadcast.is_some() {
                 return ExecuteResult::Denied {
-                    reason: "already_executed".into(),
+                    reason: deny_reasons::ALREADY_EXECUTED.into(),
                 };
             }
             match &req.status {
@@ -938,7 +938,7 @@ impl Daemon {
                 ApprovalStatus::Allowed => {}
                 ApprovalStatus::Pending => {
                     return ExecuteResult::Denied {
-                        reason: "not_approved".into(),
+                        reason: deny_reasons::NOT_APPROVED.into(),
                     }
                 }
                 ApprovalStatus::Denied { reason } => {
@@ -948,7 +948,7 @@ impl Daemon {
                 }
                 ApprovalStatus::Expired => {
                     return ExecuteResult::Denied {
-                        reason: "expired".into(),
+                        reason: deny_reasons::EXPIRED.into(),
                     }
                 }
             }
@@ -959,7 +959,7 @@ impl Daemon {
                 PendingPayload::Tx(intent) => intent,
                 PendingPayload::Order(_) => {
                     return ExecuteResult::Denied {
-                        reason: "not_an_order".into(),
+                        reason: deny_reasons::NOT_AN_ORDER.into(),
                     }
                 }
             };
@@ -969,14 +969,14 @@ impl Daemon {
             // its overage and is not re-capped.
             if !req.approved && evaluate(intent, &self.policy) != Decision::Allow {
                 return ExecuteResult::Denied {
-                    reason: "cap_exceeded".into(),
+                    reason: deny_reasons::CAP_EXCEEDED.into(),
                 };
             }
             let signer = match vault.account_signer(0) {
                 Ok(s) => s,
                 Err(e) => {
                     return ExecuteResult::Denied {
-                        reason: format!("signer_error: {}", one_line(&e)),
+                        reason: deny_reasons::signer_error(one_line(&e)),
                     }
                 }
             };
@@ -1003,12 +1003,12 @@ impl Daemon {
             Ok(Ok(hash)) => hash,
             Ok(Err(e)) => {
                 return ExecuteResult::Denied {
-                    reason: format!("broadcast_failed: {}", one_line(&e)),
+                    reason: deny_reasons::broadcast_failed(one_line(&e)),
                 }
             }
             Err(_elapsed) => {
                 return ExecuteResult::Denied {
-                    reason: "broadcast_timeout".into(),
+                    reason: deny_reasons::BROADCAST_TIMEOUT.into(),
                 }
             }
         };
@@ -1028,7 +1028,7 @@ impl Daemon {
         match self.requests.get(&request_id) {
             Some(req) => req.status.clone(),
             None => ApprovalStatus::Denied {
-                reason: "unknown_request".into(),
+                reason: deny_reasons::UNKNOWN_REQUEST.into(),
             },
         }
     }

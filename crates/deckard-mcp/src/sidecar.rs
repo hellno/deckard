@@ -13,8 +13,8 @@ use serde_json::json;
 use zeroize::Zeroizing;
 
 use deckard_contract::{
-    ApprovalMode, Decision, ExecuteResult, Intent, IntentKind, Policy, ReadStatus, SignerRequest,
-    SignerResponse,
+    deny_reasons, ApprovalMode, Decision, ExecuteResult, Intent, IntentKind, Policy, ReadStatus,
+    SignerRequest, SignerResponse,
 };
 use deckard_signerd::SignerClient;
 
@@ -116,13 +116,17 @@ impl Sidecar {
             .request(&SignerRequest::Propose { intent: probe })
             .await?
         {
-            SignerResponse::Decision(Decision::Deny { reason }) if reason == "chain_mismatch" => {
+            SignerResponse::Decision(Decision::Deny { reason })
+                if reason == deny_reasons::CHAIN_MISMATCH =>
+            {
                 Err(failure::from_deny_reason(
-                    "chain_mismatch",
+                    deny_reasons::CHAIN_MISMATCH,
                     self.config_dir(),
                 ))
             }
-            SignerResponse::Decision(Decision::Deny { reason }) if reason == "locked" => {
+            SignerResponse::Decision(Decision::Deny { reason })
+                if reason == deny_reasons::LOCKED =>
+            {
                 // Conclusive: the daemon checks chain BEFORE locked, so a `locked` reply
                 // means the chain matched. Cache the success; the real call surfaces `locked`.
                 self.chain_checked.store(true, Ordering::Relaxed);
