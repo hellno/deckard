@@ -22,9 +22,8 @@ pub struct Command {
 
 /// One ranked, displayable result.
 pub struct Ranked {
-    pub cmd_index: usize, // index into the `commands` slice passed to rank()
-    pub matched_alias: Option<&'static str>, // Some(alias) when an alias outscored the title
-    pub positions: Vec<usize>, // char positions to bold in the TITLE (empty if alias matched)
+    pub cmd_index: usize,      // index into the `commands` slice passed to rank()
+    pub positions: Vec<usize>, // char positions to bold in the TITLE (empty when an alias matched)
 }
 
 /// The static registry. Dynamic display labels for mask/theme/agent are applied
@@ -121,7 +120,7 @@ const SCORE_TIE_EPSILON: u32 = 8;
 
 /// Rank for `query`:
 ///  - empty query → ALL commands, ordered by `usage.frecency(id, now)` desc, then
-///    registry order; `positions` empty, `matched_alias` None.
+///    registry order; `positions` empty.
 ///  - non-empty → fuzzy score = max over (title, *aliases) via nucleo; drop
 ///    non-matches; order by score desc with frecency as a gentle tiebreak (never
 ///    overrides a clearly-better score). `positions` come from the TITLE match only.
@@ -145,7 +144,6 @@ pub fn rank(
             .into_iter()
             .map(|cmd_index| Ranked {
                 cmd_index,
-                matched_alias: None,
                 positions: Vec::new(),
             })
             .collect();
@@ -160,7 +158,6 @@ pub fn rank(
     struct Scored {
         cmd_index: usize,
         score: u32,
-        matched_alias: Option<&'static str>,
         positions: Vec<usize>,
         frecency: f32,
     }
@@ -174,32 +171,32 @@ pub fn rank(
         // ASCII titles ⇒ char index == byte index; positions index the title's chars.
         let title_positions: Vec<usize> = idx.iter().map(|&p| p as usize).collect();
 
-        // Best score + the source that produced it; ties keep the title (so we
-        // surface the title's bold positions rather than tagging it an alias).
+        // Best score across the title + aliases. Ties keep the title so its bold
+        // positions survive; a strictly-better alias wins the score but contributes
+        // no highlight (we only ever bold the title).
         let mut best_score = title_score;
-        let mut best_alias: Option<&'static str> = None;
+        let mut title_is_best = title_score.is_some();
 
         for &alias in cmd.aliases {
             idx.clear(); // probe alias; we don't keep its positions (title-only highlight)
             if let Some(s) = pat.indices(Utf32Str::new(alias, &mut buf), matcher, &mut idx) {
                 if best_score.is_none_or(|b| s > b) {
                     best_score = Some(s);
-                    best_alias = Some(alias);
+                    title_is_best = false; // an alias strictly beat the title
                 }
             }
         }
 
         if let Some(score) = best_score {
-            // When an alias strictly won, the title may not even have matched;
-            // report the alias and leave `positions` empty per the contract.
-            let (matched_alias, positions) = match best_alias {
-                Some(a) => (Some(a), Vec::new()),
-                None => (None, title_positions),
+            // Bold the title only when it (not an alias) produced the best score.
+            let positions = if title_is_best {
+                title_positions
+            } else {
+                Vec::new()
             };
             scored.push(Scored {
                 cmd_index,
                 score,
-                matched_alias,
                 positions,
                 frecency: usage.frecency(cmd.id, now),
             });
@@ -224,7 +221,6 @@ pub fn rank(
         .into_iter()
         .map(|s| Ranked {
             cmd_index: s.cmd_index,
-            matched_alias: s.matched_alias,
             positions: s.positions,
         })
         .collect()
@@ -289,8 +285,7 @@ mod tests {
             .iter()
             .find(|r| COMMANDS[r.cmd_index].id == "mask")
             .expect("\"show\" must match the mask command via its \"show\" alias");
-        // Alias match ⇒ flagged as such, with no title positions to bold.
-        assert_eq!(mask.matched_alias, Some("show"));
+        // Alias match ⇒ no title positions to bold.
         assert!(mask.positions.is_empty());
     }
 
@@ -303,7 +298,6 @@ mod tests {
         assert_eq!(results.len(), COMMANDS.len());
         assert_eq!(COMMANDS.len(), 9);
         for r in &results {
-            assert!(r.matched_alias.is_none());
             assert!(r.positions.is_empty());
         }
         // Every command is present exactly once. We assert membership rather than

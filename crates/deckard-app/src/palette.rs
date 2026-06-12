@@ -140,7 +140,6 @@ impl Shell {
                         ix,
                         cmd,
                         &ranked.positions,
-                        ranked.matched_alias,
                         selected,
                         fg,
                         muted,
@@ -241,16 +240,15 @@ impl Shell {
         }
     }
 
-    /// One ranked result row: a fixed icon gutter, the (live) title with matched chars lifted, an
-    /// optional ` (alias)` tag, a `↵` on the selected row, and the right-aligned shortcut hint.
-    /// `selected`/hover lift the background (a foreground wash) — never a colored keyline (DESIGN §Color).
+    /// One ranked result row: a fixed icon gutter, the (live) title with matched chars lifted, a `↵`
+    /// on the selected row, and the right-aligned shortcut hint. `selected`/hover lift the background
+    /// (a foreground wash) — never a colored keyline (DESIGN §Color).
     #[allow(clippy::too_many_arguments)]
     fn palette_row(
         &self,
         ix: usize,
         cmd: &palette_commands::Command,
         positions: &[usize],
-        matched_alias: Option<&'static str>,
         selected: bool,
         fg: gpui::Hsla,
         muted: gpui::Hsla,
@@ -276,11 +274,7 @@ impl Shell {
         let title_positions: &[usize] = if label == cmd.title { positions } else { &[] };
         let label_row = self.highlighted_label(&label, title_positions, fg, muted);
 
-        let mut text_col = h_flex().items_center().gap_1p5().min_w_0().child(label_row);
-        if matched_alias.is_some() {
-            // An alias outscored the title — tag it muted (the specific alias isn't shown).
-            text_col = text_col.child(div().text_xs().text_color(muted).child("(alias)"));
-        }
+        let text_col = h_flex().items_center().gap_1p5().min_w_0().child(label_row);
 
         let hover = fg.alpha(0.06);
         let row = div()
