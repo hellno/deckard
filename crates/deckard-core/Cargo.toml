@@ -10,8 +10,14 @@ description = "Deckard's headless engine: Ethereum provider, balances, HD keys, 
 # default so the app + daemon get verified reads, but toggleable so the heavy build
 # can be skipped. When OFF, reads fall back to the raw RPC and are tagged
 # ReadStatus::Unsynced("verification disabled") — never silently Verified.
-default = ["verified-reads", "shield"]
+default = ["verified-reads", "shield", "cow-client"]
 verified-reads = ["dep:helios-ethereum"]
+# CoW Protocol orderbook REST client (Swap v1). ON by default so the app + MCP can quote and
+# submit swaps; toggleable so the signer daemon — which builds core with
+# `default-features = false` — never compiles the HTTP client. When OFF, only the pure
+# `cow_types` module (digest/uid/cancel calldata) is present; there is no fake-success stub
+# because nothing is named when the feature is absent.
+cow-client = ["dep:reqwest", "dep:serde", "dep:serde_json"]
 # Key-less Railgun shield-calldata builder. Heavy (the full ZK `railgun` tree); ON by
 # default so the app + daemon can build shield intents, but toggleable so the heavy build
 # can be skipped. When OFF, `build_shield_native_intent` returns "shield unavailable
@@ -32,6 +38,24 @@ deckard-contract = { path = "../deckard-contract" }
 alloy = { version = "1", features = ["provider-http", "contract", "sol-types", "ens", "eips"] }
 alloy-signer-local = { version = "2.0.5", features = ["mnemonic"] }
 alloy-primitives = "1.6.0"
+
+# CoW Protocol orderbook REST client (the only direct HTTP in core). Gated behind `cow-client`
+# (DEFAULT ON) so the signer daemon (built `--no-default-features`) never compiles it. reqwest
+# is ALREADY in Cargo.lock via alloy (provider-http) — this direct line is the pre-approved
+# edge, NOT a new dependency. Pin to `0.12` to reuse alloy's already-resolved reqwest 0.12.28
+# (the lock also carries a transitive 0.13.4 from another tree; depending on `0.12` reuses the
+# existing 0.12.28 and adds NO new reqwest version). We request ONLY `json` (default-features
+# off so we don't pull reqwest's default native-tls stack); the TLS backend comes for free from
+# alloy's own reqwest features via Cargo feature unification — specifying our own `rustls-tls`
+# would pull a SECOND root-cert crate (webpki-roots 1.0), so we deliberately don't.
+reqwest = { version = "0.12", default-features = false, features = ["json"], optional = true }
+# The CoW orderbook request/response structs (de)serialize via serde + serde_json. Both are
+# already deep in Cargo.lock (serde via alloy-primitives, serde_json via reqwest's `json`
+# feature); these optional direct edges only surface them to the `cow-client` module and add
+# NO new version to the lock. Gated with `cow-client` so the no-default-features daemon build
+# never pulls them on core's account.
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
 
 # Embedded Helios light client (verified localhost JSON-RPC server). Git-only, tag
 # "0.11.1" (crates.io is stale at 0.1.0); the umbrella `helios` crate pulls a yanked

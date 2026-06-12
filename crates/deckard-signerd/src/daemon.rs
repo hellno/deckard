@@ -12,16 +12,17 @@
 use std::collections::HashMap;
 #[cfg(feature = "verified-reads")]
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, Bytes, B256, U256};
 #[cfg(feature = "verified-reads")]
 use tokio::sync::Mutex as AsyncMutex;
 use zeroize::Zeroizing;
 
 use deckard_contract::{
-    evaluate, ApprovalStatus, BalanceReport, Decision, ExecuteResult, Intent, IntentKind, Policy,
-    ReadStatus, RequestId, SignerRequest, SignerResponse, UnlockOutcome,
+    evaluate, evaluate_order, ApprovalStatus, BalanceReport, Decision, ExecuteResult, Intent,
+    IntentKind, PendingPayloadView, PendingRecord, Policy, ReadStatus, RequestId, SignOrderResult,
+    SignerRequest, SignerResponse, SwapOrder, UnlockOutcome,
 };
 // Only the `shield`-gated view-grant handler constructs this; an unconditional import would
 // warn in the no-default-features build (e.g. deckard-mcp's dependency edge).
@@ -31,7 +32,7 @@ use deckard_core::{UnlockedVault, Vault};
 
 use crate::config::Config;
 use crate::policy_store::{self, current_utc_day};
-use crate::request_id::request_id_for;
+use crate::request_id::{request_id_for, request_id_for_order};
 use crate::signing;
 
 /// Default lifetime of a `NeedsApproval` before `status`/`execute` report `Expired`.
@@ -81,15 +82,29 @@ enum VaultState {
     },
 }
 
+/// What a tracked request carries: a plain transaction [`Intent`] (Send / Shield / admitted
+/// shaped-approve), or a swap [`SwapOrder`] proposed via `propose_order`. ONE request table
+/// serves both so `lock`/`resolve`/`status`/`expire_stale` stay payload-agnostic (they read
+/// only `status`/`broadcast`/`expires_at`). An `Order` is signed via `sign_order` (EIP-712,
+/// no broadcast) and cancelled via `cancel_order` (an on-chain `invalidateOrder`); a `Tx` is
+/// broadcast via `execute`.
+enum PendingPayload {
+    Tx(Intent),
+    Order(SwapOrder),
+}
+
 /// One tracked proposal. `status` is the wire-visible approval state; `broadcast` is `Some`
-/// once `execute` has signed it (so a second `execute` is idempotently refused). `approved`
-/// is `true` only once a human `Resolve`d it — an *auto*-allow (within-cap) is re-checked
-/// against the caps at execute time, while a human-approved overage is not.
+/// once `execute` (or, for an order, `cancel_order`) has put a tx on the wire (so a second
+/// `execute` is idempotently refused). `signature` is `Some` once an `Order` has been signed
+/// by `sign_order` (so a second `sign_order` is refused — an order signs exactly once).
+/// `approved` is `true` only once a human `Resolve`d it — an *auto*-allow (within-cap) is
+/// re-checked against the caps at execute time, while a human-approved overage is not.
 struct PendingReq {
-    intent: Intent,
+    payload: PendingPayload,
     status: ApprovalStatus,
     expires_at: Instant,
     broadcast: Option<B256>,
+    signature: Option<Bytes>,
     approved: bool,
 }
 
@@ -213,10 +228,11 @@ impl Daemon {
             SignerRequest::Unlock { passphrase } => {
                 SignerResponse::Unlock(self.unlock(passphrase).await)
             }
-            // Lock and RevokeAll are the same act in v1: zeroize the key → Locked, deny
-            // everything in flight. Only a fresh Unlock re-arms.
+            // Lock and RevokeAll are unified in v1: zeroize the key → Locked, deny everything
+            // in flight, and — the STOP guarantee — best-effort cancel any already-signed swap
+            // order ON-CHAIN before the key is gone. Only a fresh Unlock re-arms.
             SignerRequest::Lock | SignerRequest::RevokeAll => {
-                self.lock();
+                self.stop().await;
                 SignerResponse::Ack
             }
             SignerRequest::Resolve {
@@ -248,6 +264,16 @@ impl Daemon {
             SignerRequest::RailgunViewGrant { chain_id, index } => {
                 self.railgun_view_grant(chain_id, index)
             }
+            SignerRequest::ProposeOrder { order } => {
+                SignerResponse::Decision(self.propose_order(&order))
+            }
+            SignerRequest::SignOrder { request_id } => {
+                SignerResponse::SignOrder(self.sign_order(request_id).await)
+            }
+            SignerRequest::CancelOrder { request_id } => {
+                SignerResponse::Execute(self.cancel_order(request_id).await)
+            }
+            SignerRequest::PendingList => SignerResponse::Pending(self.pending_list()),
         }
     }
 
@@ -391,6 +417,25 @@ impl Daemon {
                 reason: "locked".into(),
             };
         }
+        // SHAPED APPROVE (swap v1): a `ContractCall` carrying an exact `approve(spender,amount)`
+        // to the order's sell token is admitted — but ONLY when it's the GPv2 vault relayer for
+        // the EXACT sell amount of a stored, matching order. This is the only ContractCall v1
+        // signs; everything else still falls through to `unsupported_v1`. We intercept BEFORE
+        // the kind guard so a non-approve ContractCall keeps its existing `unsupported_v1`
+        // reason and Send/Shield behaviour is byte-identical. On admission we fall through to
+        // the normal Send caps path below (the broadcast carries `intent.calldata` as-is).
+        if intent.kind == IntentKind::ContractCall && intent.token.is_none() {
+            if let Some((spender, amount)) = deckard_core::decode_approve(&intent.calldata) {
+                if let Some(deny) = self.shaped_approve_admission(intent, spender, amount) {
+                    return deny;
+                }
+                // Admitted: an allowance tx ALWAYS raises a human card (it is part of the swap,
+                // and "every swap raises an approval card"). Pass `always_needs_card = true` so it
+                // is stored `Pending` and NEVER auto-broadcast — even off mainnet, where the Send
+                // caps path would otherwise auto-allow a value-0 ContractCall hands-free.
+                return self.finish_propose(intent, true);
+            }
+        }
         // v1 admits a native Send and a Shield (the privacy hero). The Shield's RelayAdapt
         // calldata is built key-less in deckard-core and rides in `intent.calldata`; the
         // daemon never sees the ZK crate, it only signs+broadcasts the handed bytes. Unshield
@@ -417,6 +462,21 @@ impl Daemon {
             };
         }
 
+        self.finish_propose(intent, false)
+    }
+
+    /// The shared tail of `propose`: derive the id, honour an idempotent re-propose, decide the
+    /// stored status, and store a `Tx` record. Reached from the Send/Shield path AND the admitted
+    /// shaped-approve path (both broadcast `intent.calldata` as-is via `execute`).
+    ///
+    /// `always_needs_card`: when `true` (the shaped-approve path) the record is stored `Pending`
+    /// unconditionally — the allowance tx is part of the swap and must raise a human card, never
+    /// auto-broadcast (off mainnet the Send caps path would otherwise auto-allow a value-0
+    /// ContractCall hands-free). The shaped-approve prechecks already are its policy gate, so we
+    /// skip `evaluate` (allowlist/caps gate value transfers, not the relayer approval) and only
+    /// honour the STOP brake. When `false` (Send/Shield) the ONE shared `evaluate` (+ mainnet
+    /// guardrail) decides as before.
+    fn finish_propose(&mut self, intent: &Intent, always_needs_card: bool) -> Decision {
         let id = request_id_for(intent);
 
         // Idempotent re-propose: an identical intent maps to the same id, so an existing record
@@ -439,37 +499,49 @@ impl Daemon {
             };
         }
 
-        // No record yet: the ONE shared decision function decides.
+        // No record yet: decide the stored status.
         //
-        // Mainnet guardrail (post-`evaluate`, mock/daemon parity carve-out): on chain 1,
-        // unless the operator set the override (see `Config::mainnet_override` — its env
-        // var is documented only in THREAT-MODEL.md and must never appear in a reason),
-        // EVERY auto-Allow is downgraded to `NeedsApproval`. The default policy is
-        // `OverCap` with an empty (= any-recipient) allowlist, so without this a prompt-
-        // injected client could move real funds hands-free within the caps. The record is
-        // stored `Pending`; a human resolver (the app's hold-to-confirm) flips it to
-        // `Allowed` via `Resolve`. Like `locked`/`chain_mismatch`, this is a process-level
-        // check the pure policy can't express — the parity contract with `MockSigner`
-        // covers `evaluate` only, never this daemon state.
-        let status = match evaluate(intent, &self.policy) {
-            deny @ Decision::Deny { .. } => return deny,
-            Decision::Allow if self.mainnet_guardrail_active() => {
-                eprintln!(
-                    "signerd: mainnet guardrail — auto-allow downgraded to NeedsApproval \
-                     (approve in the Deckard app)"
-                );
-                ApprovalStatus::Pending
+        // The shaped-approve path forces a card (see the fn doc): store `Pending` after only the
+        // STOP brake check — never auto-allow an allowance tx.
+        //
+        // Otherwise the ONE shared decision function decides, with the mainnet guardrail
+        // (post-`evaluate`, mock/daemon parity carve-out): on chain 1, unless the operator set
+        // the override (see `Config::mainnet_override` — its env var is documented only in
+        // THREAT-MODEL.md and must never appear in a reason), EVERY auto-Allow is downgraded to
+        // `NeedsApproval`. The default policy is `OverCap` with an empty (= any-recipient)
+        // allowlist, so without this a prompt-injected client could move real funds hands-free
+        // within the caps. A human resolver (the app's hold-to-confirm) flips it to `Allowed` via
+        // `Resolve`. Like `locked`/`chain_mismatch`, this is a process-level check the pure policy
+        // can't express — the parity contract with `MockSigner` covers `evaluate` only.
+        let status = if always_needs_card {
+            if self.policy.revoked {
+                return Decision::Deny {
+                    reason: "revoked".into(),
+                };
             }
-            Decision::Allow => ApprovalStatus::Allowed,
-            Decision::NeedsApproval { .. } => ApprovalStatus::Pending,
+            ApprovalStatus::Pending
+        } else {
+            match evaluate(intent, &self.policy) {
+                deny @ Decision::Deny { .. } => return deny,
+                Decision::Allow if self.mainnet_guardrail_active() => {
+                    eprintln!(
+                        "signerd: mainnet guardrail — auto-allow downgraded to NeedsApproval \
+                         (approve in the Deckard app)"
+                    );
+                    ApprovalStatus::Pending
+                }
+                Decision::Allow => ApprovalStatus::Allowed,
+                Decision::NeedsApproval { .. } => ApprovalStatus::Pending,
+            }
         };
         self.requests.insert(
             id,
             PendingReq {
-                intent: intent.clone(),
+                payload: PendingPayload::Tx(intent.clone()),
                 status: status.clone(),
                 expires_at: Instant::now() + self.approval_ttl,
                 broadcast: None,
+                signature: None,
                 approved: false,
             },
         );
@@ -478,6 +550,357 @@ impl Daemon {
             ApprovalStatus::Allowed => Decision::Allow,
             _ => Decision::NeedsApproval { request_id: id },
         }
+    }
+
+    /// Shaped-approve admission prechecks. Returns `Some(Deny)` if the (already-decoded)
+    /// `approve(spender, amount)` to `intent.to` is NOT an admissible swap approval, or `None`
+    /// when it should be admitted (the caller then runs the normal caps path). Pure over the
+    /// daemon's stored orders + the GPv2 relayer constant — no key, no I/O.
+    ///
+    /// Admission requires: the approve carries NO ETH value, the spender is the GPv2 vault
+    /// relayer, AND there is a stored swap `Order` whose `sell_token == intent.to` and
+    /// `sell_amount == amount` (EXACT amount only — no unbounded/infinite approval). Distinct
+    /// reasons per failure so a client can tell which invariant it tripped.
+    fn shaped_approve_admission(
+        &self,
+        intent: &Intent,
+        spender: Address,
+        amount: U256,
+    ) -> Option<Decision> {
+        // A legitimate ERC-20 `approve` never carries ETH. Reject a value-bearing approve: the
+        // admitted-approve path skips the Send caps check (`finish_propose(.., true)`), and the
+        // human card renders only `{token, spender, amount}` (`PendingPayloadView::Approve`), so a
+        // non-zero `value` would move ETH to the token contract on Resolve while staying invisible
+        // on the card. Bounding it here is the only place the value is gated.
+        if intent.value != U256::ZERO {
+            return Some(Decision::Deny {
+                reason: "approve_with_value".into(),
+            });
+        }
+        if spender != deckard_core::GPV2_VAULT_RELAYER {
+            return Some(Decision::Deny {
+                reason: "approve_wrong_spender".into(),
+            });
+        }
+        let has_matching_order = self.requests.values().any(|req| match &req.payload {
+            PendingPayload::Order(order) => {
+                order.sell_token == intent.to && order.sell_amount == amount
+            }
+            PendingPayload::Tx(_) => false,
+        });
+        if !has_matching_order {
+            return Some(Decision::Deny {
+                reason: "approve_no_matching_order".into(),
+            });
+        }
+        None
+    }
+
+    /// Propose a swap [`SwapOrder`] — policy check only, NEVER signs. Mirrors `propose`'s
+    /// process-level pre-checks (chain, locked) then defers to the pure `evaluate_order`. The
+    /// `owner` and `receiver` are BOUND to the unlocked wallet here; the client's `owner` is
+    /// never trusted (a client-supplied owner could otherwise make the daemon sign an order
+    /// that pays out to someone else). A valid order is ALWAYS `NeedsApproval` (swaps never
+    /// auto-allow in v1). The record is stored `Pending` under [`request_id_for_order`].
+    fn propose_order(&mut self, order: &SwapOrder) -> Decision {
+        self.rollover();
+        self.expire_stale();
+
+        // Chain check first (key-less, like `propose`), so a wrong-chain daemon answers
+        // `chain_mismatch` even while locked.
+        if order.chain_id != self.cfg.chain_id {
+            return Decision::Deny {
+                reason: "chain_mismatch".into(),
+            };
+        }
+        // We need the unlocked wallet to bind owner/receiver, so a locked daemon can't propose.
+        let wallet = match &self.state {
+            VaultState::Unlocked { address, .. } => *address,
+            VaultState::Locked => {
+                return Decision::Deny {
+                    reason: "locked".into(),
+                }
+            }
+        };
+
+        // BIND owner to the unlocked wallet — never trust the client's `owner`. (The
+        // receiver/owner equality is enforced by `evaluate_order`, which denies
+        // `receiver_not_wallet`; binding the owner keeps the signed order's owner == signer.)
+        let mut bound = order.clone();
+        bound.owner = wallet;
+        let id = request_id_for_order(&bound);
+
+        // Idempotent re-propose: the same bound order maps to the same id, so an existing record
+        // is returned AS-IS (payload-agnostic — same contract as `propose`).
+        if let Some(existing) = self.requests.get(&id) {
+            return match &existing.status {
+                _ if existing.broadcast.is_some() => Decision::Deny {
+                    reason: "already_executed".into(),
+                },
+                ApprovalStatus::Pending => Decision::NeedsApproval { request_id: id },
+                ApprovalStatus::Allowed => Decision::Allow,
+                ApprovalStatus::Denied { reason } => Decision::Deny {
+                    reason: reason.clone(),
+                },
+                ApprovalStatus::Expired => Decision::Deny {
+                    reason: "expired".into(),
+                },
+            };
+        }
+
+        // The pure swap decision (never returns Allow → always Pending on success).
+        match evaluate_order(&bound, &self.policy, wallet, now_secs()) {
+            deny @ Decision::Deny { .. } => deny,
+            Decision::NeedsApproval { .. } | Decision::Allow => {
+                self.requests.insert(
+                    id,
+                    PendingReq {
+                        payload: PendingPayload::Order(bound),
+                        status: ApprovalStatus::Pending,
+                        expires_at: Instant::now() + self.approval_ttl,
+                        broadcast: None,
+                        signature: None,
+                        approved: false,
+                    },
+                );
+                Decision::NeedsApproval { request_id: id }
+            }
+        }
+    }
+
+    /// Sign a stored, approved swap order's EIP-712 digest → a 65-byte signature. NO HTTP, NO
+    /// broadcast (the app/MCP posts the signed order to the CoW orderbook). Re-checks `revoked`
+    /// at sign time (TOCTOU) so an order approved before a STOP is still refused. An order
+    /// signs at most once (`signature.is_some()` → `already_signed`).
+    async fn sign_order(&mut self, request_id: RequestId) -> SignOrderResult {
+        self.rollover();
+        self.expire_stale();
+
+        // Phase 1 (borrows end before the mutation below): eligibility + TOCTOU re-check, then
+        // compute the digest over the STORED (bound) order and extract the raw scalar.
+        let (digest, scalar) = {
+            // STOP landed first — refuse even a previously-approved order.
+            let vault = match &self.state {
+                VaultState::Locked => {
+                    return SignOrderResult::Denied {
+                        reason: "revoked".into(),
+                    }
+                }
+                VaultState::Unlocked { vault, .. } => vault,
+            };
+            let req = match self.requests.get(&request_id) {
+                None => {
+                    return SignOrderResult::Denied {
+                        reason: "unknown_request".into(),
+                    }
+                }
+                Some(req) => req,
+            };
+            let order = match &req.payload {
+                PendingPayload::Order(order) => order,
+                PendingPayload::Tx(_) => {
+                    return SignOrderResult::Denied {
+                        reason: "not_an_order".into(),
+                    }
+                }
+            };
+            if req.signature.is_some() {
+                return SignOrderResult::Denied {
+                    reason: "already_signed".into(),
+                };
+            }
+            match &req.status {
+                ApprovalStatus::Allowed => {}
+                ApprovalStatus::Pending => {
+                    return SignOrderResult::Denied {
+                        reason: "not_approved".into(),
+                    }
+                }
+                ApprovalStatus::Denied { reason } => {
+                    return SignOrderResult::Denied {
+                        reason: reason.clone(),
+                    }
+                }
+                ApprovalStatus::Expired => {
+                    return SignOrderResult::Denied {
+                        reason: "expired".into(),
+                    }
+                }
+            }
+            // TOCTOU: a STOP can trip `revoked` between approval and sign without changing this
+            // record's status if the brake landed via a policy path; refuse on the live flag.
+            if self.policy.revoked {
+                return SignOrderResult::Denied {
+                    reason: "revoked".into(),
+                };
+            }
+            let digest = deckard_core::order_digest(order);
+            let signer = match vault.account_signer(0) {
+                Ok(s) => s,
+                Err(e) => {
+                    return SignOrderResult::Denied {
+                        reason: format!("signer_error: {}", one_line(&e)),
+                    }
+                }
+            };
+            // Only the version-stable raw scalar crosses into our alloy stack; zeroized on drop.
+            (digest, Zeroizing::new(signer.to_bytes().0))
+        };
+
+        // Phase 2: sign the digest offline (no network), then pin the signature on the record.
+        let sig = match signing::sign_order_digest(scalar.as_slice(), digest) {
+            Ok(sig) => sig,
+            Err(e) => {
+                return SignOrderResult::Denied {
+                    reason: format!("sign_failed: {}", one_line(&e)),
+                }
+            }
+        };
+        let signature = Bytes::from(sig.to_vec());
+        if let Some(req) = self.requests.get_mut(&request_id) {
+            req.signature = Some(signature.clone());
+        }
+        SignOrderResult::Signed { signature }
+    }
+
+    /// Broadcast an `invalidateOrder` cancel for a stored swap order (an on-chain cancellation
+    /// at the GPv2 settlement contract). Requires an unlocked wallet (the owner must sign the
+    /// cancel). Used both by an explicit `CancelOrder` and by the STOP pass (see [`stop`]).
+    async fn cancel_order(&mut self, request_id: RequestId) -> ExecuteResult {
+        self.rollover();
+        // Look up the order and confirm it IS an order before touching the key. (The shared
+        // `cancel_one_order` re-checks this, but answering `unknown_request`/`not_an_order`
+        // here keeps the CancelOrder reasons precise for a non-order id.)
+        match self.requests.get(&request_id) {
+            None => {
+                return ExecuteResult::Denied {
+                    reason: "unknown_request".into(),
+                }
+            }
+            Some(req) if !matches!(req.payload, PendingPayload::Order(_)) => {
+                return ExecuteResult::Denied {
+                    reason: "not_an_order".into(),
+                }
+            }
+            Some(_) => {}
+        }
+        self.cancel_one_order(request_id).await
+    }
+
+    /// The on-chain cancel for ONE already-resolved swap order, shared by `cancel_order` and
+    /// the STOP pass. The caller has confirmed the request exists and is an `Order`. Extracts
+    /// the scalar, builds `invalidateOrder(uid)` calldata key-lessly via deckard-core, and
+    /// broadcasts to the settlement contract (value 0) under [`BROADCAST_TIMEOUT`] so a dead
+    /// RPC can never wedge the daemon (and STOP) behind the held lock.
+    async fn cancel_one_order(&mut self, request_id: RequestId) -> ExecuteResult {
+        // Phase 1 (lock held): require unlocked, extract the order params + the scalar.
+        let (calldata, scalar) = {
+            let vault = match &self.state {
+                VaultState::Locked => {
+                    return ExecuteResult::Denied {
+                        reason: "revoked".into(),
+                    }
+                }
+                VaultState::Unlocked { vault, .. } => vault,
+            };
+            let order = match self.requests.get(&request_id) {
+                Some(req) => match &req.payload {
+                    PendingPayload::Order(order) => order,
+                    PendingPayload::Tx(_) => {
+                        return ExecuteResult::Denied {
+                            reason: "not_an_order".into(),
+                        }
+                    }
+                },
+                None => {
+                    return ExecuteResult::Denied {
+                        reason: "unknown_request".into(),
+                    }
+                }
+            };
+            let digest = deckard_core::order_digest(order);
+            let uid = deckard_core::order_uid(digest, order.owner, order.valid_to);
+            let calldata = deckard_core::build_invalidate_order_calldata(&uid);
+            let signer = match vault.account_signer(0) {
+                Ok(s) => s,
+                Err(e) => {
+                    return ExecuteResult::Denied {
+                        reason: format!("signer_error: {}", one_line(&e)),
+                    }
+                }
+            };
+            let scalar = Zeroizing::new(signer.to_bytes().0);
+            (calldata, scalar)
+        };
+
+        // Phase 2: broadcast the cancel (lock held — serialized), bounded by the timeout.
+        let broadcast = signing::broadcast_intent(
+            scalar.as_slice(),
+            &self.cfg.rpc_url,
+            self.cfg.chain_id,
+            deckard_core::GPV2_SETTLEMENT,
+            U256::ZERO,
+            &calldata,
+        );
+        let tx_hash = match tokio::time::timeout(BROADCAST_TIMEOUT, broadcast).await {
+            Ok(Ok(hash)) => hash,
+            Ok(Err(e)) => {
+                return ExecuteResult::Denied {
+                    reason: format!("broadcast_failed: {}", one_line(&e)),
+                }
+            }
+            Err(_elapsed) => {
+                return ExecuteResult::Denied {
+                    reason: "broadcast_timeout".into(),
+                }
+            }
+        };
+
+        // Record the cancel tx hash (pins the record; a second cancel/execute is refused).
+        if let Some(req) = self.requests.get_mut(&request_id) {
+            req.broadcast = Some(tx_hash);
+        }
+        ExecuteResult::Broadcast { tx_hash }
+    }
+
+    /// STOP (`Lock` / `RevokeAll`, unified in v1): the security brake. BEFORE the key is
+    /// zeroized, best-effort cancel every SIGNED, not-yet-cancelled, non-expired swap order
+    /// ON-CHAIN — a signed order is already loose on the orderbook, so local-only revocation
+    /// can't unsubmit it; only an `invalidateOrder` can. Each cancel is bounded by
+    /// [`BROADCAST_TIMEOUT`], so a dead RPC fails fast and STOP stays responsive; errors are
+    /// swallowed (logged one redacted line). THEN `lock()` zeroizes the key and flips every
+    /// in-flight record to `Denied{revoked}` — the local-authority kill happens regardless of
+    /// the on-chain cancel outcome, so `sign_order`/`execute` refuse from here on.
+    async fn stop(&mut self) {
+        // Collect the order ids to cancel up front (an immutable borrow that ends before the
+        // mutable cancel calls). Only SIGNED, un-cancelled, non-expired orders are worth a
+        // cancel: an unsigned order was never submitted to the orderbook.
+        let to_cancel: Vec<RequestId> = self
+            .requests
+            .iter()
+            .filter_map(|(id, req)| {
+                let is_order = matches!(req.payload, PendingPayload::Order(_));
+                let signed = req.signature.is_some();
+                let not_cancelled = req.broadcast.is_none();
+                let not_expired = !matches!(req.status, ApprovalStatus::Expired);
+                if is_order && signed && not_cancelled && not_expired {
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for id in to_cancel {
+            // The key is still live here (we lock AFTER this pass). Swallow + log errors so one
+            // failed cancel can't block the rest or the lock; the timeout keeps STOP responsive.
+            if let ExecuteResult::Denied { reason } = self.cancel_one_order(id).await {
+                eprintln!("signerd: STOP could not cancel a signed order on-chain: {reason}");
+            }
+        }
+
+        // Local authority kill — always, regardless of the on-chain cancel outcomes above.
+        self.lock();
     }
 
     /// Sign + broadcast, only for an `Allowed` request that survives the sign-time re-check.
@@ -529,11 +952,22 @@ impl Daemon {
                     }
                 }
             }
+            // `execute` only broadcasts a plain transaction; a swap Order is signed via
+            // `sign_order` and cancelled via `cancel_order`, never broadcast here. An Order in
+            // this table can't reach `execute` through any normal flow, but guard defensively.
+            let intent = match &req.payload {
+                PendingPayload::Tx(intent) => intent,
+                PendingPayload::Order(_) => {
+                    return ExecuteResult::Denied {
+                        reason: "not_an_order".into(),
+                    }
+                }
+            };
             // Spend TOCTOU: an *auto*-allow must still be within policy at sign time, so two
             // within-cap proposals can't both execute past the daily cap (`spent_today` only
             // grows on prior executes). A human-APPROVED request carries explicit consent for
             // its overage and is not re-capped.
-            if !req.approved && evaluate(&req.intent, &self.policy) != Decision::Allow {
+            if !req.approved && evaluate(intent, &self.policy) != Decision::Allow {
                 return ExecuteResult::Denied {
                     reason: "cap_exceeded".into(),
                 };
@@ -549,14 +983,10 @@ impl Daemon {
             // Only the version-stable raw scalar crosses into our alloy stack; zeroized on drop.
             let scalar = Zeroizing::new(signer.to_bytes().0);
             // Calldata is empty for a native Send (→ broadcast is byte-identical to before) and
-            // carries the RelayAdapt call for a Shield. The empty-vs-non-empty input IS the
-            // native/contract-call discriminator, so no IntentKind branch is needed here.
-            (
-                req.intent.to,
-                req.intent.value,
-                req.intent.calldata.clone(),
-                scalar,
-            )
+            // carries the RelayAdapt call for a Shield (or the shaped approve). The empty-vs-
+            // non-empty input IS the native/contract-call discriminator, so no IntentKind branch
+            // is needed here.
+            (intent.to, intent.value, intent.calldata.clone(), scalar)
         };
 
         // Phase 2: sign + broadcast (lock held — serialized; acceptable for v1). A bounded
@@ -601,6 +1031,23 @@ impl Daemon {
                 reason: "unknown_request".into(),
             },
         }
+    }
+
+    /// The approval inbox: every in-flight record with its wire-visible payload, for the GUI
+    /// to render (child #25). A `Tx` whose calldata decodes as an `approve(spender, amount)`
+    /// is surfaced as the structured `Approve { token, spender, amount }` view (so the GUI can
+    /// show "approve X to the CoW relayer"); any other `Tx` rides as the raw intent. Returns
+    /// regardless of lock state — statuses already reflect `revoked`, and order/intent fields
+    /// are not secret (no key, passphrase, or viewing key crosses here).
+    fn pending_list(&self) -> Vec<PendingRecord> {
+        self.requests
+            .iter()
+            .map(|(id, req)| PendingRecord {
+                request_id: *id,
+                status: req.status.clone(),
+                payload: payload_view(&req.payload),
+            })
+            .collect()
     }
 
     /// Public balance, key-less. `shielded_wei` is 0 until T-Privacy.
@@ -747,6 +1194,33 @@ impl Daemon {
             self.policy.spent_today_wei = U256::ZERO;
         }
     }
+}
+
+/// Map a stored [`PendingPayload`] to its wire [`PendingPayloadView`] for the inbox. A `Tx`
+/// whose calldata decodes as an exact `approve(spender, amount)` is surfaced as the structured
+/// `Approve` view; any other `Tx` rides as the raw intent; an `Order` rides as-is.
+fn payload_view(payload: &PendingPayload) -> PendingPayloadView {
+    match payload {
+        PendingPayload::Order(order) => PendingPayloadView::Order(order.clone()),
+        PendingPayload::Tx(intent) => match deckard_core::decode_approve(&intent.calldata) {
+            Some((spender, amount)) => PendingPayloadView::Approve {
+                token: intent.to,
+                spender,
+                amount,
+            },
+            None => PendingPayloadView::Tx(intent.clone()),
+        },
+    }
+}
+
+/// Wall-clock unix seconds — injected into the pure `evaluate_order` so it stays a pure
+/// function of its inputs. Propagates (never `expect`s): a clock before the epoch yields `0`,
+/// which `evaluate_order` treats as "now", at worst tightening the `valid_to` window.
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Collapse a multi-line error into one short, **redacted** line for a `reason` string or a

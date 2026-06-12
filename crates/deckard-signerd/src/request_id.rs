@@ -15,7 +15,7 @@
 
 use alloy_primitives::keccak256;
 
-use deckard_contract::{Intent, IntentKind, RequestId};
+use deckard_contract::{Intent, IntentKind, RequestId, SwapOrder};
 
 /// Deterministic request id for an intent. Fixed-width fields first, variable `calldata`
 /// last, so no field boundary is ambiguous.
@@ -41,10 +41,47 @@ pub fn request_id_for(intent: &Intent) -> RequestId {
     keccak256(&buf)
 }
 
+/// Deterministic request id for a swap [`SwapOrder`], computed over the order the daemon
+/// BOUND (its `owner`/`receiver` already overwritten with the unlocked wallet).
+///
+/// The encoding is prefixed with a `0x02` discriminator byte that no [`request_id_for`]
+/// encoding starts with (an intent id starts with the 8-byte big-endian chain id, whose first
+/// byte is `0x00` for every realistic chain id), so an order id can NEVER collide with an
+/// intent id even at the same chain/amounts. All fields are fixed-width, so no boundary is
+/// ambiguous. Built with `extend_from_slice` (no index expressions).
+pub fn request_id_for_order(order: &SwapOrder) -> RequestId {
+    let mut buf = Vec::with_capacity(1 + 8 + 20 * 4 + 32 * 2 + 4 + 32);
+    buf.push(0x02); // order discriminator — disjoint from any `request_id_for` prefix
+    buf.extend_from_slice(&order.chain_id.to_be_bytes()); // 8
+    buf.extend_from_slice(order.sell_token.as_slice()); // 20
+    buf.extend_from_slice(order.buy_token.as_slice()); // 20
+    buf.extend_from_slice(order.receiver.as_slice()); // 20
+    buf.extend_from_slice(order.owner.as_slice()); // 20
+    buf.extend_from_slice(&order.sell_amount.to_be_bytes::<32>()); // 32
+    buf.extend_from_slice(&order.buy_amount_min.to_be_bytes::<32>()); // 32
+    buf.extend_from_slice(&order.valid_to.to_be_bytes()); // 4
+    buf.extend_from_slice(order.app_data.as_slice()); // 32
+    keccak256(&buf)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::{Address, Bytes, U256};
+    use alloy_primitives::{Address, Bytes, B256, U256};
+
+    fn order(sell: u64) -> SwapOrder {
+        SwapOrder {
+            chain_id: 11155111,
+            owner: Address::repeat_byte(0xAA),
+            sell_token: Address::repeat_byte(0x11),
+            buy_token: Address::repeat_byte(0x22),
+            sell_amount: U256::from(sell),
+            buy_amount_min: U256::from(7u64),
+            receiver: Address::repeat_byte(0xAA),
+            valid_to: 1_700_000_000,
+            app_data: B256::repeat_byte(0x33),
+        }
+    }
 
     fn send(value: u64) -> Intent {
         Intent {
@@ -80,6 +117,65 @@ mod tests {
             request_id_for(&send(100)),
             request_id_for(&tokened),
             "token presence"
+        );
+    }
+
+    #[test]
+    fn order_deterministic_and_nonzero() {
+        let id = request_id_for_order(&order(100));
+        assert_eq!(
+            id,
+            request_id_for_order(&order(100)),
+            "same order → same id"
+        );
+        assert_ne!(id, RequestId::ZERO);
+    }
+
+    #[test]
+    fn order_distinguishes_fields() {
+        let base = request_id_for_order(&order(100));
+        assert_ne!(base, request_id_for_order(&order(101)), "sell_amount");
+
+        let mut buy = order(100);
+        buy.buy_amount_min = U256::from(8u64);
+        assert_ne!(base, request_id_for_order(&buy), "buy_amount_min");
+
+        let mut owner = order(100);
+        owner.owner = Address::repeat_byte(0xBB);
+        assert_ne!(base, request_id_for_order(&owner), "owner");
+
+        let mut recv = order(100);
+        recv.receiver = Address::repeat_byte(0xBB);
+        assert_ne!(base, request_id_for_order(&recv), "receiver");
+
+        let mut sell_tok = order(100);
+        sell_tok.sell_token = Address::repeat_byte(0x99);
+        assert_ne!(base, request_id_for_order(&sell_tok), "sell_token");
+
+        let mut buy_tok = order(100);
+        buy_tok.buy_token = Address::repeat_byte(0x99);
+        assert_ne!(base, request_id_for_order(&buy_tok), "buy_token");
+
+        let mut vt = order(100);
+        vt.valid_to = 1_700_000_001;
+        assert_ne!(base, request_id_for_order(&vt), "valid_to");
+
+        let mut app = order(100);
+        app.app_data = B256::repeat_byte(0x44);
+        assert_ne!(base, request_id_for_order(&app), "app_data");
+
+        let mut chain = order(100);
+        chain.chain_id = 1;
+        assert_ne!(base, request_id_for_order(&chain), "chain_id");
+    }
+
+    /// The `0x02` discriminator guarantees an order id can never equal any intent id.
+    #[test]
+    fn order_id_never_collides_with_intent_id() {
+        assert_ne!(
+            request_id_for_order(&order(100)),
+            request_id_for(&send(100)),
+            "order vs intent must be disjoint"
         );
     }
 }

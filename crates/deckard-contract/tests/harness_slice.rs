@@ -30,6 +30,7 @@ fn demo_signer() -> MockSigner {
         auto_shield_min_wei: U256::from(AUTO_SHIELD_MIN),
         require_approval: deckard_contract::ApprovalMode::OverCap,
         revoked: false,
+        allow_swap_tokens: vec![], // empty = any token (this harness exercises sends, not swaps)
     })
 }
 

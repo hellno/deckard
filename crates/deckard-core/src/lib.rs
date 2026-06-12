@@ -28,6 +28,16 @@
 
 pub mod balances;
 pub mod config;
+/// CoW Protocol orderbook REST client (quote / submit / status). Gated behind the default-on
+/// `cow-client` feature so the daemon never compiles `reqwest`. When the feature is off, this
+/// module is simply not named — there is no stub (callers reach for `cow_types` instead).
+#[cfg(feature = "cow-client")]
+pub mod cow_client;
+/// CoW Protocol (GPv2) order types + EIP-712 machinery (digest, uid, slippage, approve decode,
+/// cancel calldata). UNFEATURED on purpose: the signer daemon builds core with
+/// `default-features = false` (no HTTP) but still needs to compute/sign/cancel orders, so this
+/// module must always compile. No network code lives here — see `cow_client` for that.
+pub mod cow_types;
 /// Runtime env knobs for local-fork / demo mode (verified-reads toggle, shielded-sync fork
 /// pin). Unfeatured so the daemon (built with `default-features = false`) can read them too.
 pub mod env;
@@ -53,7 +63,23 @@ pub mod shielded;
 pub mod tokens;
 
 pub use balances::{fetch_portfolio, format_amount, Portfolio, TokenBalance};
+// CoW order machinery, re-exported so the daemon + app + MCP can build/sign/cancel orders and
+// decode shaped approvals through core without naming the `cow_types` path directly.
+pub use cow_types::{
+    apply_slippage, build_invalidate_order_calldata, cow_api_base, decode_approve, order_digest,
+    order_uid, APPROVE_SELECTOR, APP_DATA_DOC, APP_DATA_HASH, GPV2_SETTLEMENT, GPV2_VAULT_RELAYER,
+    ORDER_TYPE_HASH,
+};
+// The orderbook REST client + its serde types + pure parse helpers, re-exported only when the
+// `cow-client` feature is on (the daemon, built without it, never sees these symbols).
 pub use config::{config_dir, policy_path, vault_path};
+#[cfg(feature = "cow-client")]
+pub use cow_client::{
+    get_account_orders, get_order_status, parse_account_orders, parse_error_body,
+    parse_order_status, parse_order_uid, parse_quote_response, post_order, post_quote,
+    put_app_data, swap_order_from_quote, AccountOrder, AppDataDoc, CowError, OrderCreation,
+    OrderStatusResponse, QuoteOrderParameters, QuoteRequest, QuoteResponse, DEFAULT_SLIPPAGE_BPS,
+};
 pub use env::{demo_fork_block, screen_capture_allowed, verified_reads_enabled};
 pub use eth::{EthProvider, Read, DEFAULT_RPC};
 #[cfg(feature = "verified-reads")]
@@ -72,7 +98,7 @@ pub use railgun_keys::{
 };
 #[cfg(feature = "shield")]
 pub use shielded::{ShieldedHandle, ShieldedSnapshot};
-pub use tokens::{TokenInfo, DEFAULT_TOKENS};
+pub use tokens::{tokens_for, TokenInfo, DEFAULT_TOKENS, SEPOLIA_TOKENS};
 
 /// Feature-off stub: when `shield` is compiled out, the symbol still exists so the daemon
 /// and tests build, but it returns a clear error — NEVER a fake success. Mirrors the

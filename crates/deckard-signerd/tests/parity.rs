@@ -58,6 +58,7 @@ fn policy(
         auto_shield_min_wei: U256::from(10u64),
         require_approval: mode,
         revoked,
+        allow_swap_tokens: vec![],
     }
 }
 

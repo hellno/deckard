@@ -9,22 +9,34 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, Bytes, B256, U256};
 
 use crate::decision::{Decision, RequestId};
 use crate::intent::Intent;
 use crate::policy::{self, Policy};
 use crate::read_status::ReadStatus;
-use crate::rpc::{ApprovalStatus, BalanceReport, ExecuteResult, UnlockOutcome};
+use crate::rpc::{ApprovalStatus, BalanceReport, ExecuteResult, SignOrderResult, UnlockOutcome};
 use crate::signer::Signer;
+use crate::swap_order::SwapOrder;
+
+/// What a tracked request carries. One request table serves BOTH plain intents (`Tx`) and
+/// swap orders (`Order`) — mirroring the real daemon's payload enum so the mock and the
+/// daemon share request-lifecycle shape (faithful parity).
+#[derive(Clone, Debug)]
+enum ReqPayload {
+    Tx(Intent),
+    Order(SwapOrder),
+}
 
 /// One tracked proposal. `status` is the wire-visible approval state; `broadcast` is `Some`
-/// once `execute` has signed it (so a second `execute` is idempotently refused).
+/// once `execute`/`cancel_order` has broadcast it (so a second broadcast is idempotently
+/// refused); `signature` is `Some` once an order has been signed by `sign_order`.
 #[derive(Clone, Debug)]
 struct Request {
-    intent: Intent,
+    payload: ReqPayload,
     status: ApprovalStatus,
     broadcast: Option<B256>,
+    signature: Option<Bytes>,
 }
 
 /// The request table, the deterministic id counter (`1, 2, …`), and the most recently
@@ -48,6 +60,9 @@ pub struct MockSigner {
     policy: Mutex<Policy>,
     requests: Mutex<Requests>,
     balance: Mutex<BalanceReport>,
+    /// The injected unix-secs clock `propose_order` feeds to `evaluate_order` (the pure
+    /// decision fn takes `now` as a parameter so the mock stays deterministic + offline).
+    mock_now: Mutex<u64>,
 }
 
 impl MockSigner {
@@ -68,6 +83,9 @@ impl MockSigner {
                 // it reports its canned balances as Verified (no untrusted RPC behind it).
                 read_status: ReadStatus::Verified,
             }),
+            // A fixed, far-future-of-genesis default so an order's `valid_to` can sit
+            // inside the 24h horizon without a real wall clock. Override with `set_now`.
+            mock_now: Mutex::new(1_700_000_000),
         }
     }
 
@@ -79,6 +97,18 @@ impl MockSigner {
     /// The pinned broadcast tx hash every successful `execute` returns (`0xABAB…AB`).
     pub fn broadcast_tx_hash() -> B256 {
         B256::repeat_byte(0xAB)
+    }
+
+    /// The pinned 65-byte order signature `sign_order` returns (`0xCD` × 65). The mock holds
+    /// no key — it returns a stable stand-in shaped like a real r||s||v EIP-712 signature.
+    pub fn pinned_order_signature() -> Bytes {
+        Bytes::from(vec![0xCD_u8; 65])
+    }
+
+    /// Set the injected unix-secs clock used by `propose_order` (setup helper for the
+    /// `valid_to` horizon check). Mirrors the daemon's `now_unix()` being made injectable.
+    pub fn set_now(&self, now: u64) {
+        *self.mock_now.lock().expect("mock now mutex poisoned") = now;
     }
 
     /// Overwrite the reported balances (setup helper).
@@ -99,6 +129,17 @@ impl MockSigner {
             .lock()
             .expect("mock requests mutex poisoned")
             .last_id
+    }
+
+    /// Test helper: the [`SwapOrder`] stored under `request_id`, or `None` if the id is
+    /// unknown or carries a plain `Tx` intent. Lets a test assert the daemon-parity property
+    /// that `sign_order` operates on the order captured at propose time.
+    pub fn stored_order(&self, request_id: RequestId) -> Option<SwapOrder> {
+        let reqs = self.requests.lock().expect("mock requests mutex poisoned");
+        match reqs.by_id.get(&request_id).map(|r| &r.payload) {
+            Some(ReqPayload::Order(order)) => Some(order.clone()),
+            _ => None,
+        }
     }
 
     /// Mint the next deterministic id (`repeat_byte(1)`, `repeat_byte(2)`, …). Caller holds
@@ -198,9 +239,10 @@ impl Signer for MockSigner {
         reqs.by_id.insert(
             id,
             Request {
-                intent: intent.clone(),
+                payload: ReqPayload::Tx(intent.clone()),
                 status,
                 broadcast: None,
+                signature: None,
             },
         );
 
@@ -240,11 +282,21 @@ impl Signer for MockSigner {
             };
         }
 
+        // `execute` is the intent broadcast path; swap orders are signed via `sign_order`
+        // and never reach here through `propose`. Refuse an Order payload defensively.
+        let value = match &req.payload {
+            ReqPayload::Tx(intent) => intent.value,
+            ReqPayload::Order(_) => {
+                return ExecuteResult::Denied {
+                    reason: "not_an_order".into(),
+                }
+            }
+        };
+
         match req.status.clone() {
             // The only state that signs (covers allow-equivalent and human-approved).
             ApprovalStatus::Allowed => {
                 let tx = Self::broadcast_tx_hash();
-                let value = req.intent.value;
                 req.broadcast = Some(tx);
                 policy.spent_today_wei = policy.spent_today_wei.saturating_add(value);
                 ExecuteResult::Broadcast { tx_hash: tx }
@@ -277,6 +329,143 @@ impl Signer for MockSigner {
         policy.revoked = true;
         deny_pending(&mut reqs);
     }
+
+    fn propose_order(&self, order: &SwapOrder) -> Decision {
+        // The verdict comes from the ONE shared swap-order decision fn — no logic lives here.
+        // `evaluate_order` never returns Allow: a valid order is ALWAYS NeedsApproval, so a
+        // non-Deny verdict always mints a Pending record (no auto-allow branch like `propose`).
+        // BIND owner to the mock wallet — mirrors the daemon, which never trusts the client's
+        // `owner` (so `stored_order` returns the same bound order the daemon would sign).
+        let mut bound = order.clone();
+        bound.owner = Self::mock_address();
+        {
+            let policy = self.policy.lock().expect("mock policy mutex poisoned");
+            let now = *self.mock_now.lock().expect("mock now mutex poisoned");
+            if let deny @ Decision::Deny { .. } =
+                policy::evaluate_order(&bound, &policy, Self::mock_address(), now)
+            {
+                return deny;
+            }
+        } // policy lock released before taking the requests lock (preserves lock order)
+
+        // Mint the real, trackable id (replacing `evaluate_order`'s placeholder) and store
+        // the pending (bound) order record under it.
+        let mut reqs = self.requests.lock().expect("mock requests mutex poisoned");
+        let id = Self::mint_id(&mut reqs);
+        reqs.by_id.insert(
+            id,
+            Request {
+                payload: ReqPayload::Order(bound),
+                status: ApprovalStatus::Pending,
+                broadcast: None,
+                signature: None,
+            },
+        );
+        Decision::NeedsApproval { request_id: id }
+    }
+
+    fn sign_order(&self, request_id: RequestId) -> SignOrderResult {
+        // Always policy-before-requests so sign_order and revoke_all can't deadlock.
+        let policy = self.policy.lock().expect("mock policy mutex poisoned");
+        let mut reqs = self.requests.lock().expect("mock requests mutex poisoned");
+
+        let req = match reqs.by_id.get_mut(&request_id) {
+            None => {
+                return SignOrderResult::Denied {
+                    reason: "unknown_request".into(),
+                }
+            }
+            Some(req) => req,
+        };
+
+        // Only an Order payload can be signed.
+        match &req.payload {
+            ReqPayload::Order(_) => {}
+            ReqPayload::Tx(_) => {
+                return SignOrderResult::Denied {
+                    reason: "not_an_order".into(),
+                }
+            }
+        }
+
+        // TOCTOU guard: re-check `revoked` at sign time. An approval granted before
+        // revoke_all must still be refused here (and `deny_pending` has already flipped
+        // a still-Pending order to Denied{revoked}).
+        if policy.revoked {
+            return SignOrderResult::Denied {
+                reason: "revoked".into(),
+            };
+        }
+
+        match req.status.clone() {
+            // The only state that signs (a human-approved order).
+            ApprovalStatus::Allowed => {
+                let sig = Self::pinned_order_signature();
+                req.signature = Some(sig.clone());
+                SignOrderResult::Signed { signature: sig }
+            }
+            ApprovalStatus::Pending => SignOrderResult::Denied {
+                reason: "not_approved".into(),
+            },
+            ApprovalStatus::Denied { reason } => SignOrderResult::Denied { reason },
+            ApprovalStatus::Expired => SignOrderResult::Denied {
+                reason: "expired".into(),
+            },
+        }
+    }
+
+    fn cancel_order(&self, request_id: RequestId) -> ExecuteResult {
+        // Always policy-before-requests so cancel_order and revoke_all can't deadlock.
+        let _policy = self.policy.lock().expect("mock policy mutex poisoned");
+        let mut reqs = self.requests.lock().expect("mock requests mutex poisoned");
+
+        let req = match reqs.by_id.get_mut(&request_id) {
+            None => {
+                return ExecuteResult::Denied {
+                    reason: "unknown_request".into(),
+                }
+            }
+            Some(req) => req,
+        };
+
+        // Only an Order payload can be cancelled (intents broadcast/finalise via `execute`).
+        match &req.payload {
+            ReqPayload::Order(_) => {}
+            ReqPayload::Tx(_) => {
+                return ExecuteResult::Denied {
+                    reason: "not_an_order".into(),
+                }
+            }
+        }
+
+        // Idempotency: a cancelled order never broadcasts a second cancel.
+        if req.broadcast.is_some() {
+            return ExecuteResult::Denied {
+                reason: "already_executed".into(),
+            };
+        }
+
+        // An order is cancellable once it has been approved (Allowed) or signed — the on-chain
+        // `invalidateOrder` is what stops a signed order from settling. A signed order stays
+        // cancellable even if a later STOP flipped its status, so the broadcast hash is pinned
+        // whenever a signature exists. A still-Pending / Denied / Expired order (never signed)
+        // has nothing to invalidate.
+        if req.signature.is_some() || req.status == ApprovalStatus::Allowed {
+            let tx = Self::broadcast_tx_hash();
+            req.broadcast = Some(tx);
+            return ExecuteResult::Broadcast { tx_hash: tx };
+        }
+        match req.status.clone() {
+            ApprovalStatus::Denied { reason } => ExecuteResult::Denied { reason },
+            ApprovalStatus::Expired => ExecuteResult::Denied {
+                reason: "expired".into(),
+            },
+            // Pending (and the already-handled Allowed) fall here as "nothing to cancel yet".
+            ApprovalStatus::Pending | ApprovalStatus::Allowed => ExecuteResult::Denied {
+                reason: "not_approved".into(),
+            },
+        }
+    }
 }
 
 /// Flip every still-`Pending` request to `Denied{revoked}` — shared by `lock`/`revoke_all`.
@@ -299,7 +488,8 @@ mod tests {
 
     // --- builders -------------------------------------------------------------------
 
-    /// A policy with an empty allowlist and `auto_shield_min_wei = 10`.
+    /// A policy with an empty allowlist and `auto_shield_min_wei = 10`. The swap allowlist is
+    /// empty too (any token allowed) — swap tests that need a non-empty list set it directly.
     fn policy(per_tx: u64, daily: u64, spent: u64, mode: ApprovalMode) -> Policy {
         Policy {
             per_tx_cap_wei: U256::from(per_tx),
@@ -309,6 +499,7 @@ mod tests {
             auto_shield_min_wei: U256::from(10u64),
             require_approval: mode,
             revoked: false,
+            allow_swap_tokens: vec![],
         }
     }
 
@@ -647,5 +838,220 @@ mod tests {
         for _ in 0..256 {
             let _ = s.propose(&send(1)); // within cap → Allow → mints an id each time
         }
+    }
+
+    // --- swap-order lifecycle -------------------------------------------------------
+
+    /// The mock's default clock; the order builder sits its `valid_to` inside the horizon.
+    const MOCK_NOW: u64 = 1_700_000_000;
+
+    /// A well-formed order: owner/receiver bound to the mock's pinned address, `valid_to`
+    /// one hour out (inside the 24h horizon), tokens left off the (empty by default) list.
+    fn order() -> SwapOrder {
+        SwapOrder {
+            chain_id: 11155111,
+            owner: MockSigner::mock_address(),
+            sell_token: Address::repeat_byte(0xA1),
+            buy_token: Address::repeat_byte(0xB2),
+            sell_amount: U256::from(1_000_000u64),
+            buy_amount_min: U256::from(900_000u64),
+            receiver: MockSigner::mock_address(),
+            valid_to: (MOCK_NOW + 3600) as u32,
+            app_data: B256::repeat_byte(0xCD),
+        }
+    }
+
+    #[test]
+    fn propose_order_rebinds_owner_to_the_wallet() {
+        // The mock mirrors the daemon: a client-supplied `owner` is never trusted — the stored
+        // order has `owner == mock_address()`, so `stored_order` returns the bound order the
+        // signer would actually sign.
+        let s = MockSigner::new(policy(50, 1000, 0, ApprovalMode::OverCap));
+        let spoofed = SwapOrder {
+            owner: Address::repeat_byte(0xEE), // a wrong/attacker owner
+            ..order()
+        };
+        let id = unwrap_needs(s.propose_order(&spoofed));
+        let stored = s.stored_order(id).expect("an order is stored under the id");
+        assert_eq!(
+            stored.owner,
+            MockSigner::mock_address(),
+            "the stored order's owner must be rebound to the wallet, not the client's value"
+        );
+    }
+
+    #[test]
+    fn propose_order_then_approve_then_sign_returns_pinned_signature() {
+        let s = MockSigner::new(policy(50, 1000, 0, ApprovalMode::OverCap));
+        // A valid order is ALWAYS NeedsApproval (swaps never auto-allow in v1).
+        let id = unwrap_needs(s.propose_order(&order()));
+        // Until approved, signing is refused.
+        assert_eq!(
+            s.sign_order(id),
+            SignOrderResult::Denied {
+                reason: "not_approved".into()
+            }
+        );
+        s.approve(id);
+        assert_eq!(
+            s.sign_order(id),
+            SignOrderResult::Signed {
+                signature: MockSigner::pinned_order_signature()
+            }
+        );
+        // The pinned signature is 65 bytes of 0xCD.
+        assert_eq!(MockSigner::pinned_order_signature().len(), 65);
+    }
+
+    #[test]
+    fn sign_order_on_unknown_id_denied() {
+        let s = MockSigner::new(policy(50, 1000, 0, ApprovalMode::OverCap));
+        assert_eq!(
+            s.sign_order(B256::repeat_byte(0xFF)),
+            SignOrderResult::Denied {
+                reason: "unknown_request".into()
+            }
+        );
+    }
+
+    #[test]
+    fn sign_order_on_a_tx_payload_denied() {
+        // An intent stored via `propose` is not an order and can't be signed as one.
+        let s = MockSigner::new(policy(50, 1000, 0, ApprovalMode::OverCap));
+        s.propose(&send(20)); // within cap → Allow, stored as a Tx payload
+        let id = s.last_request_id().expect("an id was minted");
+        assert_eq!(
+            s.sign_order(id),
+            SignOrderResult::Denied {
+                reason: "not_an_order".into()
+            }
+        );
+    }
+
+    #[test]
+    fn revoke_all_then_sign_order_denied_revoked() {
+        // TOCTOU: a human approves, STOP fires, then `sign_order` must still refuse.
+        let s = MockSigner::new(policy(50, 1000, 0, ApprovalMode::OverCap));
+        let id = unwrap_needs(s.propose_order(&order()));
+        s.approve(id); // approved BEFORE the STOP
+        s.revoke_all();
+        assert_eq!(
+            s.sign_order(id),
+            SignOrderResult::Denied {
+                reason: "revoked".into()
+            }
+        );
+    }
+
+    #[test]
+    fn propose_order_denied_passes_through() {
+        // A receiver that isn't the bound wallet is a terminal deny — no record minted.
+        let s = MockSigner::new(policy(50, 1000, 0, ApprovalMode::OverCap));
+        let bad = SwapOrder {
+            receiver: Address::repeat_byte(0x22),
+            ..order()
+        };
+        assert_eq!(
+            s.propose_order(&bad),
+            Decision::Deny {
+                reason: "receiver_not_wallet".into()
+            }
+        );
+        assert_eq!(s.last_request_id(), None);
+    }
+
+    #[test]
+    fn propose_order_off_swap_list_denied() {
+        let mut p = policy(50, 1000, 0, ApprovalMode::OverCap);
+        // Only the buy token is listed; the sell token is off-list.
+        p.allow_swap_tokens = vec![Address::repeat_byte(0xB2)];
+        let s = MockSigner::new(p);
+        assert_eq!(
+            s.propose_order(&order()),
+            Decision::Deny {
+                reason: "off_swap_list".into()
+            }
+        );
+    }
+
+    #[test]
+    fn propose_order_respects_injected_clock() {
+        // Default clock: an order one hour out is inside the horizon.
+        let s = MockSigner::new(policy(50, 1000, 0, ApprovalMode::OverCap));
+        assert!(matches!(
+            s.propose_order(&order()),
+            Decision::NeedsApproval { .. }
+        ));
+        // Rewind the clock far enough that the same order is now > 24h out → too far.
+        let s2 = MockSigner::new(policy(50, 1000, 0, ApprovalMode::OverCap));
+        s2.set_now(MOCK_NOW - 86_401);
+        assert_eq!(
+            s2.propose_order(&order()),
+            Decision::Deny {
+                reason: "valid_to_too_far".into()
+            }
+        );
+    }
+
+    #[test]
+    fn cancel_order_after_sign_broadcasts_pinned_hash() {
+        let s = MockSigner::new(policy(50, 1000, 0, ApprovalMode::OverCap));
+        let id = unwrap_needs(s.propose_order(&order()));
+        s.approve(id);
+        assert!(matches!(s.sign_order(id), SignOrderResult::Signed { .. }));
+        assert_eq!(
+            s.cancel_order(id),
+            ExecuteResult::Broadcast {
+                tx_hash: MockSigner::broadcast_tx_hash()
+            }
+        );
+        // Idempotent: a second cancel is refused.
+        assert_eq!(
+            s.cancel_order(id),
+            ExecuteResult::Denied {
+                reason: "already_executed".into()
+            }
+        );
+    }
+
+    #[test]
+    fn cancel_order_on_pending_denied() {
+        // Nothing to invalidate until the order is approved/signed.
+        let s = MockSigner::new(policy(50, 1000, 0, ApprovalMode::OverCap));
+        let id = unwrap_needs(s.propose_order(&order()));
+        assert_eq!(
+            s.cancel_order(id),
+            ExecuteResult::Denied {
+                reason: "not_approved".into()
+            }
+        );
+    }
+
+    #[test]
+    fn cancel_order_on_tx_payload_denied() {
+        let s = MockSigner::new(policy(50, 1000, 0, ApprovalMode::OverCap));
+        s.propose(&send(20));
+        let id = s.last_request_id().expect("an id was minted");
+        assert_eq!(
+            s.cancel_order(id),
+            ExecuteResult::Denied {
+                reason: "not_an_order".into()
+            }
+        );
+    }
+
+    #[test]
+    fn revoke_all_flips_pending_order_to_denied() {
+        // The shared `deny_pending` path works for order payloads too: a Pending order
+        // becomes Denied{revoked}, and `sign_order` then reports it as such.
+        let s = MockSigner::new(policy(50, 1000, 0, ApprovalMode::OverCap));
+        let id = unwrap_needs(s.propose_order(&order()));
+        s.revoke_all();
+        assert_eq!(
+            s.status(id),
+            ApprovalStatus::Denied {
+                reason: "revoked".into()
+            }
+        );
     }
 }

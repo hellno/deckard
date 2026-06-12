@@ -30,6 +30,8 @@ pub fn default_policy() -> Policy {
         auto_shield_min_wei: U256::from(DEFAULT_AUTO_SHIELD_MIN_WEI),
         require_approval: ApprovalMode::OverCap,
         revoked: false,
+        // Empty = any token allowed; the daemon may later populate from `tokens_for(chain_id)`.
+        allow_swap_tokens: vec![],
     }
 }
 

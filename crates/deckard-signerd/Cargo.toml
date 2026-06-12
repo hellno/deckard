@@ -25,6 +25,15 @@ verified-reads = ["deckard-core/verified-reads"]
 # itself gains NO railgun dep — it only broadcasts handed calldata; this feature just lets the
 # black-box `shield_e2e` integration test drive deckard-core's builder + assert via railgun.
 shield = ["deckard-core/shield"]
+# DELIBERATELY NOT in `default`. The daemon NEVER compiles the CoW orderbook HTTP client
+# (`deckard-core::cow_client`): it signs orders offline via the pure `cow_types` digest and the
+# key-less side submits them. This opt-in feature exists ONLY so the `cow_client_hostile`
+# integration test can exercise deckard-core's orderbook parse helpers through this crate
+# (`cargo test -p deckard-signerd --features cow-client`). The default daemon build (and
+# `tests/feature_gate.rs`) assert this feature stays OFF — that is the real, achievable form of
+# the epic's "signerd has no CoW HTTP dependency" AC (reqwest itself is already in-tree via
+# alloy provider-http + helios + railgun, so a literal "0 reqwest" is impossible).
+cow-client = ["deckard-core/cow-client"]
 
 [dependencies]
 # The frozen wire contract (Intent / Decision / Policy / RPC + the shared `evaluate`).

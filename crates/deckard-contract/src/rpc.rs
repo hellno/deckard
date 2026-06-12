@@ -2,13 +2,14 @@
 //! serde-derived so it frames as CBOR (ciborium) on the UDS and JSON for MCP. One request
 //! per frame, one response per frame.
 
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, Bytes, B256, U256};
 use serde::{Deserialize, Serialize};
 
 use crate::decision::{Decision, RequestId};
 use crate::intent::Intent;
 use crate::policy::Policy;
 use crate::read_status::ReadStatus;
+use crate::swap_order::SwapOrder;
 
 /// `deckard-mcp` → `deckard-signerd`. The key-less client only proposes; it never signs.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -47,6 +48,14 @@ pub enum SignerRequest {
     /// sync → [`SignerResponse::RailgunView`]. The daemon refuses unless it's unlocked AND the
     /// derivation known-answer test passes (no grant from an unverified derivation).
     RailgunViewGrant { chain_id: u64, index: u32 },
+    /// Propose a swap order (policy check only, NO signing) → [`Decision`].
+    ProposeOrder { order: SwapOrder },
+    /// Sign a stored, approved order's EIP-712 digest → [`SignOrderResult`]. No HTTP.
+    SignOrder { request_id: RequestId },
+    /// Broadcast an `invalidateOrder` cancel for a stored order → [`ExecuteResult`].
+    CancelOrder { request_id: RequestId },
+    /// List all in-flight pending records WITH payloads (the GUI approval inbox) → [`SignerResponse::Pending`].
+    PendingList,
 }
 
 /// `deckard-signerd` → `deckard-mcp`. One variant per request shape.
@@ -64,6 +73,10 @@ pub enum SignerResponse {
     Balance(BalanceReport),
     /// Reply to `RailgunViewGrant`, or a `Decision::Deny` when locked / the gate fails.
     RailgunView(RailgunViewGrant),
+    /// Reply to `SignOrder`.
+    SignOrder(SignOrderResult),
+    /// Reply to `PendingList`: every in-flight record with its full payload.
+    Pending(Vec<PendingRecord>),
 }
 
 /// A read-only Railgun grant: the 0zk `address` + the `viewing_key` (hex). NOT the spending
@@ -129,4 +142,31 @@ pub struct BalanceReport {
     /// rule: a balance is `Verified` only when a fresh Helios-verified read backs
     /// it; otherwise it is visibly `Unsynced`/`Degraded`, never quietly trusted.
     pub read_status: ReadStatus,
+}
+
+/// Outcome of `sign_order`. `signature` is the 65-byte r||s||v EIP-712 ECDSA signature.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum SignOrderResult {
+    Signed { signature: Bytes },
+    Denied { reason: String },
+}
+
+/// One pending record for the GUI inbox (child #25 renders these). Carries the full payload.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PendingRecord {
+    pub request_id: RequestId,
+    pub status: ApprovalStatus,
+    pub payload: PendingPayloadView,
+}
+
+/// The wire view of a pending record's payload.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum PendingPayloadView {
+    Tx(Intent),
+    Order(SwapOrder),
+    Approve {
+        token: Address,
+        spender: Address,
+        amount: U256,
+    },
 }

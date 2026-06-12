@@ -14,6 +14,7 @@ use alloy::network::{Ethereum, EthereumWallet, TransactionBuilder};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::types::TransactionRequest;
 use alloy::signers::local::PrivateKeySigner;
+use alloy::signers::SignerSync;
 use alloy_primitives::{Address, Bytes, B256, U256};
 
 /// Sign + broadcast a native-ETH send and return the broadcast tx hash.
@@ -83,6 +84,35 @@ pub async fn broadcast_intent(
     Ok(*pending.tx_hash())
 }
 
+/// Sign a 32-byte EIP-712 digest with the reconstructed local signer → a 65-byte
+/// `r(32) || s(32) || v(1)` signature with `v` normalized to legacy **27/28**.
+///
+/// The CoW orderbook (GPv2) requires the legacy `v` encoding, but alloy 1.8's `Signature`
+/// exposes the recovery bit as a `bool` y-parity (`.v()`), so we add 27 to get 27/28 — never
+/// the EIP-155 form (that's for whole-tx signing, not an EIP-712 order digest).
+///
+/// Sync + offline: no network, no nonce, no provider. `scalar` is the raw 32-byte secp256k1
+/// key; the caller keeps it in `Zeroizing` and it never leaves this function reconstructed.
+/// The byte layout is built with `split_at_mut`/`copy_from_slice` (no index expressions, to
+/// match the trust-core lint posture even though this crate isn't under that deny list).
+pub fn sign_order_digest(scalar: &[u8], digest: B256) -> anyhow::Result<[u8; 65]> {
+    let signer = PrivateKeySigner::from_slice(scalar)
+        .map_err(|e| anyhow::anyhow!("reconstruct signer: {e}"))?;
+    let sig = signer
+        .sign_hash_sync(&digest)
+        .map_err(|e| anyhow::anyhow!("sign digest: {e}"))?;
+    let mut out = [0u8; 65];
+    let (r, rest) = out.split_at_mut(32);
+    let (s, v) = rest.split_at_mut(32);
+    r.copy_from_slice(&sig.r().to_be_bytes::<32>());
+    s.copy_from_slice(&sig.s().to_be_bytes::<32>());
+    // alloy 1.8 `Signature::v()` is the y-parity (bool: false→0, true→1); legacy v = 27 + parity.
+    if let Some(slot) = v.first_mut() {
+        *slot = 27u8 + u8::from(sig.v());
+    }
+    Ok(out)
+}
+
 /// Read an address's public (native) balance through `read_url` — key-less, read-only.
 ///
 /// `read_url` is the endpoint the consumer provider reads through. With verified reads
@@ -103,4 +133,35 @@ pub async fn read_balance(read_url: &str, addr: Address) -> anyhow::Result<U256>
         .get_balance(addr)
         .await
         .map_err(|e| anyhow::anyhow!("get_balance: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::Signature;
+
+    /// The 65-byte `sign_order_digest` output must round-trip: recovering the address from
+    /// `(digest, r||s||v)` returns the signer's own address. This is what proves the `v`
+    /// normalization to 27/28 (a wrong recovery byte recovers a different address).
+    #[test]
+    fn sign_order_digest_recovers_signer_address() {
+        // A fixed non-zero scalar (any valid secp256k1 key works for the round-trip).
+        let scalar = [0x11u8; 32];
+        let signer = PrivateKeySigner::from_slice(&scalar).expect("valid key");
+        let expected = signer.address();
+
+        let digest = B256::repeat_byte(0x42);
+        let sig_bytes = sign_order_digest(&scalar, digest).expect("sign");
+
+        // v must be legacy 27/28, never 0/1 (that's the bug the test guards against).
+        let v = *sig_bytes.last().expect("65 bytes");
+        assert!(v == 27 || v == 28, "v should be legacy 27/28, got {v}");
+
+        // Recover via alloy's Signature (`from_raw` normalizes the Electrum-notation v).
+        let sig = Signature::from_raw(&sig_bytes).expect("parse 65-byte sig");
+        let recovered = sig
+            .recover_address_from_prehash(&digest)
+            .expect("recover address");
+        assert_eq!(recovered, expected, "recovered address must equal signer");
+    }
 }

@@ -30,18 +30,20 @@ pub mod read_status;
 pub mod rpc;
 pub mod shield_status;
 pub mod signer;
+pub mod swap_order;
 
 pub use decision::{Decision, RequestId};
 pub use intent::{Intent, IntentKind};
 pub use mock::MockSigner;
-pub use policy::{evaluate, ApprovalMode, Policy};
+pub use policy::{evaluate, evaluate_order, ApprovalMode, Policy};
 pub use read_status::ReadStatus;
 pub use rpc::{
-    ApprovalStatus, BalanceReport, ExecuteResult, RailgunViewGrant, SignerRequest, SignerResponse,
-    UnlockOutcome,
+    ApprovalStatus, BalanceReport, ExecuteResult, PendingPayloadView, PendingRecord,
+    RailgunViewGrant, SignOrderResult, SignerRequest, SignerResponse, UnlockOutcome,
 };
 pub use shield_status::ShieldStatus;
 pub use signer::Signer;
+pub use swap_order::SwapOrder;
 
 #[cfg(test)]
 mod roundtrip_tests {
@@ -97,6 +99,22 @@ mod roundtrip_tests {
             auto_shield_min_wei: U256::from(10_000_000_000_000_000_u64),
             require_approval: ApprovalMode::OverCap,
             revoked: false,
+            // Non-empty so the new field's serde coverage isn't all defaults.
+            allow_swap_tokens: vec![Address::repeat_byte(0xCC)],
+        }
+    }
+
+    fn sample_swap_order() -> SwapOrder {
+        SwapOrder {
+            chain_id: 11155111,
+            owner: Address::repeat_byte(0x11),
+            sell_token: Address::repeat_byte(0xA1),
+            buy_token: Address::repeat_byte(0xB2),
+            sell_amount: U256::from(1_000_000_000_000_000_000_u64),
+            buy_amount_min: U256::from(950_000_000_000_000_000_u64),
+            receiver: Address::repeat_byte(0x11),
+            valid_to: 1_700_003_600,
+            app_data: B256::repeat_byte(0xCD),
         }
     }
 
@@ -140,10 +158,12 @@ mod roundtrip_tests {
             roundtrip(&mode);
         }
         roundtrip(&sample_policy());
-        // empty allowlist + revoked variant
+        // empty allowlist + revoked variant + empty swap allowlist (the #[serde(default)]
+        // path: an existing policy.json with no allow_swap_tokens decodes to vec![]).
         roundtrip(&Policy {
             allow_to: vec![],
             revoked: true,
+            allow_swap_tokens: vec![],
             ..sample_policy()
         });
     }
@@ -180,6 +200,16 @@ mod roundtrip_tests {
             chain_id: 1,
             index: 0,
         });
+        roundtrip(&SignerRequest::ProposeOrder {
+            order: sample_swap_order(),
+        });
+        roundtrip(&SignerRequest::SignOrder {
+            request_id: B256::repeat_byte(0x06),
+        });
+        roundtrip(&SignerRequest::CancelOrder {
+            request_id: B256::repeat_byte(0x07),
+        });
+        roundtrip(&SignerRequest::PendingList);
     }
 
     #[test]
@@ -221,6 +251,24 @@ mod roundtrip_tests {
             shielded_wei: U256::from(2_u64),
             read_status: ReadStatus::Verified,
         }));
+        roundtrip(&SignerResponse::SignOrder(SignOrderResult::Signed {
+            signature: Bytes::from(vec![0xCD_u8; 65]),
+        }));
+        roundtrip(&SignerResponse::SignOrder(SignOrderResult::Denied {
+            reason: "not_approved".into(),
+        }));
+        roundtrip(&SignerResponse::Pending(vec![
+            PendingRecord {
+                request_id: B256::repeat_byte(0x01),
+                status: ApprovalStatus::Pending,
+                payload: PendingPayloadView::Order(sample_swap_order()),
+            },
+            PendingRecord {
+                request_id: B256::repeat_byte(0x02),
+                status: ApprovalStatus::Allowed,
+                payload: PendingPayloadView::Tx(sample_intent(IntentKind::Send)),
+            },
+        ]));
     }
 
     #[test]
@@ -237,6 +285,42 @@ mod roundtrip_tests {
             reason: "revoked".into(),
         });
         roundtrip(&ApprovalStatus::Expired);
+    }
+
+    #[test]
+    fn swap_wire_types_roundtrip() {
+        // The order itself, both sign outcomes, every payload view, and a full record.
+        roundtrip(&sample_swap_order());
+
+        roundtrip(&SignOrderResult::Signed {
+            signature: Bytes::from(vec![0xCD_u8; 65]),
+        });
+        roundtrip(&SignOrderResult::Denied {
+            reason: "revoked".into(),
+        });
+
+        roundtrip(&PendingPayloadView::Tx(sample_intent(IntentKind::Send)));
+        roundtrip(&PendingPayloadView::Order(sample_swap_order()));
+        roundtrip(&PendingPayloadView::Approve {
+            token: Address::repeat_byte(0xA1),
+            spender: Address::repeat_byte(0xC9),
+            amount: U256::from(1_000_000_000_000_000_000_u64),
+        });
+
+        roundtrip(&PendingRecord {
+            request_id: B256::repeat_byte(0x01),
+            status: ApprovalStatus::Pending,
+            payload: PendingPayloadView::Order(sample_swap_order()),
+        });
+        roundtrip(&PendingRecord {
+            request_id: B256::repeat_byte(0x02),
+            status: ApprovalStatus::Allowed,
+            payload: PendingPayloadView::Approve {
+                token: Address::repeat_byte(0xA1),
+                spender: Address::repeat_byte(0xC9),
+                amount: U256::MAX,
+            },
+        });
     }
 
     #[test]

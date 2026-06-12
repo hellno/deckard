@@ -935,6 +935,7 @@ mod tests {
             auto_shield_min_wei: U256::from(10_000_000_000_000_000u128), // 0.01 ETH
             require_approval: ApprovalMode::OverCap,
             revoked: false,
+            allow_swap_tokens: vec![],
         }
     }
 
