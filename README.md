@@ -39,9 +39,11 @@ hands the wheel to Claude Desktop.
 > is **slow** (many minutes; can exceed ~10 min on a cold machine). `just demo` runs that build
 > before the app window appears. Subsequent runs are incremental and fast.
 
-> **Fresh-clone to first shielded transaction: _measurement pending the launch gate_** (the cold
-> GPUI build above is stated separately, not folded into this number).
-> <!-- TTHW: measured at launch gate, fill before flipping public -->
+> **Quick prompt to first shielded transaction: under a minute.** Measured 2026-06-12 on a
+> running `just demo` (fresh `claude -p` session, the quick prompt below, doc fetched over the
+> network): policy read at ~20 s, shield proposed at ~28 s, transaction broadcast at ~32 s,
+> agent done at ~38 s. The cold GPUI build above is stated separately, not folded into this
+> number.
 
 ### Prerequisites
 

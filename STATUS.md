@@ -17,10 +17,11 @@ Legend: ✅ done + tested · 🟡 partial / integrated-not-finished · 🧪 spik
 >
 > What is **still** honestly true: the network-dependent `signerd/shield_e2e` remains `#[ignore]` (needs a local
 > `anvil`/fork + archive RPC, not run by default `cargo test`); the MCP acceptance suite runs by default but drives a
-> **mock signerd** (deterministic tx hash, no live broadcast); the **demo `.gif` re-record is pending**; the README's
-> **TTHW measurement is pending** — the harness for it is now in place (the README quick prompt + the agent
-> quickstart `docs/build/31-agent-quickstart.md`, issue #27): run the quick prompt in a fresh agent session against a
-> running `just demo` and record the minutes here; **Send UI stays gated**
+> **mock signerd** (deterministic tx hash, no live broadcast); the **demo `.gif` re-record is pending**; the
+> **TTHW is measured** (2026-06-12, issue #27): a fresh agent session given the README quick prompt against a running
+> `just demo` read the policy at **~20 s**, proposed the shield at **~28 s**, and broadcast at **~32 s** — about
+> **0.5 min** to the hero transaction (two runs: 30 s with the doc read locally, 38 s with the doc fetched over the
+> network; receipts verified on the fork); **Send UI stays gated**
 > ("next release") and **Swap is a disabled TODO** (Send + Swap is the first post-launch milestone). "Tested" below
 > still includes some mocked-transport / fake-daemon unit tests — noted per row.
 
