@@ -1,13 +1,43 @@
 # cargo-deny configuration — supply-chain gate. See docs/AGENTIC-ENGINEERING.md §4.
-# Run locally with: cargo install cargo-deny && cargo deny check
-# The CI job lands NON-BLOCKING (continue-on-error) first; promote it to a required check after one
-# green run AND after seeding [licenses].allow below from a real `cargo deny check licenses` run.
+# Run locally with: cargo install cargo-deny && cargo deny check  (or `cargo deny check advisories`).
+#
+# CI splits this into two jobs (ci.yml):
+#   • cargo-deny-advisories  — `check advisories`        → BLOCKING. Every advisory is fixed or
+#                                                           carries a justified `ignore` below.
+#   • cargo-deny-supply-chain — `check bans sources licenses` → non-blocking until seeded (issue #40).
+# A daily `check advisories` re-scan runs from .github/workflows/audit.yml.
 
 [advisories]
 # RustSec advisory DB. Vulnerabilities and unmaintained crates are denied by default in cargo-deny
 # v2; we additionally refuse yanked crates. Add to `ignore` ONLY with a written justification.
+#
+# Every entry below is a TRANSITIVE advisory with NO in-tree fix; removing them is tracked in #40.
+# Re-evaluate the whole list on each `just bump-gpui` / Helios / alloy bump — drop any that resolve.
 yanked = "deny"
-ignore = []
+ignore = [
+    # ── rustls-webpki 0.101 — TLS path-validation advisories, reachable only through the Helios
+    #    light client's jsonrpsee 0.19 → rustls 0.21 stack. rustls 0.21 caps webpki at 0.101, so
+    #    there is no in-tree upgrade; the fix is bumping Helios → newer jsonrpsee/rustls (#40).
+    #    Mitigating: custody never rests on TLS — Helios proof-checks every read against the sync
+    #    committee, signing is local, and a signed tx is self-authenticating.
+    { id = "RUSTSEC-2026-0098", reason = "rustls-webpki URI name-constraint bypass; transitive via Helios/jsonrpsee, no in-tree fix; tracked in #40" },
+    { id = "RUSTSEC-2026-0099", reason = "rustls-webpki wildcard-cert name-constraint bypass; transitive via Helios/jsonrpsee, no in-tree fix; tracked in #40" },
+    { id = "RUSTSEC-2026-0104", reason = "rustls-webpki CRL-parsing panic; we do not use CRLs (not reachable); transitive via Helios/jsonrpsee; tracked in #40" },
+    # ── hickory DNS — DoS advisories, reachable only on hostile DNS responses during RPC name
+    #    resolution. CPU-exhaustion (liveness), not a custody risk. Transitive via reqwest; the fix
+    #    rides the same Helios/reqwest modernization (#40).
+    { id = "RUSTSEC-2026-0118", reason = "hickory NSEC3 unbounded-loop DoS; transitive via reqwest resolver; liveness-only; tracked in #40" },
+    { id = "RUSTSEC-2026-0119", reason = "hickory O(n^2) name-compression CPU-exhaustion DoS; transitive via reqwest resolver; liveness-only; tracked in #40" },
+    # ── Unmaintained crates. All transitive with no maintained drop-in in the pinned tree; the
+    #    proc-macro / build-time ones never ship in the runtime binary → zero runtime attack surface.
+    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error unmaintained; build-time only (GTK tray stack), no runtime surface" },
+    { id = "RUSTSEC-2024-0384", reason = "instant unmaintained; transitive, no maintained drop-in in the pinned tree" },
+    { id = "RUSTSEC-2024-0388", reason = "derivative unmaintained; build-time proc-macro only, no runtime surface" },
+    { id = "RUSTSEC-2024-0436", reason = "paste unmaintained; build-time proc-macro only, no runtime surface" },
+    { id = "RUSTSEC-2025-0052", reason = "async-std discontinued; transitive, no maintained drop-in in the pinned tree" },
+    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile unmaintained (superseded by rustls-pki-types); transitive via Helios + the Zed gpui fork" },
+    { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 unmaintained; build-time proc-macro only, no runtime surface" },
+]
 
 [licenses]
 version = 2
@@ -44,9 +74,11 @@ exceptions = [
 # here would be permanently red. Warn so we can see the dupes without blocking.
 multiple-versions = "warn"
 wildcards = "deny"
-deny = [
-    { crate = "openssl", reason = "prefer rustls/ring; avoid the OpenSSL CVE surface" },
-]
+# openssl was previously denied here ("prefer rustls/ring"). It is ACCEPTED via documented exception:
+# Helios hard-pulls openssl 0.10 both directly and via reqwest's `native-tls`, so it cannot be removed
+# without changing Helios. The "prefer rustls" intent is now a tracked goal (#40 — fold Helios onto
+# `rustls-tls`), not a permanently-red wall. Re-add the deny once that lands.
+deny = []
 
 [sources]
 # Only crates.io and these trusted git origins are allowed; a typo-squatted or malicious forked git
