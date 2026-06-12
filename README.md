@@ -18,9 +18,9 @@ That is the whole design; if you can cross a boundary it claims, that's a vulner
 
 ![Deckard demo](docs/demo.gif)
 
-> _Draft demo from the current build: onboarding → verified split-balance → command palette →
-> receive → shield-to-private. The final cut is swapped in once the in-flight UI polish lands
-> ([`docs/RELEASING.md`](docs/RELEASING.md) §4)._
+> _From the current build on a local Sepolia fork: funded wallet (100% public) → command palette →
+> shield review (clear-signing) → the public-to-private flip. UI polish is still in flight; the
+> final cut lands with it ([`docs/RELEASING.md`](docs/RELEASING.md) §4)._
 
 > Forked from the [`deck`](https://github.com/hellno/deck) GPUI starter (0BSD, which permits
 > relicensing). Now its own project: Rust + [GPUI](https://www.gpui.rs/), licensed AGPL-3.0-or-later.

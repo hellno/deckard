@@ -54,7 +54,7 @@ pub mod tokens;
 
 pub use balances::{fetch_portfolio, format_amount, Portfolio, TokenBalance};
 pub use config::{config_dir, policy_path, vault_path};
-pub use env::{demo_fork_block, verified_reads_enabled};
+pub use env::{demo_fork_block, screen_capture_allowed, verified_reads_enabled};
 pub use eth::{EthProvider, Read, DEFAULT_RPC};
 #[cfg(feature = "verified-reads")]
 pub use helios::{launch_verified, VerifiedReader, DEFAULT_CONSENSUS_RPC};

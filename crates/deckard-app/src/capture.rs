@@ -4,6 +4,10 @@
 //! balance can't be captured anyway. For a demo *recording* you leave it off (or the
 //! recording itself goes blank), which is exactly why the default is OFF.
 //!
+//! An automated recording (an agent driving the demo GIF) can guarantee the block is off without
+//! reaching into the settings UI by launching with `DECKARD_ALLOW_SCREEN_CAPTURE=1`
+//! ([`deckard_core::screen_capture_allowed`]); the override is logged at startup and never silent.
+//!
 //! ## Why this reuses the tray feature's objc2 dep (no new dependency)
 //!
 //! The native call lives behind `#[cfg(all(target_os = "macos", feature = "tray"))]`

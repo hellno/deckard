@@ -101,8 +101,11 @@ impl Shell {
             .checked(self.mask)
             .on_click(cx.listener(|this, checked: &bool, _, cx| this.set_mask(*checked, cx)))
             .into_any_element();
+        // While the DECKARD_ALLOW_SCREEN_CAPTURE recording override is active the block is held
+        // off no matter what — show the toggle as off so the UI never claims capture is blocked
+        // when it isn't (the click still records the persisted preference for later sessions).
         let capture_control = Switch::new("capture-block")
-            .checked(self.settings.capture_block)
+            .checked(self.settings.capture_block && !self.allow_screen_capture)
             .on_click(cx.listener(|this, checked: &bool, _, cx| {
                 this.settings.capture_block = *checked;
                 this.settings.save();
