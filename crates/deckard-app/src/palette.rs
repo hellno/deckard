@@ -50,6 +50,16 @@ fn display_label(this: &Shell, id: &str, title: &str) -> String {
     }
 }
 
+/// macOS ⌥⌫ — delete the word before the (end-of-line) cursor: drop any trailing whitespace, then
+/// the trailing run of non-whitespace. "sho balanc" → "sho ", then → "".
+fn delete_last_word(s: &mut String) {
+    let keep = {
+        let trimmed = s.trim_end();
+        trimmed.trim_end_matches(|c: char| !c.is_whitespace()).len()
+    };
+    s.truncate(keep);
+}
+
 impl Shell {
     /// The ⌘K overlay: a scrim (click-out to close) with a focused, keyed panel — a query row,
     /// a context line showing the active scope, and the ranked results. Rendered from
@@ -60,36 +70,50 @@ impl Shell {
         let muted = theme.muted_foreground;
         let border = theme.border;
         let popover = theme.popover;
-        let lift = theme.secondary; // selected / hover = brightness lift (never a keyline)
+        // Selected-row highlight: a foreground wash. The palette panel uses `popover`, already the
+        // LIGHTEST surface token, so a token "lift" (e.g. `secondary`) is invisible — in light mode
+        // `secondary` == `popover` (both #FFFFFF). A low-alpha foreground overlay reads clearly in
+        // both modes. Never a colored keyline (DESIGN §Color).
+        let lift = fg.alpha(0.12);
         let mono = theme.mono_font_family.clone();
         let is_dark = theme.is_dark();
         let id_square = theme::identity_square(is_dark);
         let agent = theme::agent(is_dark);
         let agent_tint = theme::agent_tint(is_dark);
 
-        // --- Query row: a muted Search glyph, the live query (or placeholder), a thin caret. ---
+        // --- Query row: a muted Search glyph, then the typed query with the caret RIGHT AFTER it
+        // (or the caret then the placeholder when empty), left-packed so the caret tracks the text
+        // instead of being pushed to the far edge by a flex spacer. ---
         let query_empty = self.palette_query.is_empty();
+        let caret = div().w(px(1.0)).h(px(15.0)).bg(fg);
         let query_row = h_flex()
             .items_center()
             .gap_2()
             .px_4()
             .py_2p5()
             .child(Icon::new(IconName::Search).text_color(muted).small())
-            .child(if query_empty {
-                div()
-                    .flex_1()
-                    .text_sm()
-                    .text_color(muted)
-                    .child("Type a command…")
-            } else {
-                div()
-                    .flex_1()
-                    .text_sm()
-                    .text_color(fg)
-                    .child(self.palette_query.clone())
-            })
-            // A thin blinking caret keeps the field reading as a live input even with no widget.
-            .child(div().w(px(1.0)).h(px(15.0)).bg(fg));
+            .child(
+                h_flex()
+                    .items_center()
+                    .when(!query_empty, |e| {
+                        e.child(
+                            div()
+                                .text_sm()
+                                .text_color(fg)
+                                .child(self.palette_query.clone()),
+                        )
+                    })
+                    .child(caret)
+                    .when(query_empty, |e| {
+                        e.child(
+                            div()
+                                .ml_1()
+                                .text_sm()
+                                .text_color(muted)
+                                .child("Type a command…"),
+                        )
+                    }),
+            );
 
         // --- Context line: the active scope (wallet identity / agent squircle / project). ---
         let context_line =
@@ -217,9 +241,9 @@ impl Shell {
         }
     }
 
-    /// One ranked result row: a fixed icon gutter, the (live) title with matched chars lifted,
-    /// an optional ` (alias)` tag, and the right-aligned shortcut hint. `selected`/hover lift the
-    /// background (`secondary`) — never a colored keyline (DESIGN §Color).
+    /// One ranked result row: a fixed icon gutter, the (live) title with matched chars lifted, an
+    /// optional ` (alias)` tag, a `↵` on the selected row, and the right-aligned shortcut hint.
+    /// `selected`/hover lift the background (a foreground wash) — never a colored keyline (DESIGN §Color).
     #[allow(clippy::too_many_arguments)]
     fn palette_row(
         &self,
@@ -258,7 +282,8 @@ impl Shell {
             text_col = text_col.child(div().text_xs().text_color(muted).child("(alias)"));
         }
 
-        let mut row = div()
+        let hover = fg.alpha(0.06);
+        let row = div()
             .id(("palette-row", ix))
             .w_full()
             .flex()
@@ -268,7 +293,9 @@ impl Shell {
             .py_1p5()
             .cursor_pointer()
             .when(selected, |e| e.bg(lift))
-            .hover(|e| e.bg(lift))
+            // Hover only lifts non-selected rows, so the selected highlight always reads as the
+            // strongest (it's what Enter runs).
+            .when(!selected, |e| e.hover(|e| e.bg(hover)))
             .child(
                 h_flex()
                     .items_center()
@@ -278,8 +305,14 @@ impl Shell {
                     .child(text_col),
             );
 
+        // Right side: a return glyph on the SELECTED row (so it's unmistakable which command Enter
+        // runs) followed by the keyboard shortcut where one exists.
+        let mut right = h_flex().items_center().gap_2();
+        if selected {
+            right = right.child(div().text_xs().text_color(muted).child("↵"));
+        }
         if let Some(shortcut) = cmd.shortcut {
-            row = row.child(
+            right = right.child(
                 div()
                     .font_family(mono)
                     .text_xs()
@@ -287,7 +320,7 @@ impl Shell {
                     .child(shortcut),
             );
         }
-        row
+        row.child(right)
     }
 
     /// The curated glyph for a row's gutter: the command's static icon, the live Eye/EyeOff for
@@ -399,7 +432,15 @@ impl Shell {
                 }
             }
             "backspace" => {
-                self.palette_query.pop();
+                // macOS editing conventions: ⌘⌫ clears the line, ⌥⌫ deletes the last word,
+                // plain ⌫ removes one character.
+                if m.platform {
+                    self.palette_query.clear();
+                } else if m.alt {
+                    delete_last_word(&mut self.palette_query);
+                } else {
+                    self.palette_query.pop();
+                }
                 self.palette_selected = 0;
                 self.repalette(cx);
                 cx.notify();

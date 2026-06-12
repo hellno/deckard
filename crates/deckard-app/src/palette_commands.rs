@@ -77,14 +77,31 @@ pub const COMMANDS: &[Command] = &[
     Command {
         id: "mask",
         title: "Mask balances",
-        aliases: &["show", "hide", "privacy", "reveal", "balances"],
+        // "show balances" = the live label while masked, as one haystack so a multi-word query
+        // ("sho bala") matches what the user sees even though the static title is "Mask balances".
+        aliases: &[
+            "show",
+            "hide",
+            "privacy",
+            "reveal",
+            "balances",
+            "show balances",
+        ],
         shortcut: Some("⌘⇧M"),
         icon: Some(IconName::EyeOff), // palette.rs swaps Eye/EyeOff + label live
     },
     Command {
         id: "agent",
         title: "Simulate agent activity (demo)",
-        aliases: &["demo", "atlas", "pause", "stop", "agent"],
+        // "stop agent activity" = the live label while acting, so a phrase query matches it too.
+        aliases: &[
+            "demo",
+            "atlas",
+            "pause",
+            "stop",
+            "agent",
+            "stop agent activity",
+        ],
         shortcut: None,
         icon: None, // palette.rs draws the cyan squircle
     },
