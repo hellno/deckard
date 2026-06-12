@@ -8,6 +8,7 @@ use alloy_primitives::{Address, U256};
 use serde::{Deserialize, Serialize};
 
 use crate::decision::{Decision, RequestId};
+use crate::deny_reasons;
 use crate::intent::{Intent, IntentKind};
 use crate::swap_order::SwapOrder;
 
@@ -64,19 +65,19 @@ pub fn evaluate(intent: &Intent, policy: &Policy) -> Decision {
     // 1. STOP / revoked overrides everything.
     if policy.revoked {
         return Decision::Deny {
-            reason: "revoked".into(),
+            reason: deny_reasons::REVOKED.into(),
         };
     }
     // 2. Allowlist (empty = any address).
     if !policy.allow_to.is_empty() && !policy.allow_to.contains(&intent.to) {
         return Decision::Deny {
-            reason: "off_allowlist".into(),
+            reason: deny_reasons::OFF_ALLOWLIST.into(),
         };
     }
     // 3. Calldata must be decodable for the kind.
     if !calldata_ok(intent) {
         return Decision::Deny {
-            reason: "undecodable".into(),
+            reason: deny_reasons::UNDECODABLE.into(),
         };
     }
     // 4. Cap check: spent_today + value vs the per-tx and daily caps.
@@ -88,7 +89,7 @@ pub fn evaluate(intent: &Intent, policy: &Policy) -> Decision {
         ApprovalMode::Never => {
             if over {
                 Decision::Deny {
-                    reason: "over_cap".into(),
+                    reason: deny_reasons::OVER_CAP.into(),
                 }
             } else {
                 Decision::Allow
@@ -115,17 +116,17 @@ pub fn evaluate(intent: &Intent, policy: &Policy) -> Decision {
 pub fn evaluate_order(order: &SwapOrder, policy: &Policy, wallet: Address, now: u64) -> Decision {
     if policy.revoked {
         return Decision::Deny {
-            reason: "revoked".into(),
+            reason: deny_reasons::REVOKED.into(),
         };
     }
     if order.receiver == Address::ZERO {
         return Decision::Deny {
-            reason: "receiver_zero".into(),
+            reason: deny_reasons::RECEIVER_ZERO.into(),
         };
     }
     if order.receiver != wallet {
         return Decision::Deny {
-            reason: "receiver_not_wallet".into(),
+            reason: deny_reasons::RECEIVER_NOT_WALLET.into(),
         };
     }
     // A zero sell amount is a garbage order (nothing to sell) and would let the shaped-approve
@@ -133,7 +134,7 @@ pub fn evaluate_order(order: &SwapOrder, policy: &Policy, wallet: Address, now: 
     // valid: a max-slippage market sell is legitimate and the human sees it on the card.)
     if order.sell_amount.is_zero() {
         return Decision::Deny {
-            reason: "zero_amount".into(),
+            reason: deny_reasons::ZERO_AMOUNT.into(),
         };
     }
     if !policy.allow_swap_tokens.is_empty()
@@ -141,12 +142,12 @@ pub fn evaluate_order(order: &SwapOrder, policy: &Policy, wallet: Address, now: 
             || !policy.allow_swap_tokens.contains(&order.buy_token))
     {
         return Decision::Deny {
-            reason: "off_swap_list".into(),
+            reason: deny_reasons::OFF_SWAP_LIST.into(),
         };
     }
     if order.valid_to as u64 > now.saturating_add(86_400) {
         return Decision::Deny {
-            reason: "valid_to_too_far".into(),
+            reason: deny_reasons::VALID_TO_TOO_FAR.into(),
         };
     }
     Decision::NeedsApproval {
@@ -228,7 +229,7 @@ mod evaluate_order_tests {
         assert_eq!(
             evaluate_order(&base_order(), &p, wallet(), NOW),
             Decision::Deny {
-                reason: "revoked".into()
+                reason: deny_reasons::REVOKED.into()
             }
         );
     }
@@ -242,7 +243,7 @@ mod evaluate_order_tests {
         assert_eq!(
             evaluate_order(&order, &base_policy(), wallet(), NOW),
             Decision::Deny {
-                reason: "receiver_zero".into()
+                reason: deny_reasons::RECEIVER_ZERO.into()
             }
         );
     }
@@ -256,7 +257,7 @@ mod evaluate_order_tests {
         assert_eq!(
             evaluate_order(&order, &base_policy(), wallet(), NOW),
             Decision::Deny {
-                reason: "receiver_not_wallet".into()
+                reason: deny_reasons::RECEIVER_NOT_WALLET.into()
             }
         );
     }
@@ -270,7 +271,7 @@ mod evaluate_order_tests {
         assert_eq!(
             evaluate_order(&order, &base_policy(), wallet(), NOW),
             Decision::Deny {
-                reason: "zero_amount".into()
+                reason: deny_reasons::ZERO_AMOUNT.into()
             }
         );
     }
@@ -292,7 +293,7 @@ mod evaluate_order_tests {
         assert_eq!(
             evaluate_order(&base_order(), &p, wallet(), NOW),
             Decision::Deny {
-                reason: "off_swap_list".into()
+                reason: deny_reasons::OFF_SWAP_LIST.into()
             }
         );
     }
@@ -305,7 +306,7 @@ mod evaluate_order_tests {
         assert_eq!(
             evaluate_order(&base_order(), &p, wallet(), NOW),
             Decision::Deny {
-                reason: "off_swap_list".into()
+                reason: deny_reasons::OFF_SWAP_LIST.into()
             }
         );
     }
@@ -317,7 +318,7 @@ mod evaluate_order_tests {
         assert_eq!(
             evaluate_order(&base_order(), &p, wallet(), NOW),
             Decision::Deny {
-                reason: "off_swap_list".into()
+                reason: deny_reasons::OFF_SWAP_LIST.into()
             }
         );
     }
@@ -355,7 +356,7 @@ mod evaluate_order_tests {
         assert_eq!(
             evaluate_order(&order, &base_policy(), wallet(), NOW),
             Decision::Deny {
-                reason: "valid_to_too_far".into()
+                reason: deny_reasons::VALID_TO_TOO_FAR.into()
             }
         );
     }

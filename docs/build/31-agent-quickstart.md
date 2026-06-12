@@ -133,6 +133,22 @@ error is to retry — for two of these (marked **do NOT retry**) that instinct i
 | `undecodable` | The intent's calldata doesn't match its kind (client-side bug if it recurs). | Re-run the flow from `deckard_shield`. |
 | `shield_to_mismatch` | The shield doesn't target the official Railgun contract for this chain. | Re-run from `deckard_shield` (it builds the right target); recurring means the chain is unsupported. |
 | `unsupported_v1` / `erc20_unsupported_v1` | v0.1 supports native-ETH shield/send only. | Stay with native-ETH `deckard_shield` / `deckard_execute`. |
+| `malformed_request` | The daemon couldn't decode the request frame at all (wire-level). | Client/version bug — re-run from `deckard_shield`; make sure the sidecar and app versions match. |
+| `off_swap_list` | A swap's sell or buy token isn't in `allow_swap_tokens`. | Use an allowed token, or a human edits `policy.json`. |
+| `receiver_not_wallet` | The swap order would pay out to an address other than your wallet. | Re-run the swap flow — it binds the receiver to the operator wallet. |
+| `receiver_zero` | The swap order receiver is the zero address. | Re-run the swap flow; a recurring case is a client bug. |
+| `zero_amount` | The swap order's sell amount is zero. | Re-quote with a non-zero sell amount. |
+| `valid_to_too_far` | The swap order's `valid_to` is more than 24h out. | Re-quote with a `valid_to` inside 24 hours. |
+| `not_an_order` | The `request_id` points at a transaction where an order was expected (or vice versa). | Use the id returned by the matching propose call. |
+| `already_signed` | The swap order was already signed. | Don't re-sign; cancel via the swap-cancel flow if you need to abort. |
+| `approve_no_matching_order` | An `approve` arrived with no stored order matching its token + amount. | Propose the swap order first; the approve must match it exactly. |
+| `approve_with_value` | A swap `approve` carried ETH value (would move ETH invisibly). | Re-issue a value-0 approve (the swap flow does this). |
+| `approve_wrong_spender` | A swap `approve`'s spender isn't the CoW vault relayer. | Re-issue the approve to the correct spender (the swap flow does this). |
+| `derivation_unverified` | The Railgun derivation self-check failed; a view grant was refused. | A bug — restart the app; don't trust a private balance until it clears. |
+| `shield_unavailable` | This build has no shielding support. | Use a build with the `shield` feature enabled. |
+| `railgun_keys: …` | A Railgun key/grant error (redacted detail appended). | Restart the app; if it recurs, the chain may be unsupported for shielding. |
+| `signer_error: …` | The daemon couldn't get an account signer (redacted detail appended). | A human re-unlocks the wallet in the app, then retry. |
+| `sign_failed: …` | Offline order-digest signing failed (redacted detail appended). | Re-run the swap flow; a recurring case is a client/daemon bug. |
 
 Two transport-level failures carry the same three-part shape: **socket missing** (the daemon
 isn't running — start the Deckard app, or `just demo`) and **connection lost during execute**

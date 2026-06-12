@@ -8,7 +8,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 use zeroize::Zeroize;
 
-use deckard_contract::{Decision, SignerRequest, SignerResponse};
+use deckard_contract::{deny_reasons, Decision, SignerRequest, SignerResponse};
 
 use crate::auth;
 use crate::daemon::Daemon;
@@ -58,7 +58,7 @@ async fn handle_conn(mut stream: UnixStream, daemon: Arc<Mutex<Daemon>>) -> anyh
             Ok(None) => return Ok(()), // peer closed cleanly between frames
             Err(e) => {
                 // Oversize/short read: best-effort error, then close.
-                let _ = reply_error(&mut stream, "malformed_request").await;
+                let _ = reply_error(&mut stream, deny_reasons::MALFORMED_REQUEST).await;
                 return Err(e);
             }
         };
@@ -70,7 +70,7 @@ async fn handle_conn(mut stream: UnixStream, daemon: Arc<Mutex<Daemon>>) -> anyh
         let req = match decoded {
             Ok(req) => req,
             Err(e) => {
-                let _ = reply_error(&mut stream, "malformed_request").await;
+                let _ = reply_error(&mut stream, deny_reasons::MALFORMED_REQUEST).await;
                 return Err(e);
             }
         };

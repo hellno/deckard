@@ -12,6 +12,7 @@ use std::sync::Mutex;
 use alloy_primitives::{Address, Bytes, B256, U256};
 
 use crate::decision::{Decision, RequestId};
+use crate::deny_reasons;
 use crate::intent::Intent;
 use crate::policy::{self, Policy};
 use crate::read_status::ReadStatus;
@@ -189,7 +190,7 @@ impl Signer for MockSigner {
                     ApprovalStatus::Allowed
                 } else {
                     ApprovalStatus::Denied {
-                        reason: "user_denied".into(),
+                        reason: deny_reasons::USER_DENIED.into(),
                     }
                 };
             }
@@ -261,7 +262,7 @@ impl Signer for MockSigner {
         let req = match reqs.by_id.get_mut(&request_id) {
             None => {
                 return ExecuteResult::Denied {
-                    reason: "unknown_request".into(),
+                    reason: deny_reasons::UNKNOWN_REQUEST.into(),
                 }
             }
             Some(req) => req,
@@ -270,7 +271,7 @@ impl Signer for MockSigner {
         // Idempotency: a broadcast id never signs twice.
         if req.broadcast.is_some() {
             return ExecuteResult::Denied {
-                reason: "already_executed".into(),
+                reason: deny_reasons::ALREADY_EXECUTED.into(),
             };
         }
 
@@ -278,7 +279,7 @@ impl Signer for MockSigner {
         // revoke_all must still be denied here.
         if policy.revoked {
             return ExecuteResult::Denied {
-                reason: "revoked".into(),
+                reason: deny_reasons::REVOKED.into(),
             };
         }
 
@@ -288,7 +289,7 @@ impl Signer for MockSigner {
             ReqPayload::Tx(intent) => intent.value,
             ReqPayload::Order(_) => {
                 return ExecuteResult::Denied {
-                    reason: "not_an_order".into(),
+                    reason: deny_reasons::NOT_AN_ORDER.into(),
                 }
             }
         };
@@ -302,11 +303,11 @@ impl Signer for MockSigner {
                 ExecuteResult::Broadcast { tx_hash: tx }
             }
             ApprovalStatus::Pending => ExecuteResult::Denied {
-                reason: "not_approved".into(),
+                reason: deny_reasons::NOT_APPROVED.into(),
             },
             ApprovalStatus::Denied { reason } => ExecuteResult::Denied { reason },
             ApprovalStatus::Expired => ExecuteResult::Denied {
-                reason: "expired".into(),
+                reason: deny_reasons::EXPIRED.into(),
             },
         }
     }
@@ -316,7 +317,7 @@ impl Signer for MockSigner {
         match reqs.by_id.get(&request_id) {
             Some(req) => req.status.clone(),
             None => ApprovalStatus::Denied {
-                reason: "unknown_request".into(),
+                reason: deny_reasons::UNKNOWN_REQUEST.into(),
             },
         }
     }
@@ -372,7 +373,7 @@ impl Signer for MockSigner {
         let req = match reqs.by_id.get_mut(&request_id) {
             None => {
                 return SignOrderResult::Denied {
-                    reason: "unknown_request".into(),
+                    reason: deny_reasons::UNKNOWN_REQUEST.into(),
                 }
             }
             Some(req) => req,
@@ -383,7 +384,7 @@ impl Signer for MockSigner {
             ReqPayload::Order(_) => {}
             ReqPayload::Tx(_) => {
                 return SignOrderResult::Denied {
-                    reason: "not_an_order".into(),
+                    reason: deny_reasons::NOT_AN_ORDER.into(),
                 }
             }
         }
@@ -393,7 +394,7 @@ impl Signer for MockSigner {
         // a still-Pending order to Denied{revoked}).
         if policy.revoked {
             return SignOrderResult::Denied {
-                reason: "revoked".into(),
+                reason: deny_reasons::REVOKED.into(),
             };
         }
 
@@ -405,11 +406,11 @@ impl Signer for MockSigner {
                 SignOrderResult::Signed { signature: sig }
             }
             ApprovalStatus::Pending => SignOrderResult::Denied {
-                reason: "not_approved".into(),
+                reason: deny_reasons::NOT_APPROVED.into(),
             },
             ApprovalStatus::Denied { reason } => SignOrderResult::Denied { reason },
             ApprovalStatus::Expired => SignOrderResult::Denied {
-                reason: "expired".into(),
+                reason: deny_reasons::EXPIRED.into(),
             },
         }
     }
@@ -422,7 +423,7 @@ impl Signer for MockSigner {
         let req = match reqs.by_id.get_mut(&request_id) {
             None => {
                 return ExecuteResult::Denied {
-                    reason: "unknown_request".into(),
+                    reason: deny_reasons::UNKNOWN_REQUEST.into(),
                 }
             }
             Some(req) => req,
@@ -433,7 +434,7 @@ impl Signer for MockSigner {
             ReqPayload::Order(_) => {}
             ReqPayload::Tx(_) => {
                 return ExecuteResult::Denied {
-                    reason: "not_an_order".into(),
+                    reason: deny_reasons::NOT_AN_ORDER.into(),
                 }
             }
         }
@@ -441,7 +442,7 @@ impl Signer for MockSigner {
         // Idempotency: a cancelled order never broadcasts a second cancel.
         if req.broadcast.is_some() {
             return ExecuteResult::Denied {
-                reason: "already_executed".into(),
+                reason: deny_reasons::ALREADY_EXECUTED.into(),
             };
         }
 
@@ -458,11 +459,11 @@ impl Signer for MockSigner {
         match req.status.clone() {
             ApprovalStatus::Denied { reason } => ExecuteResult::Denied { reason },
             ApprovalStatus::Expired => ExecuteResult::Denied {
-                reason: "expired".into(),
+                reason: deny_reasons::EXPIRED.into(),
             },
             // Pending (and the already-handled Allowed) fall here as "nothing to cancel yet".
             ApprovalStatus::Pending | ApprovalStatus::Allowed => ExecuteResult::Denied {
-                reason: "not_approved".into(),
+                reason: deny_reasons::NOT_APPROVED.into(),
             },
         }
     }
@@ -473,7 +474,7 @@ fn deny_pending(reqs: &mut Requests) {
     for req in reqs.by_id.values_mut() {
         if req.status == ApprovalStatus::Pending {
             req.status = ApprovalStatus::Denied {
-                reason: "revoked".into(),
+                reason: deny_reasons::REVOKED.into(),
             };
         }
     }
@@ -569,7 +570,7 @@ mod tests {
         assert_eq!(
             s.propose(&send(20)),
             Decision::Deny {
-                reason: "off_allowlist".into()
+                reason: deny_reasons::OFF_ALLOWLIST.into()
             }
         );
     }
@@ -590,7 +591,7 @@ mod tests {
         assert_eq!(
             s.propose(&send(20)),
             Decision::Deny {
-                reason: "revoked".into()
+                reason: deny_reasons::REVOKED.into()
             }
         );
     }
@@ -604,7 +605,7 @@ mod tests {
         assert_eq!(
             s.propose(&bad_send),
             Decision::Deny {
-                reason: "undecodable".into()
+                reason: deny_reasons::UNDECODABLE.into()
             }
         );
         // A ContractCall must have non-empty calldata.
@@ -616,7 +617,7 @@ mod tests {
         assert_eq!(
             s.propose(&empty_call),
             Decision::Deny {
-                reason: "undecodable".into()
+                reason: deny_reasons::UNDECODABLE.into()
             }
         );
         // A Shield with EMPTY calldata is rejected: without the RelayAdapt call it would
@@ -628,7 +629,7 @@ mod tests {
         assert_eq!(
             s.propose(&empty_shield),
             Decision::Deny {
-                reason: "undecodable".into()
+                reason: deny_reasons::UNDECODABLE.into()
             }
         );
     }
@@ -639,7 +640,7 @@ mod tests {
         assert_eq!(
             s.propose(&send(60)),
             Decision::Deny {
-                reason: "over_cap".into()
+                reason: deny_reasons::OVER_CAP.into()
             }
         );
     }
@@ -660,7 +661,7 @@ mod tests {
         assert_eq!(
             s.execute(id),
             ExecuteResult::Denied {
-                reason: "not_approved".into()
+                reason: deny_reasons::NOT_APPROVED.into()
             }
         );
     }
@@ -688,7 +689,7 @@ mod tests {
         assert_eq!(
             s.execute(id),
             ExecuteResult::Denied {
-                reason: "revoked".into()
+                reason: deny_reasons::REVOKED.into()
             }
         );
         // and nothing was spent
@@ -701,7 +702,7 @@ mod tests {
         assert_eq!(
             s.execute(B256::repeat_byte(0xFF)),
             ExecuteResult::Denied {
-                reason: "unknown_request".into()
+                reason: deny_reasons::UNKNOWN_REQUEST.into()
             }
         );
     }
@@ -716,7 +717,7 @@ mod tests {
         assert_eq!(
             s.execute(id),
             ExecuteResult::Denied {
-                reason: "already_executed".into()
+                reason: deny_reasons::ALREADY_EXECUTED.into()
             }
         );
         // spent incremented exactly once
@@ -738,7 +739,7 @@ mod tests {
         assert_eq!(
             s.status(id),
             ApprovalStatus::Denied {
-                reason: "revoked".into()
+                reason: deny_reasons::REVOKED.into()
             }
         );
         assert!(s.policy().revoked);
@@ -813,7 +814,7 @@ mod tests {
         assert_eq!(
             s.execute(id),
             ExecuteResult::Denied {
-                reason: "revoked".into()
+                reason: deny_reasons::REVOKED.into()
             }
         );
         assert_eq!(s.policy().spent_today_wei, U256::ZERO);
@@ -889,7 +890,7 @@ mod tests {
         assert_eq!(
             s.sign_order(id),
             SignOrderResult::Denied {
-                reason: "not_approved".into()
+                reason: deny_reasons::NOT_APPROVED.into()
             }
         );
         s.approve(id);
@@ -909,7 +910,7 @@ mod tests {
         assert_eq!(
             s.sign_order(B256::repeat_byte(0xFF)),
             SignOrderResult::Denied {
-                reason: "unknown_request".into()
+                reason: deny_reasons::UNKNOWN_REQUEST.into()
             }
         );
     }
@@ -923,7 +924,7 @@ mod tests {
         assert_eq!(
             s.sign_order(id),
             SignOrderResult::Denied {
-                reason: "not_an_order".into()
+                reason: deny_reasons::NOT_AN_ORDER.into()
             }
         );
     }
@@ -938,7 +939,7 @@ mod tests {
         assert_eq!(
             s.sign_order(id),
             SignOrderResult::Denied {
-                reason: "revoked".into()
+                reason: deny_reasons::REVOKED.into()
             }
         );
     }
@@ -954,7 +955,7 @@ mod tests {
         assert_eq!(
             s.propose_order(&bad),
             Decision::Deny {
-                reason: "receiver_not_wallet".into()
+                reason: deny_reasons::RECEIVER_NOT_WALLET.into()
             }
         );
         assert_eq!(s.last_request_id(), None);
@@ -969,7 +970,7 @@ mod tests {
         assert_eq!(
             s.propose_order(&order()),
             Decision::Deny {
-                reason: "off_swap_list".into()
+                reason: deny_reasons::OFF_SWAP_LIST.into()
             }
         );
     }
@@ -988,7 +989,7 @@ mod tests {
         assert_eq!(
             s2.propose_order(&order()),
             Decision::Deny {
-                reason: "valid_to_too_far".into()
+                reason: deny_reasons::VALID_TO_TOO_FAR.into()
             }
         );
     }
@@ -1009,7 +1010,7 @@ mod tests {
         assert_eq!(
             s.cancel_order(id),
             ExecuteResult::Denied {
-                reason: "already_executed".into()
+                reason: deny_reasons::ALREADY_EXECUTED.into()
             }
         );
     }
@@ -1022,7 +1023,7 @@ mod tests {
         assert_eq!(
             s.cancel_order(id),
             ExecuteResult::Denied {
-                reason: "not_approved".into()
+                reason: deny_reasons::NOT_APPROVED.into()
             }
         );
     }
@@ -1035,7 +1036,7 @@ mod tests {
         assert_eq!(
             s.cancel_order(id),
             ExecuteResult::Denied {
-                reason: "not_an_order".into()
+                reason: deny_reasons::NOT_AN_ORDER.into()
             }
         );
     }
@@ -1050,7 +1051,7 @@ mod tests {
         assert_eq!(
             s.status(id),
             ApprovalStatus::Denied {
-                reason: "revoked".into()
+                reason: deny_reasons::REVOKED.into()
             }
         );
     }

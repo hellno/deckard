@@ -23,6 +23,7 @@
 //! as a float and rejected on decode. CBOR has no such limit.
 
 pub mod decision;
+pub mod deny_reasons;
 pub mod intent;
 pub mod mock;
 pub mod policy;
