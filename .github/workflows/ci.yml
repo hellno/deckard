@@ -11,7 +11,7 @@ name: CI
 #   quick (fmt, ~1 min) ──┬── linux : full build + clippy + test --workspace (+ anvil/Foundry)
 #                         ├── macos : build the shipping binaries + lint the macOS-only tray path
 #                         ├── cargo-deny-advisories  : security advisories gate (BLOCKING)
-#                         └── cargo-deny-supply-chain : bans/licenses/sources (non-blocking, see #40)
+#                         └── cargo-deny-supply-chain : bans/licenses/sources gate (BLOCKING)
 #
 # The `quick` gate fails cheap on the most common trivial mistake (unformatted code) before the two
 # heavy runners ever spin up.
@@ -112,15 +112,13 @@ jobs:
         with:
           command: check advisories
 
-  # Supply-chain HYGIENE — bans / licenses / sources. NON-BLOCKING (continue-on-error) until the
-  # license allow-list and bans policy are fully seeded: the GPL-3.0 (Zed) allow, ~12 unlicensed git
-  # crates needing `clarify`, the permissive-license additions, and the git-dep wildcard policy.
-  # Tracked in #40; promote to blocking (drop continue-on-error) once `cargo deny check bans licenses`
-  # is locally green.
+  # Supply-chain HYGIENE — bans / licenses / sources. BLOCKING. The license allow-list and bans
+  # policy are now fully seeded (deny.toml): permissive licenses allowed, GPL-3.0 scoped per-crate to
+  # the Zed gpui crates, unlicensed git crates clarified, and the git-dep wildcard policy set to warn.
+  # A new banned crate / disallowed license / untrusted source now blocks the merge. (#40)
   cargo-deny-supply-chain:
     needs: quick
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
