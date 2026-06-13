@@ -60,9 +60,9 @@ ignore = [
 [licenses]
 version = 2
 confidence-threshold = 0.9
-# ⚠️ SEED-THEN-TIGHTEN: this is a reasonable starting superset, NOT verified against the full
-# alloy + git-gpui tree. Run `cargo deny check licenses` locally and add exactly what it reports
-# (plus [licenses.exceptions] for any single oddball) before making the CI job blocking.
+# SEEDED from a real `cargo deny check licenses --all-features` run against the full alloy + git-gpui
+# + Helios + Railgun tree. All entries below are OSI-approved / permissive and fine under our AGPL.
+# Copyleft (GPL/AGPL) is NOT blanket-allowed — it is scoped per-crate in [licenses.exceptions].
 allow = [
     "MIT",
     "Apache-2.0",
@@ -75,24 +75,97 @@ allow = [
     "MPL-2.0",
     "Unlicense",
     "CC0-1.0",
+    "0BSD",               # BSD Zero Clause (e.g. enum-iterator) — permissive
+    "BSL-1.0",            # Boost Software License (e.g. rustls-platform-verifier) — permissive
+    "NCSA",              # University of Illinois/NCSA (e.g. libfuzzer-sys via rav1e) — permissive
+    "CDLA-Permissive-2.0", # Community Data License Agreement, permissive variant
+    "bzip2-1.0.6",        # bzip2/libbzip2 license (bzip2 crate) — permissive
 ]
-# This workspace's OWN crates are AGPL-3.0-or-later (see each Cargo.toml). cargo-deny license-checks
-# first-party crates too, so allow AGPL for our crates ONLY (not the whole dependency tree). If
-# cargo-deny rejects the `crate =` key on the action's version, switch to `name =`; verify on the
-# first local `cargo deny check licenses` run.
+# Copyleft is allowed ONLY per-crate here, never tree-wide.
+#   • AGPL-3.0 — this workspace's OWN crates (cargo-deny license-checks first-party crates too).
+#   • GPL-3.0  — Zed's own logging/tracing crates (zlog/ztracing/ztracing_macro), pulled transitively
+#                via gpui. Unavoidable, and GPL-3.0 is compatible with our stricter AGPL-3.0.
 exceptions = [
     { allow = ["AGPL-3.0-or-later"], crate = "deckard-app" },
     { allow = ["AGPL-3.0-or-later"], crate = "deckard-core" },
     { allow = ["AGPL-3.0-or-later"], crate = "deckard-mcp" },
     { allow = ["AGPL-3.0-or-later"], crate = "deckard-contract" },
     { allow = ["AGPL-3.0-or-later"], crate = "deckard-signerd" },
+    { allow = ["GPL-3.0-or-later"], crate = "zlog" },
+    { allow = ["GPL-3.0-or-later"], crate = "ztracing" },
+    { allow = ["GPL-3.0-or-later"], crate = "ztracing_macro" },
 ]
+
+# Clarify crates that ship with NO `license` field in their Cargo.toml — cargo-deny can't infer one,
+# so we assert the license the upstream project actually grants (verified by reading the source repo):
+#   • helios-*  — a16z/helios; the repo root LICENSE is MIT (the member crates just omit the field).
+#   • railgun/common/crypto/userop-kit — ethereum/kohaku; the repo's package.json declares "MIT".
+# Re-verify on each Helios / kohaku (railgun) bump.
+[[licenses.clarify]]
+crate = "helios-common"
+expression = "MIT"
+license-files = []
+
+[[licenses.clarify]]
+crate = "helios-consensus-core"
+expression = "MIT"
+license-files = []
+
+[[licenses.clarify]]
+crate = "helios-core"
+expression = "MIT"
+license-files = []
+
+[[licenses.clarify]]
+crate = "helios-ethereum"
+expression = "MIT"
+license-files = []
+
+[[licenses.clarify]]
+crate = "helios-revm-utils"
+expression = "MIT"
+license-files = []
+
+[[licenses.clarify]]
+crate = "helios-verifiable-api-client"
+expression = "MIT"
+license-files = []
+
+[[licenses.clarify]]
+crate = "helios-verifiable-api-types"
+expression = "MIT"
+license-files = []
+
+[[licenses.clarify]]
+crate = "railgun"
+expression = "MIT"
+license-files = []
+
+[[licenses.clarify]]
+crate = "common"
+expression = "MIT"
+license-files = []
+
+[[licenses.clarify]]
+crate = "crypto"
+expression = "MIT"
+license-files = []
+
+[[licenses.clarify]]
+crate = "userop-kit"
+expression = "MIT"
+license-files = []
 
 [bans]
 # The git gpui stack legitimately pulls duplicate versions (e.g. objc2 0.5 + 0.6), so a hard deny
 # here would be permanently red. Warn so we can see the dupes without blocking.
 multiple-versions = "warn"
-wildcards = "deny"
+# Wildcard (`*`) version reqs are unavoidable here: our intra-workspace deps use `path` (no version),
+# and the gpui stack is an UNPUBLISHED git dependency (`gpui = { git = ... }`) with no version to pin.
+# `allow-wildcard-paths` clears the path-dep case; the git-dep case can only warn (same reason
+# `multiple-versions` warns). The Cargo.lock still pins every git dep to an exact rev.
+wildcards = "warn"
+allow-wildcard-paths = true
 # openssl was previously denied here ("prefer rustls/ring"). It is ACCEPTED via documented exception:
 # Helios hard-pulls openssl 0.10 both directly and via reqwest's `native-tls`, so it cannot be removed
 # without changing Helios. The "prefer rustls" intent is now a tracked goal (#40 — fold Helios onto
