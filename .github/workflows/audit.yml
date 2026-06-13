@@ -1,0 +1,27 @@
+name: Supply-chain audit
+
+# Daily advisory re-scan, decoupled from PR CI. New RustSec advisories land continuously, so a tree
+# that was green at merge time can go vulnerable on a quiet day. This re-runs `cargo deny check
+# advisories` against the COMMITTED Cargo.lock using the same deny.toml ignore list as the PR-time
+# `cargo-deny-advisories` gate — a newly published advisory that isn't already justified there turns
+# this red. `workflow_dispatch` lets you run it on demand.
+#
+# NOTE: scheduled workflows only fire on the default branch, so this starts running once merged to
+# main. Config + the per-advisory justifications live in deny.toml; the remediation backlog is #40.
+
+on:
+  schedule:
+    - cron: "0 7 * * *" # 07:00 UTC daily
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  advisories:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories

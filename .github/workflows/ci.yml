@@ -10,7 +10,8 @@ name: CI
 #
 #   quick (fmt, ~1 min) ──┬── linux : full build + clippy + test --workspace (+ anvil/Foundry)
 #                         ├── macos : build the shipping binaries + lint the macOS-only tray path
-#                         └── cargo-deny : supply-chain gate (non-blocking)
+#                         ├── cargo-deny-advisories  : security advisories gate (BLOCKING)
+#                         └── cargo-deny-supply-chain : bans/licenses/sources (non-blocking, see #40)
 #
 # The `quick` gate fails cheap on the most common trivial mistake (unformatted code) before the two
 # heavy runners ever spin up.
@@ -97,11 +98,26 @@ jobs:
       - run: cargo build --locked -p deckard-app --features tray
       - run: cargo clippy --locked -p deckard-app --all-targets --features tray -- -D warnings
 
-  # Supply-chain gate (advisories / licenses / bans / sources). Config: deny.toml. NON-BLOCKING
-  # (continue-on-error) until the license allow-list is seeded from a local `cargo deny check
-  # licenses` and the unmaintained-transitive advisories are triaged — then drop continue-on-error.
+  # Supply-chain SECURITY gate — advisories only. BLOCKING. Config: deny.toml. Every advisory the
+  # RustSec DB reports is either fixed or carries a written, justified `ignore` in deny.toml; a new,
+  # untriaged advisory fails this check and blocks the merge until a human triages it. A daily
+  # re-scan against the committed Cargo.lock runs from .github/workflows/audit.yml.
   # Rationale: docs/AGENTIC-ENGINEERING.md §4.
-  cargo-deny:
+  cargo-deny-advisories:
+    needs: quick
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories
+
+  # Supply-chain HYGIENE — bans / licenses / sources. NON-BLOCKING (continue-on-error) until the
+  # license allow-list and bans policy are fully seeded: the GPL-3.0 (Zed) allow, ~12 unlicensed git
+  # crates needing `clarify`, the permissive-license additions, and the git-dep wildcard policy.
+  # Tracked in #40; promote to blocking (drop continue-on-error) once `cargo deny check bans licenses`
+  # is locally green.
+  cargo-deny-supply-chain:
     needs: quick
     runs-on: ubuntu-latest
     continue-on-error: true
@@ -109,4 +125,4 @@ jobs:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          command: check advisories bans sources licenses
+          command: check bans sources licenses
