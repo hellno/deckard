@@ -41,6 +41,23 @@ Recorded so the rubric below reflects deliberate product choices, not unexamined
 - **Out of scope for v0 (deliberate):** **social/guardian recovery (#6)** — conflicts with the pure-EOA,
   no-third-party model — and **L2 force-withdrawal / transaction inclusion (#15)** — only meaningful once
   L2s are supported. Both are documented trade-offs, accepted as unrated, not chased.
+- **Walletbeat ambition — harvest, don't climb.** Target the **maximum score on vision-aligned
+  attributes**; we explicitly do **not** chase Walletbeat's Stage ladder. The differentiator (an
+  agent that can't move funds without policy) is something Walletbeat doesn't even score; the rubric
+  is a checklist to harvest where it aligns, not a ladder to climb.
+- **Hardware-wallet signing (#4) — out of scope.** Deckard is keyboard-first, native, single-binary;
+  external hardware signing is a deliberate non-goal. (A *secure-enclave* unlock path, #5, is separate
+  and still in scope.)
+- **Connection surface — agent-only (for now).** The **MCP agent is Deckard's connection surface**;
+  there is no dapp/browser integration. **#25 (browser integration)** is **deferred** (not hard
+  out-of-scope — the dapp-surface question is under separate exploration), and **#11 (app isolation)**
+  is **reframed** as per-agent / per-session policy isolation.
+- **Account abstraction (#26) — 7702 spike.** Research-spike **EIP-7702** as a path to enforce
+  agent-policy **on-chain** (scoped session keys), which would also unlock atomic batching (#27).
+  Decide adoption after the spike; weigh the new delegation-contract trust surface against the current
+  `accountUnruggability` PASS. Until then #26/#27 stay FAIL by choice.
+- **Multi-identity (#8/#9) — a goal (post-v0).** Support multiple, non-correlated accounts/identities
+  (standard BIP-44 + non-correlation UX). Privacy-aligned; not a v0 blocker.
 - **Process:** decisions are folded into this doc; **no GitHub issues opened** yet.
 
 ## Where Deckard stands today
@@ -55,9 +72,11 @@ Recorded so the rubric below reflects deliberate product choices, not unexamined
 | **Total** (27) | **9** | **12** | **6** | |
 
 These statuses are Deckard's self-assessment against the rules below; Walletbeat would rate
-independently. The biggest single lever is the **external security audit** — it directly sets
-`Security audits` and unblocks Stage 1. Two attributes (#6 social recovery, #15 L2 force-withdrawal)
-are **deliberately out of scope for v0** (see Decisions above) and are not counted as actionable gaps.
+independently. The biggest single lever is the **external security audit** (#1). Per the decisions
+above, several attributes are **deliberate non-goals** and are not counted as actionable gaps:
+#4 hardware signing, #25 browser integration (deferred), #6 social recovery, #15 L2 force-withdrawal —
+plus #26/#27 (account abstraction / batching) gated behind a 7702 spike. We optimize the
+**vision-aligned** attributes, not Walletbeat's Stage ladder.
 
 ---
 
@@ -68,7 +87,7 @@ are **deliberately out of scope for v0** (see Decisions above) and are not count
 | 1 | **Security audits** | Audited within last 365 days, all medium+ findings fixed; stale/unresolved = PARTIAL | **MISSING** — "no third-party audit yet" (`SECURITY.md`) | **Fund + complete an external audit** of the signer/policy/keystore surface; publish the report and remediation. Highest-leverage single item (also a Stage-1 gate). **Decision spike — budget/vendor undecided (2026-06-14).** |
 | 2 | **Scam prevention** | Warn users about scams (malicious address / approval / phishing / simulation) | **PARTIAL** — network-warning on Receive only (`receive.rs`, `DESIGN.md`) | Add malicious-address / known-scam checks and **simulate-before-sign warnings** in the clear-signing card; surface risk before approval. |
 | 3 | **Transaction legibility** (clear-signing) | Display basic, human-readable tx details before signing; decode EIP-712 | **PARTIAL** — clear-signing card wired for shield/swap (`shield_view.rs`); EIP-712 machinery exists (`cow_types.rs`) but not user-facing for arbitrary tx | Extend the clear-signing card to **all writes** (esp. the gated Send), and render decoded **EIP-712** structured data in plain language. |
-| 4 | **Hardware wallet support** | Sign via external hardware wallets, ideally 3+ vendors (Stage-1 wants multi-vendor) | **MISSING** — no Ledger/Trezor path | Add a hardware-signer backend to `deckard-signerd` (Ledger first, then a second vendor). Larger effort; Phase-2. |
+| 4 | **Hardware wallet support** | Sign via external hardware wallets, ideally 3+ vendors (Stage-1 wants multi-vendor) | **OUT OF SCOPE (2026-06-14)** — no Ledger/Trezor path | **Deliberate non-goal** — keyboard-first, native, single-binary. (Secure-enclave unlock, #5, is separate and in scope.) |
 | 5 | **Security best practices** | Key storage in secure enclave/HSM = PASS; **standardized-KDF-encrypted / OS-sandboxed = PARTIAL**; on-device keygen with OS CSPRNG required | **PARTIAL** — Argon2id + XChaCha20-Poly1305 at rest, on-device keygen, OS CSPRNG (`keystore.rs`) | Already a solid PARTIAL. To reach **PASS**, add a **secure-enclave / OS-keychain** key path (Touch ID / Secure Enclave on macOS — already a Phase-2 line item). |
 | 6 | **Account recovery** | Credits **only guardian/social recovery** — seed backup does **not** count; needs 3+ independent shares, no single party can recover, reconstituted on user device | **OUT OF SCOPE (2026-06-14)** — BIP-39 seed backup only | **Deliberately out of scope for v0.** Guardian/social recovery conflicts with the pure-EOA, no-third-party model; accepted as unrated and documented as a trade-off. |
 | 7 | **Duress resistance** | Protect against physical coercion / unauthorized access (decoy, duress unlock, panic) | **PARTIAL** — STOP panic brake zeroizes the key (`deckard_revoke_all`, `daemon.rs`); explicit lock | Add **idle auto-lock** (already noted missing) and consider a **decoy/duress unlock**. The panic brake is a genuine partial credit. |
@@ -78,9 +97,9 @@ are **deliberately out of scope for v0** (see Decisions above) and are not count
 | # | Attribute | What Walletbeat wants (PASS) | Deckard now | Requirement to pass |
 |---|---|---|---|---|
 | 8 | **Wallet address privacy** | Address not linkable to sensitive personal info | **PARTIAL** — single on-chain receive address | Pair with shields (below) and stealth/rotating receive addresses to reduce linkability. |
-| 9 | **Multi-address privacy** | Multiple addresses not correlatable with each other (Stage-2) | **PARTIAL** — standard BIP-44 derivation can yield multiple addresses; identity switching not a product surface | Ship **multi-account / identity switching** with non-correlation guidance; avoid reusing one address across contexts. |
+| 9 | **Multi-address privacy** | Multiple addresses not correlatable with each other (Stage-2) | **PARTIAL** — standard BIP-44 derivation can yield multiple addresses; identity switching not a product surface | **Goal (2026-06-14, post-v0):** ship **multi-account / identity switching** with non-correlation UX; avoid reusing one address across contexts. |
 | 10 | **Private token transfers** | Transfers/balances private by default | **PASS** — key-less **Railgun** shield, app-reachable, black-box tested (`shield.rs`, `STATUS.md`) | Maintain; extend to private **send/unshield** to strengthen "by default". This is a flagship strength. |
-| 11 | **App isolation** | Distinct accounts per app to limit data correlation | **MISSING** — no dapp-connection surface | Gated on building a dapp surface (see Ecosystem). When added, scope **per-origin accounts/permissions**. |
+| 11 | **App isolation** | Distinct accounts per app to limit data correlation | **REFRAMED (2026-06-14)** — no dapp surface; agent is the connection surface | **Reframed as per-agent / per-session policy isolation** (Deckard has no dapps). Tie to the policy gate so each agent session is scoped/correlatable-by-choice. |
 | 12 | **Privacy hygiene** | Collect no more data than a default web browser; no telemetry | **PASS** — no telemetry (`onboarding.rs`); Helios light-client reads; RPC URLs redacted from reasons (`helios.rs`, `THREAT-MODEL.md`) | Maintain; keep a written **no-data-collection** statement public as the verifiable evidence. |
 
 ## Self-sovereignty — *Deckard's strongest group*
@@ -109,9 +128,9 @@ are **deliberately out of scope for v0** (see Decisions above) and are not count
 | # | Attribute | What Walletbeat wants (PASS) | Deckard now | Requirement to pass |
 |---|---|---|---|---|
 | 24 | **Address resolution** | Send to human-readable names (ENS); ideally chain-specific (ERC-7828/7831) | **PARTIAL** — ENS resolver imported in engine (`eth.rs`) but not wired to UI | **Wire ENS resolution into the Send/Receive UI** (resolve + reverse-resolve, with the verified-read badge). Engine work is mostly done. |
-| 25 | **Browser integration** | Comply with browser dapp-integration standards (EIP-6963 / WalletConnect) | **MISSING** — desktop-native, no dapp connection | Largest gap for a native desktop wallet. Add a **WalletConnect v2** session surface (works without a browser extension) so dapps can connect. Architectural effort. |
-| 26 | **Account abstraction** | Be AA-ready (ERC-4337 and/or **EIP-7702** smart accounts) | **MISSING** — EOA-only | Adopt **EIP-7702** (address-preserving EOA→smart-account; Rust tooling exists per `research/02`) to unlock AA, batching, and scoped session permissions. Strategic, multi-step. |
-| 27 | **Transaction batching** | Support **atomic batched transactions** (EIP-5792 `wallet_sendCalls`) | **MISSING** — single-tx only | Falls out of EIP-7702 adoption (#26); implement **EIP-5792 `wallet_sendCalls`** atomic batching. |
+| 25 | **Browser integration** | Comply with browser dapp-integration standards (EIP-6963 / WalletConnect) | **DEFERRED (2026-06-14)** — desktop-native, agent-only connection surface | **Deferred, under separate exploration.** Deckard's connection surface is the **MCP agent**, not dapps; no WalletConnect/EIP-6963 planned. Accepts a FAIL here by choice unless the separate dapp-surface discussion changes it. |
+| 26 | **Account abstraction** | Be AA-ready (ERC-4337 and/or **EIP-7702** smart accounts) | **MISSING → 7702 spike (2026-06-14)** — EOA-only | **Research-spike EIP-7702** to enforce agent-policy **on-chain** (scoped session keys); address-preserving, Rust tooling exists (`research/02`). Decide adoption after weighing the new delegation-contract trust surface vs. the `accountUnruggability` PASS. |
+| 27 | **Transaction batching** | Support **atomic batched transactions** (EIP-5792 `wallet_sendCalls`) | **MISSING** — single-tx only | **Contingent on the #26 7702 spike.** If 7702 is adopted, implement **EIP-5792 `wallet_sendCalls`** atomic batching. |
 
 ---
 
@@ -134,26 +153,32 @@ Grouped by leverage vs. effort. This is a **suggested ordering for discussion, n
 10. **Secure-enclave / OS-keychain key path** (#5) — pushes security-best-practices toward PASS; pairs with Touch ID.
 
 ### Strategic / large (sets the ceiling)
-11. **External security audit + funded bug bounty** (#1, and Stage-2 bug bounty) — *the* highest-leverage item; gates Stage 1. **Decision spike — budget/vendor undecided (2026-06-14); not yet an actionable issue.**
-12. **EIP-7702 adoption** (#26) → unlocks **atomic batching** (#27) and scoped session permissions.
-13. **WalletConnect v2 dapp surface** (#25) → enables **app isolation / per-origin accounts** (#11).
-14. **Hardware-wallet signing** (#4) — multi-vendor for Stage 1.
+11. **External security audit + funded bug bounty** (#1, and Stage-2 bug bounty) — *the* highest-leverage item. **Decision spike — budget/vendor undecided (2026-06-14); not yet an actionable issue.**
+12. **EIP-7702 spike** (#26) → if adopted, unlocks **atomic batching** (#27) and on-chain scoped agent permissions. **Research-spike first** (weigh the delegation-contract trust surface).
+13. **Per-agent isolation** (#11) → scope each agent/session in the policy gate (the agent-paradigm analog of app isolation).
 
-### Out of scope for v0 (decided 2026-06-14 — acknowledge, don't chase)
+### Out of scope / deferred for v0 (decided 2026-06-14 — acknowledge, don't chase)
+- **Hardware-wallet signing** (#4) — deliberate non-goal (keyboard-first, native, single-binary).
+- **Browser integration / WalletConnect** (#25) — deferred; the MCP agent is the only connection surface (under separate exploration).
 - **L2 force-withdrawal / transaction inclusion** (#15) — only meaningful once L2s are supported; no L2 roadmap yet.
 - **Guardian/social recovery** (#6) — conflicts with the pure-EOA, no-third-party model; deliberate trade-off, accepted as unrated.
 
-## Reaching the Stages ladder
+## The Stages ladder (reference only — we are not climbing it)
 
-- **Stage 0** — *already cleared*: public source code (#20).
-- **Stage 1** — needs: recent **audit** (#1), **multi-vendor hardware** (#4), **chain verification** ✅ (#16),
-  **private-by-default transfers** ✅ (#10), **account portability** ✅ (#14), **own-node** (#13, near-PASS),
-  **FOSS license** ✅ (#19), **ENS** (#24), **browser-integration standards** (#25). → Gated mainly by
-  **audit + hardware + browser integration**.
-- **Stage 2** — adds: **funded bug bounty**, **address & multi-address non-correlation** (#8/#9),
-  **permissionless L2→L1 withdrawal** (#15), **custom RPC everywhere** (#13), **funding disclosure** (#21),
-  **fee transparency** ✅ (#22), **chain-specific address resolution** (#24), **account abstraction** (#26),
-  **atomic batching** (#27).
+Per the **"harvest, don't climb"** decision (2026-06-14), Deckard does **not** target Walletbeat's
+Stages. Two Stage-1 gates — **multi-vendor hardware (#4)** and **browser integration (#25)** — are
+deliberate non-goals, so **full Stage 1 is structurally unreachable by choice**, and that's accepted.
+The ladder is kept here only to show which vision-aligned items happen to overlap:
+
+- **Stage 0** — *cleared*: public source code (#20).
+- **Stage 1 (not targeted)** — gated by **hardware (#4, out)** and **browser integration (#25, deferred)**.
+  Deckard nonetheless satisfies the vision-aligned Stage-1 items: **chain verification** ✅ (#16),
+  **private-by-default transfers** ✅ (#10), **account portability** ✅ (#14), **FOSS license** ✅ (#19),
+  with **own-node** (#13, near-PASS), **ENS** (#24), and **audit** (#1) in flight.
+- **Stage 2 (not targeted)** — vision-aligned overlaps worth doing anyway: **address & multi-address
+  non-correlation** (#8/#9), **custom RPC everywhere** (#13), **funding disclosure** (#21),
+  **fee transparency** ✅ (#22). The rest (**L2→L1 withdrawal** #15, **AA** #26, **batching** #27) are
+  out-of-scope or spike-gated.
 
 ## See also
 
