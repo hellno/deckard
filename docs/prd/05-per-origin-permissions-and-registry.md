@@ -1,9 +1,9 @@
 # PRD-05 — Per-origin permissions, dapp registry & anti-phishing
 
 > Phase 2 of [ADR 0001](../adr/0001-dapp-connectivity-architecture.md). The policy + trust layer that
-> makes generic connectivity (PRD-04) safe: scope each connected origin (accounts × chains × methods),
-> ship a curated registry + anti-phishing blocklist, and treat origin as attacker-controllable.
-> Pairs with PRD-04; depends on PRD-02.
+> makes the Deckard-native bridge (PRD-04) safe: scope each connected origin (accounts × chains ×
+> methods), ship a curated registry + anti-phishing blocklist, and treat origin as
+> attacker-controllable. Pairs with PRD-04; depends on PRD-02.
 
 ## Why this exists
 
@@ -51,8 +51,11 @@ blocklist, and the human must always approve on decoded effects, not a claimed n
 
 ### Origin attestation (treat as a hint, `research §29`)
 
-- The daemon receives an origin string from the (untrusted) proposer. It is displayed as **unverified**
-  unless corroborated by (a) WalletConnect Verify-API state (PRD-04) and/or (b) a registry match.
+- The daemon receives an origin string from the (untrusted) connector/proposer. It is displayed as
+  **unverified** unless corroborated by (a) a curated-registry match and/or (b) any first-party
+  attestation the bridge can establish (PRD-04). There is no third-party relay attestation (we shelved
+  WalletConnect's Verify API along with WalletConnect) — so origin trust leans on the registry +
+  blocklist + the always-clear-signed effects, never a remote checkmark.
 - The card shows attestation state (verified-domain / unverified / mismatch / known-scam) using
   `DESIGN.md` caution affordances — but the **decoded effects** remain the ground truth the human holds
   to confirm. Never gate solely on a green checkmark.

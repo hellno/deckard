@@ -1,4 +1,26 @@
-# PRD-04 — WalletConnect v2 transport (`deckard-wcd`)
+# SHELVED — WalletConnect v2 transport (rejected alternative)
+
+> **Status: REJECTED / SHELVED (2026-06-14).** Not on the roadmap. Superseded by the **Deckard-native
+> bridge** ([PRD-04](./04-deckard-native-bridge.md)), which delivers universal dapp reach over a
+> transport Deckard owns end-to-end. Retained only so the decision is recorded and not re-litigated.
+> See [ADR 0001 §Alternatives](../adr/0001-dapp-connectivity-architecture.md).
+>
+> **Why shelved:**
+> 1. **Centralized relay + Project-ID dependency** (`research §10–11`) — leaks IP/timing/topic metadata
+>    to a third-party (Reown) relay and requires a Project ID with usage analytics. Against Deckard's
+>    offline-first, privacy-focused identity.
+> 2. **UX the maintainer explicitly rejects** — QR-pairing / relay round-trips / session churn. Deckard
+>    wants native, local, instant approval cards, which the owned bridge provides.
+> 3. **No maintained Rust wallet-side SDK** (`research §14`) — the Sign protocol is an in-house build
+>    either way, so "adopt a standard to save work" is weak.
+> 4. Its one genuine advantage — **mobile reach** — does not outweigh 1–3. Mobile universal-reach is
+>    left as an explicit open problem (ADR 0001 Consequences), not solved via WC.
+>
+> The text below is the original (pre-shelving) proposal, kept verbatim for the record.
+
+---
+
+# PRD-04 — WalletConnect v2 transport (`deckard-wcd`) — ORIGINAL, SHELVED
 
 > Phase 2 of [ADR 0001](../adr/0001-dapp-connectivity-architecture.md). The **primary generic
 > dapp-connectivity transport**: reaches desktop today and mobile later, no browser extension to ship

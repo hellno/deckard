@@ -27,7 +27,8 @@ Phase-2 connectivity machinery (PRD-04/05).
 
 ## Non-goals
 
-- Generic / open dapp access (PRD-04). No `window.ethereum`, no WalletConnect here.
+- Generic / open dapp access (PRD-04, the Deckard-native bridge). No `window.ethereum`, no external
+  transport here — these are native Rust code paths only.
 - Per-origin permissions (PRD-05) — there is no untrusted origin; the integration *is* Deckard code.
 - New signing primitives beyond what PRD-02 adds (a swap needs Permit2/EIP-712 → that's PRD-02's job;
   this PRD consumes it).

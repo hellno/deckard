@@ -11,13 +11,17 @@
 Captured via a requirements pass before research:
 
 1. **Mobile horizon — "don't compromise desktop for it."** Optimize for macOS/Linux; keep mobile
-   *possible* but don't let it dictate the desktop design. → favors transports that can survive onto
-   mobile over desktop-only ones, without over-investing now.
-2. **Dapp openness — "curated/allowlisted first."** Start with a vetted set (swaps, bridges); on-brand
-   "calm sovereign control, not a casino"; per-origin scope; expand later.
-3. **Browser engine — "avoid; keep wallet minimal."** Connect to the user's own browser and/or a relay
-   rather than bundling an engine. Preserves the hardened minimal-core identity.
-4. **Deliverable — "ADR first, then multiple PRDs"** with per-workstream Definitions of Done.
+   *possible* but don't let it dictate the desktop design.
+2. **Dapp openness — "curated/allowlisted first," but universal reach is an accepted goal.** Start with
+   a vetted set (swaps, bridges); on-brand "calm sovereign control, not a casino"; per-origin scope.
+   Users *will* want arbitrary dapps, so the architecture must reach the long tail eventually.
+3. **Browser engine — "avoid; keep wallet minimal."** Do not bundle a browser engine.
+4. **Own the connection — "no external bad stuff."** A second-pass requirement: Deckard does **not**
+   build on a bloated third-party transport with bad UX. No WalletConnect relay, no dependence on a
+   browser-store as a trust anchor. Universal reach is delivered through a **bridge Deckard owns
+   end-to-end** (our wire, our UX, local-first, no third-party relay). WalletConnect is recorded as a
+   rejected alternative, not a roadmap item.
+5. **Deliverable — "ADR first, then multiple PRDs"** with per-workstream Definitions of Done.
 
 Plus the standing constraint from `SECURITY.md`: Deckard is `0.0.1-alpha`, unaudited, single-maintainer,
 testnet-keys-only. Any new attack surface is sequenced *behind* an audit.
@@ -72,17 +76,27 @@ clear-signing pattern. No new trust boundary is invented; we extend the one we h
     recognition, EIP-7702 handling, and ERC-7730 consumption with a safe blind-sign fallback
     (`research §30–36`). Phase 0's swap already needs Permit2/EIP-712, so this is not gated on Phase 2.
     → **PRD-02**.
-- **Phase 2 — Generic dapp connectivity, when warranted (post-audit).** **WalletConnect v2 is the
-  primary generic transport**, implemented as a new key-less proposer process mirroring `deckard-mcp`,
-  with CAIP-25 scope negotiation, Verify-API origin attestation, per-origin policy, a curated
-  registry + anti-phishing blocklist, and explicit relay-privacy mitigations. → **PRD-04** (transport)
-  + **PRD-05** (per-origin permissions & registry).
-  - **A browser extension (Option B) is a secondary, optional desktop-convenience add-on**, not the
-    primary path: it is desktop-only (doesn't reach mobile, driver #1) and the extension artifact is a
-    recurring drainer/supply-chain target (`research §6`). If ever built, it is a thin EIP-6963
-    proposer that speaks the *same* WalletConnect-or-native bridge — never the daemon wire directly,
-    and never with `resolve` capability. Tracked as a future PRD, not in this batch.
+- **Phase 2 — Universal reach via a Deckard-native bridge, when warranted (post-audit).** Deliver
+  "connect to any dapp" through a transport Deckard **fully owns**: a first-party, key-less connector
+  that injects a *standard* EIP-1193 + EIP-6963 provider into the user's own browser (so every dapp
+  works — they already speak EIP-1193) and forwards requests over a **Deckard-owned local wire** (native
+  messaging preferred over a localhost port, `research §2–5`) to a new key-less proposer process
+  mirroring `deckard-mcp`. No third-party relay, no embedded engine, no store-as-trust-anchor. The UX
+  is native cards, local and instant — the explicit antidote to WalletConnect's relay-latency/QR-dance
+  UX. → **PRD-04** (the bridge) + **PRD-05** (per-origin permissions, scope & registry).
+  - **WalletConnect v2 is rejected and shelved** (see Alternatives; rationale preserved in
+    [`docs/prd/x-walletconnect-shelved.md`](../prd/x-walletconnect-shelved.md)). It would import a
+    centralized relay + Project-ID dependency (privacy/offline-first tension) and a UX the maintainer
+    explicitly does not want.
   - The embedded webview stays rejected.
+  - **Honest cost:** a browser-side connector is desktop-only. Rejecting WalletConnect (the
+    mobile-capable transport) leaves *mobile* universal-reach unsolved; this is consistent with driver
+    #1 ("don't compromise desktop for it") but is the deliberate trade and an open question for a future
+    mobile effort, not something this ADR solves.
+  - **Supply-chain containment:** the connector is a recurring class of attack target (`research §6`),
+    so its trust is *bounded by design*, not by the store: it is key-less, cannot `resolve` (PRD-01),
+    submits only typed intents through PRD-02 builders, and every effect is clear-signed. A fully
+    compromised connector can propose garbage — it can never sign, self-approve, or exfiltrate a key.
 
 **3. Cross-cutting invariants every phase inherits (non-negotiable):**
 - New proposers are **key-less**, reuse `deckard-contract`, and **cannot** `resolve` or submit a raw
@@ -97,28 +111,42 @@ clear-signing pattern. No new trust boundary is invented; we extend the one we h
 **Positive**
 - The security boundary is *strengthened* before any surface is added (PRD-01 fixes a standing
   accepted risk regardless of connectivity).
-- The minimal-core identity and offline-first posture are preserved (no engine; Phase 0/1 need no
-  network relay at all).
+- The minimal-core, offline-first, privacy identity is preserved *all the way through* — the owned
+  bridge has **no third-party relay**, so no IP/metadata leaks to a Reown-style intermediary; everything
+  stays local. This is a genuine privacy win over WalletConnect, not just parity.
+- We own the UX end-to-end: native cards, local and instant, no QR pairing or relay round-trip — the
+  deliberate answer to "WalletConnect UX sucks."
+- Universal reach is still achieved (any EIP-1193 dapp) without becoming a browser or depending on a
+  relay/store.
 - Phasing matches the alpha → audit → 1.0 trajectory: ship the safest, smallest thing first.
-- WalletConnect gives a single transport that reaches desktop today and mobile later, so the eventual
-  mobile app doesn't force an architecture rewrite (honors driver #1 cheaply).
 
 **Negative / costs**
-- WalletConnect imports a **centralized relay + Project-ID dependency** (privacy/offline-first tension,
-  `research §10–11`) and a **non-trivial in-house Rust Sign-protocol build** (no maintained Rust
-  wallet SDK, `research §14`). PRD-04 must address relay-egress privacy and the build/borrow decision.
-- Declining the embedded browser means Deckard never offers a fully in-app "open any dapp" experience;
-  the curated-native + WalletConnect combination is the deliberate substitute.
-- The extension being deprioritized means desktop-browser dapps that only speak injected
-  `window.ethereum` (not WalletConnect) aren't reachable until/unless the optional extension ships.
+- **Mobile universal-reach is unsolved.** A browser-side connector is desktop-only; we gave up the one
+  mobile-capable transport (WalletConnect). Accepted under driver #1, but flagged as a future open
+  problem.
+- **We carry a first-party connector** (a browser artifact + a native-messaging host) — engineering and
+  a perpetual supply-chain target to maintain. Contained by the key-less/bounded-boundary design, but
+  it is real surface we now own.
+- **Building our own wire** instead of adopting WalletConnect is more invention; we don't get dapps'
+  existing WC support for free (mitigated: dapps speak EIP-1193 already, so the *injected provider*
+  path needs no per-dapp work).
+- Declining the embedded browser means Deckard never offers a fully in-app "open any dapp" surface; the
+  curated-native + owned-bridge combination is the deliberate substitute.
 
 ## Alternatives considered (and rejected)
 
 - **Embedded webview (Option A as clarified):** rejected — see Decision §1.
-- **Browser extension as the *primary* transport (Option B):** rejected as primary — desktop-only and
-  a supply-chain liability; retained only as an optional secondary add-on.
-- **Frame-style localhost RPC bridge (`ws://127.0.0.1:1248`):** rejected — web-reachable
-  (DNS-rebinding / cross-site WebSocket hijacking), defended only at the UI layer (`research §2`).
+- **WalletConnect v2 as the generic transport:** **rejected and shelved** (full rationale:
+  [`docs/prd/x-walletconnect-shelved.md`](../prd/x-walletconnect-shelved.md)). Summary: a centralized
+  Reown relay + Project-ID dependency that leaks IP/metadata (against offline-first/privacy,
+  `research §10–11`), a QR/relay UX the maintainer explicitly rejects, and no maintained Rust
+  wallet-side SDK (`research §14`). Its one advantage — mobile reach — does not outweigh owning the
+  transport and UX. Recorded so the decision isn't re-litigated.
+- **Generic browser extension over a Frame-style localhost RPC bridge (`ws://127.0.0.1:1248`):** the
+  *localhost* wire is rejected — web-reachable (DNS-rebinding / cross-site WebSocket hijacking), defended
+  only at the UI layer (`research §2`). The owned bridge (PRD-04) prefers **native messaging** (stdio
+  host, not web-reachable) for exactly this reason. A first-party connector is *kept* (it is the bridge's
+  browser end), but its trust is bounded by the key-less/clear-signing boundary, not by the store.
 - **In-process plugins / dylibs loaded into the app or daemon:** rejected outright — same-uid code
   with arbitrary execution lands on the *trusted* side of the boundary and can self-approve; this is
   the maximal form of residual-risk #1. (Extensibility, if wanted, must be sandboxed, key-less,
@@ -131,7 +159,9 @@ clear-signing pattern. No new trust boundary is invented; we extend the one we h
   daemon-spawns-app vs app-spawns-daemon direction inversion).
 - PRD-02: which `IntentKind`s to add (`SignMessage`, `SignTypedData`, and whether EIP-7702 `Delegate`
   is supported-behind-allowlist or refused outright).
-- PRD-04: build the WC Sign layer in Rust vs run a sidecar (a key-less WC↔daemon translator akin to
-  `deckard-mcp`); relay privacy egress; whether a custom/self-hosted relay URL is exposed.
+- PRD-04: the browser-reach mechanism for the owned bridge — native-messaging stdio host (preferred,
+  not web-reachable) vs a hardened localhost wire; how the first-party connector is distributed and
+  signed without leaning on a store as a trust anchor; and how/whether mobile reach is ever addressed
+  given the connector is desktop-only.
 - PRD-05: registry format (adopt ERC-7730 descriptors directly?) and how the curated allowlist ships
   and updates offline-first.
