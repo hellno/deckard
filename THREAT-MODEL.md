@@ -14,24 +14,32 @@ that is not your user is not**. The daemon's Unix socket is `0600` inside a `070
 directory and the daemon checks the peer's uid. There is no second boundary inside
 your user account:
 
-- **`Resolve` is same-uid honor-system.** The daemon converts guarded writes to
-  `NeedsApproval`; the app's hold-to-confirm sends `Resolve { approved: true }` over
-  the socket, and the daemon cannot distinguish that from any other same-uid process
-  speaking the (documented) CBOR wire. The guardrail therefore constrains
-  **tool-confined agents** — a Claude Desktop instance whose only hands are the
-  mcp.v0.1 tools, which deliberately include **no `propose` and no `resolve`** — not
-  arbitrary code execution as your user. An agent with shell access is same-uid code:
-  it is on the trusted side of the boundary whether we like it or not, exactly as live
-  malware is for the keystore (see SECURITY.md's "stated honestly" section).
+- **`Resolve` is gated by an unforgeable capability (PRD-01), not the honor system.**
+  The daemon converts guarded writes to `NeedsApproval`; approval
+  (`Resolve { approved: true }`) is honoured **only** on the private channel the daemon
+  inherits from the app that supervises it — a `socketpair` end passed at spawn
+  (`supervise.rs` mints it, `server.rs` serves it, `daemon.rs` gates on it). A `Resolve`
+  on the public proposer socket — any *other* same-uid process speaking the documented
+  CBOR wire — is refused with `resolve_not_authorized`. So a same-uid proposer (including
+  a fully compromised MCP sidecar) can propose and read, but it **cannot self-approve**;
+  the mcp.v0.1 tool surface still deliberately includes **no `propose` and no `resolve`**
+  (defense in depth). The honest residual: an agent with arbitrary **shell** access is
+  same-uid code that can reach the app's inherited fd anyway (ptrace, `/proc/<pid>/fd`) —
+  it is on the trusted side of the boundary, exactly as live malware is for the keystore
+  (see SECURITY.md's "stated honestly" section). The capability closes the *cheap,
+  wire-level* self-approve that any same-uid process could previously do; it does not
+  fence off arbitrary code execution as your user.
 - **Request-ids are deterministic per intent** (no salt/namespace). Within the
   same-uid boundary this is fine — anyone who can compute your request-id can also
   just open their own connection. Salted/namespaced request-ids are on the roadmap for
   a future multi-principal daemon; they are deliberately not in the frozen v1 wire.
 
-Authenticating the resolver (e.g. a socketpair or cookie handed only to the
-supervised app process) is the known hardening step if a second principal ever shares
-the socket. Until then: do not point this daemon at meaningful mainnet funds while
-running unattended agents with shell access. That sentence is the threat model.
+Authenticating the resolver — a `socketpair` capability handed only to the supervised
+app — is now **implemented** (PRD-01): the public socket can no longer approve. The
+standing caution is therefore narrower: do not point this daemon at meaningful mainnet
+funds while running unattended agents with **shell** access, because same-uid code can
+still reach the app's capability fd (ptrace / `/proc`). That sentence is the threat
+model.
 
 ## Prompt injection, and what actually stops it
 
@@ -178,10 +186,14 @@ connect.
   `spent_today` (`cap_exceeded`). Two within-cap proposals therefore can't both slip past
   the daily cap.
 
-*Deferred:* the socket has no second principal today, so there is no resolver
-authentication — `Resolve` is honored from any same-uid caller (the boundary section
-above; red-team issue #2). Cross-restart spend persistence is also deferred
-(`policy_store.rs`): `spent_today` is in-memory and resets on restart.
+- **Resolver authentication** (`crates/deckard-signerd/src/{server,daemon,supervise}.rs`,
+  PRD-01): `Resolve` is honoured only on the private capability channel the daemon
+  inherits from the supervising app (a `socketpair` end passed at spawn); a `Resolve` on
+  this public socket is refused with `resolve_not_authorized`. The same-uid peer-cred
+  check stays as defense-in-depth + logging, not as the approval boundary.
+
+*Deferred:* cross-restart spend persistence (`policy_store.rs`): `spent_today` is
+in-memory and resets on restart.
 
 ### 3. The policy store (the fence an attacker would want to widen)
 

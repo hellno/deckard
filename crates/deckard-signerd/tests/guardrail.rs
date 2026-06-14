@@ -174,18 +174,9 @@ async fn guardrail_needs_approval_resolves_then_executes() {
         other => panic!("expected not_approved, got {other:?}"),
     }
 
-    // Human approval (the app's hold-to-confirm) → Allowed → execute reaches broadcast.
-    match client
-        .request(&SignerRequest::Resolve {
-            request_id: id,
-            approved: true,
-        })
-        .await
-        .unwrap()
-    {
-        SignerResponse::Ack => {}
-        other => panic!("expected Ack, got {other:?}"),
-    }
+    // Human approval (the app's hold-to-confirm) over the authenticated control channel →
+    // Allowed → execute reaches broadcast. (A `Resolve` on the public socket is now refused.)
+    d.resolve(id, true);
     match client
         .request(&SignerRequest::Status { request_id: id })
         .await

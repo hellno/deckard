@@ -57,6 +57,46 @@ where
     Ok(())
 }
 
+/// Blocking sibling of [`read_frame`] for the synchronous capability channel: the app's
+/// supervisor talks to the daemon over a `socketpair` off the UI thread (see
+/// [`crate::supervise::ControlChannel`]). Same framing, same 1 MiB cap, same clean-EOF vs
+/// truncated-prefix distinction.
+pub fn read_frame_blocking<R: std::io::Read>(r: &mut R) -> anyhow::Result<Option<Vec<u8>>> {
+    let mut len_buf = [0u8; 4];
+    let mut filled = 0;
+    while filled < len_buf.len() {
+        let n = r.read(&mut len_buf[filled..])?;
+        if n == 0 {
+            if filled == 0 {
+                return Ok(None); // clean EOF between frames
+            }
+            anyhow::bail!("truncated length prefix: {filled} of 4 bytes before EOF");
+        }
+        filled += n;
+    }
+    let len = u32::from_be_bytes(len_buf) as usize;
+    anyhow::ensure!(
+        len <= MAX_FRAME,
+        "frame too large: {len} bytes > {MAX_FRAME}"
+    );
+    let mut body = vec![0u8; len];
+    r.read_exact(&mut body)?;
+    Ok(Some(body))
+}
+
+/// Blocking sibling of [`write_frame`] (length prefix + body, then flush).
+pub fn write_frame_blocking<W: std::io::Write>(w: &mut W, body: &[u8]) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        body.len() <= MAX_FRAME,
+        "frame too large: {} bytes",
+        body.len()
+    );
+    w.write_all(&(body.len() as u32).to_be_bytes())?;
+    w.write_all(body)?;
+    w.flush()?;
+    Ok(())
+}
+
 /// CBOR-encode a value into a frame body.
 pub fn encode<T: serde::Serialize>(value: &T) -> anyhow::Result<Vec<u8>> {
     let mut buf = Vec::new();

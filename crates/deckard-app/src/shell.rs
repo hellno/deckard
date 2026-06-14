@@ -1399,10 +1399,12 @@ impl Shell {
         self.shield_error = None;
         cx.notify();
         let client = self.signer.client();
-        // For a NeedsApproval proposal the completed hold IS the approval: resolve, then
-        // execute (signer::approve_and_execute_blocking). An Allow goes straight to execute.
+        let control = self.signer.control();
+        // For a NeedsApproval proposal the completed hold IS the approval: resolve over the
+        // private capability channel, then execute (signer::approve_and_execute_blocking). An
+        // Allow goes straight to execute.
         let task = cx.background_spawn(async move {
-            signer::approve_and_execute_blocking(&client, request_id, needs_resolve)
+            signer::approve_and_execute_blocking(&client, &control, request_id, needs_resolve)
         });
         cx.spawn(async move |this, cx| {
             let res = task.await;

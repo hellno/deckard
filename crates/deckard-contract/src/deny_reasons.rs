@@ -95,6 +95,12 @@ pub const DERIVATION_UNVERIFIED: &str = "derivation_unverified";
 /// Built without the `shield` feature, so there is no Railgun derivation to grant. Only on the
 /// `#[cfg(not(feature = "shield"))]` path.
 pub const SHIELD_UNAVAILABLE: &str = "shield_unavailable";
+/// A `Resolve` arrived on the public proposer socket, which carries no approval authority.
+/// Only the private capability channel the daemon inherits from the supervising app may
+/// approve (PRD-01 / THREAT-MODEL residual #1) — so a same-uid proposer can no longer
+/// self-approve. The pending record is left untouched (`Pending`); the public caller is
+/// refused with this typed denial.
+pub const RESOLVE_NOT_AUTHORIZED: &str = "resolve_not_authorized";
 
 // ───────────────────────── Swap v1 (CoW) ─────────────────────────
 // Shaped-approve admission + order sign/cancel guards in the daemon, and the swap mock.

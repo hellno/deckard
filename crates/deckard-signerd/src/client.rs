@@ -140,17 +140,10 @@ impl SignerClient {
         }
     }
 
-    /// Blocking resolve: close a `NeedsApproval` loop by flipping its `Pending` record
-    /// to `Allowed` (`approved: true`) or `Denied` (`approved: false`).
-    pub fn resolve_blocking(&self, request_id: RequestId, approved: bool) -> anyhow::Result<()> {
-        match self.request_blocking(&SignerRequest::Resolve {
-            request_id,
-            approved,
-        })? {
-            SignerResponse::Ack => Ok(()),
-            other => Err(unexpected("Resolve", other)),
-        }
-    }
+    // NOTE: there is deliberately no `resolve` helper on this PUBLIC client. Since PRD-01 the
+    // daemon refuses `Resolve` on the public proposer socket (`resolve_not_authorized`);
+    // approval travels the private capability channel only — see
+    // [`deckard_signerd::ControlChannel::resolve`].
 
     /// Blocking: fetch the read-only Railgun view grant (0zk address + viewing key) for
     /// shielded-balance sync. A locked daemon or a failed derivation gate comes back as a

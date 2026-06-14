@@ -32,6 +32,6 @@ pub mod supervise;
 
 pub use client::SignerClient;
 pub use config::Config;
-pub use daemon::Daemon;
+pub use daemon::{Channel, Daemon};
 pub use request_id::{request_id_for, request_id_for_order};
-pub use supervise::DaemonSupervisor;
+pub use supervise::{ControlChannel, DaemonSupervisor};

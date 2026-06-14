@@ -112,6 +112,20 @@ struct PendingReq {
 /// rather than wedging the daemon (and STOP) forever behind the held state lock.
 const BROADCAST_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Which channel a request arrived on — the load-bearing distinction for resolver
+/// authentication (PRD-01). Same-uid peer-cred proves *who* connected, never *which role*;
+/// the authority to approve is carried by possession of the private capability channel the
+/// daemon inherits from the supervising app, NOT by the wire frame. So only [`Channel::Control`]
+/// may `Resolve`; the public proposer socket can propose/read/execute/STOP but never approve.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Channel {
+    /// The public, same-uid proposer socket (`socket.rs`). Anything but `Resolve`.
+    Public,
+    /// The private capability channel handed only to the supervised app (`supervise.rs` →
+    /// inherited `socketpair` end). The sole channel that may `Resolve`.
+    Control,
+}
+
 /// The daemon's embedded Helios verified-read path, kept in a **separately-locked** cell so
 /// the multi-second-to-90s `launch_verified` bootstrap can run WITHOUT holding the daemon's
 /// own `Mutex`. The server clones this `Arc` and primes it (see [`HeliosCell::ensure`]) off
@@ -223,14 +237,20 @@ impl Daemon {
 
     /// Dispatch one request to one response. `async` because `execute`/`balance` do network
     /// I/O and `unlock` runs Argon2 on the blocking pool.
-    pub async fn handle(&mut self, req: SignerRequest) -> SignerResponse {
+    ///
+    /// `channel` is the resolver-authentication gate (PRD-01): a `Resolve` is honoured only on
+    /// [`Channel::Control`]. Every other request behaves identically on both channels — STOP
+    /// (`Lock`/`RevokeAll`) deliberately stays reachable everywhere, since it only *reduces*
+    /// authority.
+    pub async fn handle(&mut self, req: SignerRequest, channel: Channel) -> SignerResponse {
         match req {
             SignerRequest::Unlock { passphrase } => {
                 SignerResponse::Unlock(self.unlock(passphrase).await)
             }
             // Lock and RevokeAll are unified in v1: zeroize the key → Locked, deny everything
             // in flight, and — the STOP guarantee — best-effort cancel any already-signed swap
-            // order ON-CHAIN before the key is gone. Only a fresh Unlock re-arms.
+            // order ON-CHAIN before the key is gone. Only a fresh Unlock re-arms. Accepted on
+            // EITHER channel: the panic brake must never depend on the capability handshake.
             SignerRequest::Lock | SignerRequest::RevokeAll => {
                 self.stop().await;
                 SignerResponse::Ack
@@ -239,6 +259,15 @@ impl Daemon {
                 request_id,
                 approved,
             } => {
+                // Resolver authentication: approval authority lives on the private capability
+                // channel ONLY. A `Resolve` on the public proposer socket — the textbook
+                // same-uid self-approval (THREAT-MODEL residual #1) — is refused with a typed,
+                // payload-free denial; the pending record is left untouched.
+                if channel != Channel::Control {
+                    return SignerResponse::Decision(Decision::Deny {
+                        reason: deny_reasons::RESOLVE_NOT_AUTHORIZED.into(),
+                    });
+                }
                 self.resolve(request_id, approved);
                 SignerResponse::Ack
             }

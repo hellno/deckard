@@ -97,16 +97,7 @@ async fn over_cap_approve_then_execute_broadcasts() {
     };
 
     // Approve (the native card / a test), then execute → broadcast.
-    assert_eq!(
-        client
-            .request(&SignerRequest::Resolve {
-                request_id: id,
-                approved: true
-            })
-            .await
-            .unwrap(),
-        SignerResponse::Ack
-    );
+    d.resolve(id, true);
     assert_eq!(
         client
             .request(&SignerRequest::Status { request_id: id })
