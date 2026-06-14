@@ -4,7 +4,7 @@
 > later) whose key lives in a process-isolated signer daemon behind a policy gate and a native
 > clear-signing card — let third-party dapps interact with it? This is the cited evidence base
 > behind [`docs/adr/0001-dapp-connectivity-architecture.md`](../adr/0001-dapp-connectivity-architecture.md)
-> and the `docs/prd/*` series. Five parallel research angles, claims ranked by confidence,
+> and the PRD work items tracked in GitHub issues (epic #44). Five parallel research angles, claims ranked by confidence,
 > primary sources linked. Where a claim is our own reasoning over the sources it is marked
 > **(inference)**.
 

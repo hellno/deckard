@@ -4,7 +4,10 @@
 - **Deciders:** @hellno (maintainer)
 - **Context inputs:** [`docs/research/10-dapp-connectivity.md`](../research/10-dapp-connectivity.md)
   (cited evidence), `THREAT-MODEL.md`, `SECURITY.md`, `DESIGN.md`, `docs/build/30-mcp-shape.md`.
-- **Supersedes / relates:** establishes the umbrella decision the `docs/prd/*` series executes.
+- **Supersedes / relates:** establishes the umbrella decision; the executable work items live as
+  GitHub issues under **epic [#44](https://github.com/hellno/deckard/issues/44)** — PRD-01 → #45,
+  PRD-02 → #46, PRD-03 → #47, PRD-05 → #48, spike → #49, PRD-04 → #50. (Convention: work items/epics
+  live in issues; decisions + research live in `docs/`.)
 
 ## Decision drivers (agreed with the maintainer)
 
@@ -84,10 +87,10 @@ clear-signing pattern. No new trust boundary is invented; we extend the one we h
   mirroring `deckard-mcp`. No third-party relay, no embedded engine, no store-as-trust-anchor. The UX
   is native cards, local and instant — the explicit antidote to WalletConnect's relay-latency/QR-dance
   UX. → **PRD-04** (the bridge) + **PRD-05** (per-origin permissions, scope & registry).
-  - **WalletConnect v2 is rejected and shelved** (see Alternatives; rationale preserved in
-    [`docs/prd/x-walletconnect-shelved.md`](../prd/x-walletconnect-shelved.md)). It would import a
-    centralized relay + Project-ID dependency (privacy/offline-first tension) and a UX the maintainer
-    explicitly does not want.
+  - **WalletConnect v2 is rejected and shelved** (see Alternatives; rationale recorded in epic
+    [#44](https://github.com/hellno/deckard/issues/44)). It would import a centralized relay +
+    Project-ID dependency (privacy/offline-first tension) and a UX the maintainer explicitly does not
+    want.
   - The embedded webview stays rejected.
   - **Honest cost:** a browser-side connector is desktop-only. Rejecting WalletConnect (the
     mobile-capable transport) leaves *mobile* universal-reach unsolved; this is consistent with driver
@@ -136,8 +139,8 @@ clear-signing pattern. No new trust boundary is invented; we extend the one we h
 ## Alternatives considered (and rejected)
 
 - **Embedded webview (Option A as clarified):** rejected — see Decision §1.
-- **WalletConnect v2 as the generic transport:** **rejected and shelved** (full rationale:
-  [`docs/prd/x-walletconnect-shelved.md`](../prd/x-walletconnect-shelved.md)). Summary: a centralized
+- **WalletConnect v2 as the generic transport:** **rejected and shelved** (full rationale recorded in
+  epic [#44](https://github.com/hellno/deckard/issues/44)). Summary: a centralized
   Reown relay + Project-ID dependency that leaks IP/metadata (against offline-first/privacy,
   `research §10–11`), a QR/relay UX the maintainer explicitly rejects, and no maintained Rust
   wallet-side SDK (`research §14`). Its one advantage — mobile reach — does not outweigh owning the

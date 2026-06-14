@@ -1,5 +1,10 @@
 # Deckard — agent notes
 
+## Planning artifacts
+Work items and epics (PRDs, tasks, spikes) live as **GitHub issues**, not files in the repo — use an
+epic issue with linked sub-issues. Research, ADRs/decision records, and design specs live in `docs/`.
+**Only open (create) issues after the user confirms.** Draft in chat first; create on the go-ahead.
+
 ## Design System
 Always read `DESIGN.md` before making any visual or UI decision. Fonts, colors, spacing,
 the two-signal actor model (amber = human, cyan = agent), the sidebar/contextual-views IA,
