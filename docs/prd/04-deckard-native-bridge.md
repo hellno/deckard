@@ -29,11 +29,19 @@ over WalletConnect, on-brand offline-first); **native, instant approval cards �
   `resolve`** (PRD-01 enforces this even if it tried), submits only **typed** intents/messages via the
   PRD-02 builders — never raw arbitrary calldata that skips a typed path.
 - A **first-party browser connector** that injects EIP-1193 + EIP-6963 (`rdns: sh.deckard` or similar),
-  giving universal reach (every dapp works) without per-dapp integration.
-- A **Deckard-owned local wire** between connector and `deckard-bridged`. **Native messaging is the
-  default** (stdio host, gated by `allowed_origins`/`allowed_extensions`, **not web-reachable**) —
-  chosen over a localhost RPC port precisely because a localhost port is reachable by any page via
-  DNS-rebinding / cross-site WebSocket hijacking (`research §2–4`, the Frame weakness).
+  giving universal reach (every dapp works) without per-dapp integration. **Target Chromium *and*
+  Firefox from the start** (separate manifests; MV3 service-worker quirks on the Chromium side).
+- **Distribution: self-distributed + signed first.** Ship a Deckard-signed connector we host ourselves
+  (Firefox supports self-distribution of signed extensions; sideload/dev paths on Chromium) so trust is
+  **our signature + the key-less design, not a store review**. Store listings, if used later, are
+  convenience only — never the trust anchor.
+- A **Deckard-owned local wire** between connector and `deckard-bridged`. **The exact wire is a spike
+  decision** (PRD-04 spike, [`spikes/deckard-bridge-spike.md`](../../spikes/deckard-bridge-spike.md)):
+  the leading candidate is **native messaging** (stdio host, gated by `allowed_origins`/
+  `allowed_extensions`, **not web-reachable**), preferred on security over a localhost RPC port — a
+  localhost port is reachable by any page via DNS-rebinding / cross-site WebSocket hijacking
+  (`research §2–4`, the Frame weakness). The spike proves both end-to-end on both browsers and records
+  the choice before the full build.
 - Map dapp methods → Deckard surfaces: `eth_sendTransaction` → `Intent`; `personal_sign` /
   `eth_signTypedData_v4` → `SignMessage` (PRD-02); `wallet_switchEthereumChain`/`addEthereumChain` →
   guarded per PRD-02. **Refuse** `eth_sign` and (v1) EIP-7702 delegation.
@@ -64,30 +72,35 @@ dapp ──EIP-1193──► Deckard connector ──owned wire (native messagin
 `deckard-bridged` is to dapps what `deckard-mcp` is to LLM agents. Reuse the daemon socket, the
 `Propose`/`Execute`/`Status` poll loop, and the native approval card unchanged.
 
-### The owned wire (key decision — record the choice)
+### The owned wire (settled by the PRD-04 spike)
 
-- **Default: native messaging** (Chrome `connectNative` / Firefox `runtime.connectNative`). The host is
-  an OS-installed stdio binary gated by a manifest `allowed_origins` (exact extension id, no wildcards)
-  and runs as the user (`research §3, 12`). It is **not reachable from web pages** — the decisive
-  advantage over a localhost port. Caveats to handle: MV3 service-worker lifecycle (keep the port alive,
-  reconnect on disconnect, `research §5`); the host-manifest registration lives in user-writable paths
-  (`research §4`) — install it ourselves and document the integrity expectation.
-- **Rejected sub-option: localhost RPC** (Frame's `ws://127.0.0.1`). Web-reachable; would require
-  origin-allowlist + token + Host-header validation just to approach native-messaging's isolation
-  (`research §2`). Only consider if a browser without native-messaging support must be served, and then
-  only with those defenses.
+The spike ([`spikes/deckard-bridge-spike.md`](../../spikes/deckard-bridge-spike.md)) proves both
+candidates end-to-end on Chromium **and** Firefox, then records the choice with rationale:
+
+- **Leading candidate: native messaging** (Chrome `connectNative` / Firefox `runtime.connectNative`).
+  The host is an OS-installed stdio binary gated by a manifest `allowed_origins`/`allowed_extensions`
+  (exact id, no wildcards) and runs as the user (`research §3, 12`). It is **not reachable from web
+  pages** — the decisive security advantage over a localhost port. Caveats the spike must exercise: MV3
+  service-worker lifecycle (keep the port alive, reconnect on disconnect, `research §5`); host-manifest
+  registration lives in user-writable paths (`research §4`) — we install it ourselves.
+- **Alternative measured by the spike: hardened localhost RPC** (Frame-style `ws://127.0.0.1`).
+  Web-reachable, so it would need origin-allowlist + token + Host-header validation just to approach
+  native-messaging's isolation (`research §2`). The spike documents whether any target browser/setup
+  forces it; default is native messaging unless the spike finds a blocker.
 
 ### The first-party connector (trust is bounded, not store-based)
 
 - Minimal, open-source, **key-less**: it injects a standard provider and relays JSON-RPC to the host.
   It holds no key, has no signing power, and **cannot reach the daemon's `Resolve`** (PRD-01).
-- **"No store as a trust anchor":** browser stores (Chrome Web Store, AMO) are distribution channels we
-  may use, but they are **not** where security comes from. The connector being a recurring attack target
-  (`research §6`: Great Suspender, Cyberhaven) is *contained by design* — a fully compromised connector
-  can only **propose**; it cannot sign, self-approve, or exfiltrate a key, and every effect is
-  clear-signed (PRD-02) against attacker-controllable origin (`research §29`). Prefer self-distributed/
-  self-signed where the browser allows (e.g. Firefox self-distribution); treat the store listing as
-  convenience, not trust.
+- **Self-distributed + signed first, Chromium + Firefox.** We host a Deckard-signed connector
+  ourselves; trust is our signature + the key-less design, not a store review. Firefox supports
+  self-distribution of signed XPIs directly; Chromium normal installs lean on the Web Store, so the
+  spike records the Chromium self-/sideload-distribution path and its friction. Any store listing is
+  convenience, **never** the trust anchor.
+- **"No store as a trust anchor" holds because trust is bounded by design.** The connector is a
+  recurring attack target (`research §6`: Great Suspender, Cyberhaven), but a fully compromised
+  connector can only **propose** — it cannot sign, self-approve, or exfiltrate a key, and every effect
+  is clear-signed (PRD-02) against an attacker-controllable origin (`research §29`).
 - Inject via **EIP-6963** (announce with a stable `rdns`), with `window.ethereum` as legacy fallback,
   so Deckard coexists with other wallets instead of fighting over the global (`research §7, 21–22`).
 
@@ -101,9 +114,11 @@ dapp ──EIP-1193──► Deckard connector ──owned wire (native messagin
 
 ## Acceptance tests
 
-- **Spike first** (mirror `spikes/`): prove a real dapp → connector → native-messaging host →
-  `deckard-bridged` → daemon round-trip for `eth_requestAccounts` + one `personal_sign`, with the native
-  card rendering. Commit a short report before the full build.
+- **Spike first** ([`spikes/deckard-bridge-spike.md`](../../spikes/deckard-bridge-spike.md)): prove a
+  real dapp → connector → host → `deckard-bridged` → daemon round-trip for `eth_requestAccounts` + one
+  `personal_sign`, with the native card rendering, on **both Chromium and Firefox**, and settle the wire
+  (native messaging vs localhost) + the self-distribution path. Commit the spike report before the full
+  build.
 - `bridged_is_keyless`: memory/fd scan of `deckard-bridged` finds no key (reuse the `deckard-mcp`
   red-team harness, `docs/build/00-test-harness.md`).
 - `bridged_cannot_resolve`: `deckard-bridged` attempting `Resolve` is refused by PRD-01's control-channel
