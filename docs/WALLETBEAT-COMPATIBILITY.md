@@ -48,14 +48,19 @@ Recorded so the rubric below reflects deliberate product choices, not unexamined
 - **Hardware-wallet signing (#4) — out of scope.** Deckard is keyboard-first, native, single-binary;
   external hardware signing is a deliberate non-goal. (A *secure-enclave* unlock path, #5, is separate
   and still in scope.)
-- **Connection surface — agent-only (for now).** The **MCP agent is Deckard's connection surface**;
-  there is no dapp/browser integration. **#25 (browser integration)** is **deferred** (not hard
-  out-of-scope — the dapp-surface question is under separate exploration), and **#11 (app isolation)**
-  is **reframed** as per-agent / per-session policy isolation.
-- **Account abstraction (#26) — 7702 spike.** Research-spike **EIP-7702** as a path to enforce
-  agent-policy **on-chain** (scoped session keys), which would also unlock atomic batching (#27).
-  Decide adoption after the spike; weigh the new delegation-contract trust surface against the current
-  `accountUnruggability` PASS. Until then #26/#27 stay FAIL by choice.
+- **Connection surface — decided in [ADR 0001](adr/0001-dapp-connectivity-architecture.md) (epic
+  [#44](https://github.com/hellno/deckard/issues/44)).** The exploration we were deferring to has
+  landed: the MCP agent stays the day-one surface, **WalletConnect is rejected**, an embedded browser
+  is rejected, and universal dapp reach comes later via a **Deckard-owned bridge** that injects a
+  standard **EIP-6963 / EIP-1193** provider into the user's own browser (post-audit). So **#25 (browser
+  integration)** is *planned, phased* — not "no dapps" — and **#11 (app isolation)** maps to **per-origin
+  permissions** (PRD-05 [#48](https://github.com/hellno/deckard/issues/48)), not a Deckard-invented
+  session token. This file no longer owns that decision; see the ADR.
+- **Account abstraction (#26) — tracked in issue [#33](https://github.com/hellno/deckard/issues/33)**
+  ("EIP-7702 session keys v1: chain-enforced per-tx cap + expiry + allowlist"). The on-chain-agent-policy
+  spike lives there, not here. Open question recorded for the rubric: adopting it trades the current
+  `accountUnruggability` PASS against a new delegation-contract surface. Until #33 ships, #26/#27 stay
+  FAIL by choice.
 - **Multi-identity (#8/#9) — a goal (post-v0).** Support multiple, non-correlated accounts/identities
   (standard BIP-44 + non-correlation UX). Privacy-aligned; not a v0 blocker.
 - **Process:** decisions are folded into this doc; **no GitHub issues opened** yet.
@@ -73,9 +78,10 @@ Recorded so the rubric below reflects deliberate product choices, not unexamined
 
 These statuses are Deckard's self-assessment against the rules below; Walletbeat would rate
 independently. The biggest single lever is the **external security audit** (#1). Per the decisions
-above, several attributes are **deliberate non-goals** and are not counted as actionable gaps:
-#4 hardware signing, #25 browser integration (deferred), #6 social recovery, #15 L2 force-withdrawal —
-plus #26/#27 (account abstraction / batching) gated behind a 7702 spike. We optimize the
+above, three attributes are **deliberate non-goals** and are not counted as actionable gaps:
+#4 hardware signing, #6 social recovery, #15 L2 force-withdrawal. Several others are now owned by other
+tracks (see *Tracking & cross-references*): #25 browser integration and #11 isolation by
+[ADR 0001](adr/0001-dapp-connectivity-architecture.md), and #26/#27 by issue #33. We optimize the
 **vision-aligned** attributes, not Walletbeat's Stage ladder.
 
 ---
@@ -99,7 +105,7 @@ plus #26/#27 (account abstraction / batching) gated behind a 7702 spike. We opti
 | 8 | **Wallet address privacy** | Address not linkable to sensitive personal info | **PARTIAL** — single on-chain receive address | Pair with shields (below) and stealth/rotating receive addresses to reduce linkability. |
 | 9 | **Multi-address privacy** | Multiple addresses not correlatable with each other (Stage-2) | **PARTIAL** — standard BIP-44 derivation can yield multiple addresses; identity switching not a product surface | **Goal (2026-06-14, post-v0):** ship **multi-account / identity switching** with non-correlation UX; avoid reusing one address across contexts. |
 | 10 | **Private token transfers** | Transfers/balances private by default | **PASS** — key-less **Railgun** shield, app-reachable, black-box tested (`shield.rs`, `STATUS.md`) | Maintain; extend to private **send/unshield** to strengthen "by default". This is a flagship strength. |
-| 11 | **App isolation** | Distinct accounts per app to limit data correlation | **REFRAMED (2026-06-14)** — no dapp surface; agent is the connection surface | **Reframed as per-agent / per-session policy isolation** (Deckard has no dapps). Tie to the policy gate so each agent session is scoped/correlatable-by-choice. |
+| 11 | **App isolation** | Distinct accounts per app to limit data correlation | **PLANNED — owned by [ADR 0001](adr/0001-dapp-connectivity-architecture.md)** | Realized as **per-origin permissions** in PRD-05 ([#48](https://github.com/hellno/deckard/issues/48)); resolver-auth prerequisite is PRD-01 ([#45](https://github.com/hellno/deckard/issues/45)). Not tracked here. |
 | 12 | **Privacy hygiene** | Collect no more data than a default web browser; no telemetry | **PASS** — no telemetry (`onboarding.rs`); Helios light-client reads; RPC URLs redacted from reasons (`helios.rs`, `THREAT-MODEL.md`) | Maintain; keep a written **no-data-collection** statement public as the verifiable evidence. |
 
 ## Self-sovereignty — *Deckard's strongest group*
@@ -128,7 +134,7 @@ plus #26/#27 (account abstraction / batching) gated behind a 7702 spike. We opti
 | # | Attribute | What Walletbeat wants (PASS) | Deckard now | Requirement to pass |
 |---|---|---|---|---|
 | 24 | **Address resolution** | Send to human-readable names (ENS); ideally chain-specific (ERC-7828/7831) | **PARTIAL** — ENS resolver imported in engine (`eth.rs`) but not wired to UI | **Wire ENS resolution into the Send/Receive UI** (resolve + reverse-resolve, with the verified-read badge). Engine work is mostly done. |
-| 25 | **Browser integration** | Comply with browser dapp-integration standards (EIP-6963 / WalletConnect) | **DEFERRED (2026-06-14)** — desktop-native, agent-only connection surface | **Deferred, under separate exploration.** Deckard's connection surface is the **MCP agent**, not dapps; no WalletConnect/EIP-6963 planned. Accepts a FAIL here by choice unless the separate dapp-surface discussion changes it. |
+| 25 | **Browser integration** | Comply with browser dapp-integration standards (EIP-6963 / WalletConnect) | **PLANNED, phased — owned by [ADR 0001](adr/0001-dapp-connectivity-architecture.md)** | Reach via a **Deckard-owned bridge injecting EIP-6963 / EIP-1193** into the user's browser (PRD-04 [#50](https://github.com/hellno/deckard/issues/50), spike [#49](https://github.com/hellno/deckard/issues/49)); **WalletConnect rejected**. Post-audit; FAIL until then by sequencing, not by choice. |
 | 26 | **Account abstraction** | Be AA-ready (ERC-4337 and/or **EIP-7702** smart accounts) | **MISSING → 7702 spike (2026-06-14)** — EOA-only | **Research-spike EIP-7702** to enforce agent-policy **on-chain** (scoped session keys); address-preserving, Rust tooling exists (`research/02`). Decide adoption after weighing the new delegation-contract trust surface vs. the `accountUnruggability` PASS. |
 | 27 | **Transaction batching** | Support **atomic batched transactions** (EIP-5792 `wallet_sendCalls`) | **MISSING** — single-tx only | **Contingent on the #26 7702 spike.** If 7702 is adopted, implement **EIP-5792 `wallet_sendCalls`** atomic batching. |
 
@@ -175,73 +181,50 @@ broadcast path is alloy/7702-ready and builder-agnostic. Two findings correct th
 1. **Send is a UI-only unlock and the dependency hub.** The whole Intent→Policy→Decision→sign→broadcast
    path already handles Send (tested); un-gating it (an `S` app surface) is what enables #2, #3, #18, and
    the Send half of #24. Do this first.
-2. **The frozen wire contract (`deckard-contract`) is the higher-ceremony expansion point.** Three items
-   want to touch it — `RevokeApproval` (#18), `Intent::Batch` (#27), session-token fields (#11). **Batch
-   those contract decisions together**; don't let them sprawl across separate changes.
+2. **The frozen wire contract (`deckard-contract`) is the higher-ceremony expansion point.** Items that
+   want to touch it — `RevokeApproval` (#18), `Intent::Batch` (#27, gated on issue #33), the
+   message-signing kinds in PRD-02 ([#46](https://github.com/hellno/deckard/issues/46)). **Batch those
+   contract decisions together**; don't let them sprawl. (Note: per-origin isolation is *not* a wire-token
+   — ADR 0001 chose a `socketpair`/`SCM_RIGHTS` capability; see PRD-01 [#45](https://github.com/hellno/deckard/issues/45).)
 3. **Simulation & scam detection are app-side, key-less, off the daemon mutex, non-blocking, and
    heuristic** — the UX must say "double-check this address," never "this is safe."
 4. **`specs/strategy.md` already anticipates v2 session keys**, so the 7702 direction aligns with existing
    strategy — keep the two docs cross-linked, not divergent.
 
-### EIP-7702 spike brief (#26 → #27)
+## Tracking & cross-references
 
-Scoped go/no-go, **testnet-only, non-autonomous, ~4–6 dev-days (Rust only).** 7702 would **complement,
-not replace** the local policy gate (defense-in-depth: local gate = usability + incident prevention;
-on-chain scope = blast-radius containment).
+Per the repo convention (`CLAUDE.md` — work items live as **GitHub issues**; decisions/research in
+`docs/`), this file is the **rubric mapping + decision record**, not a task tracker. Where Walletbeat
+work is already owned:
 
-- **Build:** derive a scoped session key from the master seed; build a 7702 authorization delegating the
-  EOA to the audited `Simple7702Account`, scoped by cap / target / block-height expiry; construct + sign +
-  broadcast via alloy `TransactionBuilder7702`; verify on-chain that **over-cap / expired / out-of-scope
-  are rejected**; document file deltas + the delegation-signing UX; update `THREAT-MODEL.md` for the new
-  delegation surface.
-- **Go/no-go questions the spike must answer:** (1) session-key source — master-seed-derived vs.
-  fresh/enclave-backed; (2) revocation atomicity — can a pre-revocation session tx still land? (implies
-  block-height TTL); (3) per-chain vs. all-chain delegation scope; (4) is the local `Policy` mirrored
-  on-chain, or is on-chain just auth/expiry/scope; (5) is per-agent isolation (#11) v1 or v2.
+| Walletbeat item | Owned by |
+|---|---|
+| #3 — clear-signing all writes + EIP-712 / message signing | **PRD-02 [#46](https://github.com/hellno/deckard/issues/46)** (+ [ADR 0001](adr/0001-dapp-connectivity-architecture.md)) |
+| #11 — app isolation → per-origin permissions | **PRD-05 [#48](https://github.com/hellno/deckard/issues/48)**; resolver-auth prereq **PRD-01 [#45](https://github.com/hellno/deckard/issues/45)** (red-team [#19](https://github.com/hellno/deckard/issues/19)) |
+| #25 — browser integration → owned EIP-6963/1193 bridge | **PRD-04 [#50](https://github.com/hellno/deckard/issues/50)**, spike [#49](https://github.com/hellno/deckard/issues/49), epic [#44](https://github.com/hellno/deckard/issues/44) |
+| #26 / #27 — account abstraction + atomic batching | **[#33](https://github.com/hellno/deckard/issues/33)** — EIP-7702 session keys v1 |
 
-## Recommended sequencing
+**Vision-aligned, no issue yet** — candidates to open on the maintainer's go-ahead, *not* a committed
+backlog: #21 `FUNDING.md`, #7 idle auto-lock, #23 reproducible builds + signed releases, #24 ENS in
+Send/Receive, #8/#9 multi-identity, #18 approval viewer + revoke, #5 secure-enclave unlock, #13
+custom-RPC-before-first-request, #2 simulate + scam warnings, and the **Send-un-gate linchpin**. Per-item
+crate placement, seam-vs-expansion, and size are in the architecture-fit map above. The audit (#1)
+remains a budget/vendor **decision spike**, not yet an issue.
 
-Grouped by leverage vs. effort, updated with the architecture-fit sizes above. **Suggested ordering for
-discussion, not a committed roadmap.**
-
-### Tier 0 — the linchpin
-0. **Un-gate Send** (`S`, UI-only — daemon path is production-ready and tested). Unblocks #2/#3/#18 and the Send half of #24.
-
-### Quick wins (low effort, no core expansion)
-1. **`FUNDING.md`** — funding/revenue disclosure (#21). **Content locked (2026-06-14): self-funded, no protocol revenue.** Hours; not started.
-2. **Idle auto-lock** (#7, `S`) — daemon TTL + app keepalive; flagged missing in `STATUS.md`.
-3. **Reproducible-build instructions + signed releases** in `RELEASING.md` (#23) — also satisfies WalletScrutiny.
-4. **ENS forward-resolve in Send/Receive** (#24, `M`) — engine has forward resolve; surface it.
-
-### Core product work (medium effort; some core/contract expansion)
-5. **Clear-signing for all writes + generic EIP-712 decoder** (#3, `M–L`) — rides on un-gated Send.
-6. **Multi-account / identity switching** (#8/#9, `L` — **core already derives accounts**, no crypto work).
-7. **Token-approval viewer + per-allowance revoke** (#18, `M`) — core `enumerate_approvals` + likely a new `RevokeApproval` wire kind.
-8. **Secure-enclave / Touch ID unlock** (#5, `M`) — pluggable `UnlockBackend`; pushes security-best-practices toward PASS.
-9. **ENS reverse resolve + verified badge** (#24, `M`).
-10. **Custom RPC before first request** (#13, **`L`** — re-tiered: onboarding step or lazy provider spawn).
-11. **Simulate-before-sign + scam warnings** (#2, `L`) — app-side key-less simulate; honest heuristic UX.
-
-### Strategic / large (sets the ceiling)
-12. **External security audit + funded bug bounty** (#1, and Stage-2 bug bounty) — *the* highest-leverage item. **Decision spike — budget/vendor undecided (2026-06-14); not yet an actionable issue.**
-13. **EIP-7702 spike** (#26, ~4–6 dev-days) → if adopted, unlocks **atomic batching** (#27) and on-chain scoped agent permissions. See the spike brief above. Batch its wire-contract changes with #18/#27/#11.
-14. **Per-agent isolation** (#11, `M`) → session-token in the wire contract; policy is global/immutable today.
-
-### Out of scope / deferred for v0 (decided 2026-06-14 — acknowledge, don't chase)
-- **Hardware-wallet signing** (#4) — deliberate non-goal (keyboard-first, native, single-binary).
-- **Browser integration / WalletConnect** (#25) — deferred; the MCP agent is the only connection surface (under separate exploration).
-- **L2 force-withdrawal / transaction inclusion** (#15) — only meaningful once L2s are supported; no L2 roadmap yet.
-- **Guardian/social recovery** (#6) — conflicts with the pure-EOA, no-third-party model; deliberate trade-off, accepted as unrated.
+**Deliberate non-goals** (rationale in *Decisions locked* above): hardware signing (#4), guardian/social
+recovery (#6), L2 force-withdrawal (#15).
 
 ## The Stages ladder (reference only — we are not climbing it)
 
 Per the **"harvest, don't climb"** decision (2026-06-14), Deckard does **not** target Walletbeat's
-Stages. Two Stage-1 gates — **multi-vendor hardware (#4)** and **browser integration (#25)** — are
-deliberate non-goals, so **full Stage 1 is structurally unreachable by choice**, and that's accepted.
-The ladder is kept here only to show which vision-aligned items happen to overlap:
+Stages. **Multi-vendor hardware (#4)** is a deliberate non-goal, so **full Stage 1 is structurally
+unreachable by choice**, and that's accepted. Browser integration (#25) is planned but *phased
+post-audit* (ADR 0001), so it's a not-yet rather than a never. The ladder is kept only to show which
+vision-aligned items happen to overlap:
 
 - **Stage 0** — *cleared*: public source code (#20).
-- **Stage 1 (not targeted)** — gated by **hardware (#4, out)** and **browser integration (#25, deferred)**.
+- **Stage 1 (not targeted)** — gated by the **hardware (#4)** non-goal and the not-yet-built **audit (#1)**
+  and **dapp bridge (#25, ADR 0001)**.
   Deckard nonetheless satisfies the vision-aligned Stage-1 items: **chain verification** ✅ (#16),
   **private-by-default transfers** ✅ (#10), **account portability** ✅ (#14), **FOSS license** ✅ (#19),
   with **own-node** (#13, near-PASS), **ENS** (#24), and **audit** (#1) in flight.
