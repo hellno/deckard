@@ -230,9 +230,10 @@ impl Shell {
                     // Balance hero: the merged Total (public + private), a Private/Public
                     // allocation bar, and the composition lines (Wave 2 T10).
                     .child(self.render_shielded_hero(native_wei, cx))
-                    // Primary actions. Shield (the privacy hero) is the one live, primary
-                    // CTA; Send + Swap are gated to the next release (Chunk 4, testnet-first)
-                    // and shown disabled rather than inert-but-active.
+                    // Primary actions. Shield (the privacy hero) is the live, primary CTA; Send
+                    // is now live too (native ETH). Both sign from YOUR wallet, so both are
+                    // disabled while viewing a watched read-only account. Swap stays gated to
+                    // the next release and shown disabled rather than inert-but-active.
                     .child(
                         h_flex()
                             .w_full()
@@ -250,14 +251,20 @@ impl Shell {
                             .child(Button::new("receive").ghost().label("Receive").on_click(
                                 cx.listener(|this, _, _, cx| this.open(Surface::Receive, cx)),
                             ))
-                            .child(Button::new("send").ghost().label("Send").disabled(true))
+                            .child(
+                                Button::new("send")
+                                    .ghost()
+                                    .label("Send")
+                                    .disabled(self.viewing_watch)
+                                    .on_click(cx.listener(|this, _, _, cx| this.open_send(cx))),
+                            )
                             .child(Button::new("swap").ghost().label("Swap").disabled(true)),
                     )
                     .child(
                         div()
                             .text_xs()
                             .text_color(muted)
-                            .child("Send & Swap arrive in the next release."),
+                            .child("Swap arrives in the next release."),
                     )
                     // Holdings, or a state.
                     .child(self.render_holdings(first_sync, has_tokens, holdings, cx))

@@ -39,6 +39,13 @@ pub const COMMANDS: &[Command] = &[
         icon: None,
     },
     Command {
+        id: "send",
+        title: "Send",
+        aliases: &["transfer", "pay", "withdraw", "send eth"],
+        shortcut: None,
+        icon: None, // no send glyph in the bundled subset
+    },
+    Command {
         id: "receive",
         title: "Receive",
         aliases: &["deposit", "address", "qr"],
@@ -290,13 +297,13 @@ mod tests {
     }
 
     #[test]
-    fn empty_query_returns_all_nine() {
+    fn empty_query_returns_all_ten() {
         let mut m = matcher();
         let usage = empty_usage();
         let results = rank("", COMMANDS, &usage, 0, &mut m);
 
         assert_eq!(results.len(), COMMANDS.len());
-        assert_eq!(COMMANDS.len(), 9);
+        assert_eq!(COMMANDS.len(), 10);
         for r in &results {
             assert!(r.positions.is_empty());
         }

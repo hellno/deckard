@@ -14,6 +14,7 @@ mod palette;
 mod palette_commands;
 mod palette_usage;
 mod receive;
+mod send_view;
 mod settings;
 mod settings_view;
 mod shell;
