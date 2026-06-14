@@ -2,8 +2,15 @@
 //! the MCP stdio server (`--mcp`) or the CLI command tree — both thin shells over the same
 //! key-less [`deckard_mcp::Sidecar`], so nothing is reachable only via Claude.
 
-use clap::{Parser, Subcommand};
+use std::sync::Arc;
 
+use clap::{Parser, Subcommand};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+
+use deckard_mcp::browser_bridge::{
+    dev_account_env_name, BridgeBackend, BridgeRequest, BrowserBridge,
+};
 use deckard_mcp::{install, secrets, server, Sidecar};
 
 #[derive(Parser)]
@@ -51,6 +58,15 @@ enum Command {
     /// STOP — the panic brake: zeroize the key, lock the daemon, deny everything
     /// in flight. Re-arm by unlocking in the Deckard app.
     Stop,
+    /// Experimental localhost EIP-1193 browser bridge for the unpacked extension.
+    BrowserBridge {
+        /// Loopback bind address. Keep this on 127.0.0.1 unless you are debugging.
+        #[arg(long, default_value = "127.0.0.1:8765")]
+        bind: String,
+        /// Return this mock address instead of reading an unlocked Deckard daemon.
+        #[arg(long = "dev-mock-account")]
+        dev_mock_account: Option<String>,
+    },
     /// Print (or, with --write + confirmation, write) the Claude Desktop registration.
     Install {
         /// Emit the demo env block (isolated config dir + socket, Sepolia fork chain id,
@@ -103,6 +119,15 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         return install::run(demo, write, &mut lock);
     }
 
+    if let Command::BrowserBridge {
+        bind,
+        dev_mock_account,
+    } = &command
+    {
+        let sidecar = Sidecar::from_env()?;
+        return serve_browser_bridge(bind, sidecar, dev_mock_account.clone()).await;
+    }
+
     let sidecar = Sidecar::from_env()?;
     let result = match &command {
         Command::Balance => sidecar.wallet_balance().await,
@@ -111,6 +136,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Shield { amount_eth } => sidecar.shield(amount_eth).await,
         Command::Execute { request_id } => sidecar.execute(request_id).await,
         Command::Stop => sidecar.revoke_all().await,
+        Command::BrowserBridge { .. } => unreachable!("handled above"),
         Command::Install { .. } => unreachable!("handled above"),
     };
     match result {
@@ -122,4 +148,152 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             anyhow::bail!("{}", failure.to_human())
         }
     }
+}
+
+async fn serve_browser_bridge(
+    bind: &str,
+    sidecar: Sidecar,
+    dev_mock_account: Option<String>,
+) -> anyhow::Result<()> {
+    if !bind.starts_with("127.0.0.1:") && !bind.starts_with("localhost:") {
+        anyhow::bail!("browser bridge must bind to loopback (example: 127.0.0.1:8765)");
+    }
+    let chain_id = sidecar.chain_id();
+    let backend = match dev_mock_account {
+        Some(account) => BridgeBackend::DevMock { account },
+        None => BridgeBackend::from_env(sidecar),
+    };
+    let bridge = Arc::new(BrowserBridge::new(chain_id, backend));
+    let listener = TcpListener::bind(bind).await?;
+    eprintln!(
+        "Deckard browser bridge listening on http://{bind}/rpc (dev mock via {})",
+        dev_account_env_name()
+    );
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let bridge = Arc::clone(&bridge);
+        tokio::spawn(async move {
+            if let Err(e) = handle_http_connection(stream, bridge).await {
+                eprintln!("browser bridge request failed: {e}");
+            }
+        });
+    }
+}
+
+async fn handle_http_connection(
+    mut stream: TcpStream,
+    bridge: Arc<BrowserBridge>,
+) -> anyhow::Result<()> {
+    let mut buf = vec![0_u8; 64 * 1024];
+    let mut read = 0_usize;
+    let header_end = loop {
+        let n = stream.read(&mut buf[read..]).await?;
+        if n == 0 {
+            return Ok(());
+        }
+        read += n;
+        if let Some(pos) = find_header_end(&buf[..read]) {
+            break pos;
+        }
+        if read == buf.len() {
+            return write_http(&mut stream, 413, "text/plain", "request too large").await;
+        }
+    };
+
+    let headers = std::str::from_utf8(&buf[..header_end])?.to_string();
+    let (method, path) = request_line(&headers)?;
+    let origin = header_value(&headers, "x-deckard-origin")
+        .or_else(|| header_value(&headers, "origin"))
+        .unwrap_or("unknown-origin")
+        .to_string();
+
+    if method == "OPTIONS" {
+        return write_http(&mut stream, 204, "text/plain", "").await;
+    }
+    if method != "POST" || path != "/rpc" {
+        return write_http(&mut stream, 404, "text/plain", "not found").await;
+    }
+    if !host_is_loopback(&headers) {
+        return write_http(&mut stream, 403, "text/plain", "host must be localhost").await;
+    }
+
+    let content_length = header_value(&headers, "content-length")
+        .and_then(|s| s.parse::<usize>().ok())
+        .ok_or_else(|| anyhow::anyhow!("missing content-length"))?;
+    if content_length > 32 * 1024 {
+        return write_http(&mut stream, 413, "text/plain", "body too large").await;
+    }
+
+    let body_start = header_end + 4;
+    while read < body_start + content_length {
+        let n = stream.read(&mut buf[read..]).await?;
+        if n == 0 {
+            anyhow::bail!("connection closed before request body completed");
+        }
+        read += n;
+    }
+
+    let request: BridgeRequest =
+        serde_json::from_slice(&buf[body_start..body_start + content_length])?;
+    let response = bridge.handle_request(&origin, request).await;
+    let response_body = serde_json::to_string(&response)?;
+    write_http(&mut stream, 200, "application/json", &response_body).await
+}
+
+async fn write_http(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    body: &str,
+) -> anyhow::Result<()> {
+    let reason = match status {
+        200 => "OK",
+        204 => "No Content",
+        403 => "Forbidden",
+        404 => "Not Found",
+        413 => "Payload Too Large",
+        _ => "Error",
+    };
+    let response = format!(
+        "HTTP/1.1 {status} {reason}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\naccess-control-allow-origin: *\r\naccess-control-allow-headers: content-type,x-deckard-origin\r\naccess-control-allow-methods: POST,OPTIONS\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(response.as_bytes()).await?;
+    Ok(())
+}
+
+fn find_header_end(buf: &[u8]) -> Option<usize> {
+    buf.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn request_line(headers: &str) -> anyhow::Result<(&str, &str)> {
+    let line = headers
+        .lines()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("missing request line"))?;
+    let mut parts = line.split_whitespace();
+    let method = parts
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("missing request method"))?;
+    let path = parts
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("missing request path"))?;
+    Ok((method, path))
+}
+
+fn header_value<'a>(headers: &'a str, name: &str) -> Option<&'a str> {
+    headers.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        if key.eq_ignore_ascii_case(name) {
+            Some(value.trim())
+        } else {
+            None
+        }
+    })
+}
+
+fn host_is_loopback(headers: &str) -> bool {
+    header_value(headers, "host")
+        .map(|host| host.starts_with("127.0.0.1:") || host.starts_with("localhost:"))
+        .unwrap_or(false)
 }

@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Deckard Browser Bridge (experimental)",
+  "version": "0.0.1",
+  "description": "Experimental key-less EIP-1193 connector for local Deckard dev builds. Not for real funds.",
+  "permissions": [],
+  "host_permissions": ["http://127.0.0.1:8765/*"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*", "file:///*"],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "all_frames": false
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["injected.js"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

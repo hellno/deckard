@@ -19,6 +19,7 @@
 //! - **STOP is always available:** `deckard_revoke_all` / `deckard-mcp stop`.
 
 pub mod amount;
+pub mod browser_bridge;
 pub mod failure;
 pub mod install;
 pub mod secrets;
