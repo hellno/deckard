@@ -97,17 +97,10 @@ async fn sign_order(client: &SignerClient, id: RequestId) -> SignOrderResult {
     }
 }
 
-async fn resolve(client: &SignerClient, id: RequestId, approved: bool) {
-    assert_eq!(
-        client
-            .request(&SignerRequest::Resolve {
-                request_id: id,
-                approved,
-            })
-            .await
-            .unwrap(),
-        SignerResponse::Ack
-    );
+/// Approve/deny over the authenticated control channel — a `Resolve` on the public socket is
+/// refused (PRD-01). Sync (a quick socketpair round-trip); callers drop the `.await`.
+fn resolve(d: &DaemonProc, id: RequestId, approved: bool) {
+    d.resolve(id, approved);
 }
 
 async fn revoke_all(client: &SignerClient) {
@@ -152,7 +145,7 @@ async fn happy_path_propose_approve_sign_recovers_wallet() {
     let id = needs_approval_id(&client, &order).await;
 
     // Approve, then sign.
-    resolve(&client, id, true).await;
+    resolve(&d, id, true);
     let sig = match sign_order(&client, id).await {
         SignOrderResult::Signed { signature } => signature,
         other => panic!("expected Signed, got {other:?}"),
@@ -184,7 +177,7 @@ async fn reject_path_resolve_false_then_sign_denied() {
     let order = order_for(wallet, sepolia_weth(), sepolia_cow(), 2_222_222);
     let id = needs_approval_id(&client, &order).await;
 
-    resolve(&client, id, false).await;
+    resolve(&d, id, false);
     match sign_order(&client, id).await {
         SignOrderResult::Denied { .. } => {}
         SignOrderResult::Signed { .. } => panic!("a user-denied order must NOT sign"),
@@ -243,7 +236,7 @@ async fn toctou_approve_then_revoke_then_sign_denied_revoked() {
 
     // Approve BEFORE the STOP, then STOP, then attempt to sign — the sign-time revoked re-check
     // is the only thing standing between an approval and a signature.
-    resolve(&client, id, true).await;
+    resolve(&d, id, true);
     revoke_all(&client).await;
     match sign_order(&client, id).await {
         SignOrderResult::Denied { reason } => assert_eq!(
@@ -269,7 +262,7 @@ async fn stop_attempts_cancel_of_a_signed_order_and_stays_responsive() {
 
     let order = order_for(wallet, sepolia_weth(), sepolia_cow(), 6_666_666);
     let id = needs_approval_id(&client, &order).await;
-    resolve(&client, id, true).await;
+    resolve(&d, id, true);
     // Sign it — now `signature.is_some()`, so STOP will SELECT it for an on-chain cancel.
     match sign_order(&client, id).await {
         SignOrderResult::Signed { .. } => {}

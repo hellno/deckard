@@ -160,6 +160,19 @@ clear-signing pattern. No new trust boundary is invented; we extend the one we h
 - PRD-01: `socketpair` inheritance vs `SCM_RIGHTS` fd-pass vs `0600` cookie — pick the most portable
   capability for macOS + Linux given `supervise.rs` already spawns the daemon (note the
   daemon-spawns-app vs app-spawns-daemon direction inversion).
+  - **Resolved → `socketpair` inheritance (app is the parent).** The app already `fork+exec`s the
+    daemon (`supervise.rs`), so it mints an `AF_UNIX` `socketpair` pre-spawn, hands the child one
+    end by fd inheritance (its number in `DECKARD_RESOLVE_FD`), and keeps the other as the
+    `ControlChannel`; the daemon honours `Resolve` only there (`daemon.rs::Channel`,
+    `server.rs::serve_control`). Portable on macOS + Linux with no peer-cred dependence for the
+    role decision — the fd *is* the unforgeable role proof that same-uid peer-cred (`SO_PEERCRED`
+    on Linux; `LOCAL_PEERCRED`, no pid, on macOS) cannot give. **`SCM_RIGHTS`** was rejected: it
+    fits a daemon-spawns-app or already-authenticated peer, but here authentication *is* the
+    problem (the daemon would hand the fd back over the very public socket any same-uid client can
+    open). **`0600` cookie** was rejected: a uid-readable secret doesn't split the same-uid
+    boundary and would need a wire field, breaking "no wire change." The one unavoidable `unsafe`
+    (`from_raw_fd`) lives daemon-side under a scoped, documented `#[allow]`; `deckard-core`'s
+    `#![forbid(unsafe_code)]` is untouched.
 - PRD-02: which `IntentKind`s to add (`SignMessage`, `SignTypedData`, and whether EIP-7702 `Delegate`
   is supported-behind-allowlist or refused outright).
 - PRD-04: the browser-reach mechanism for the owned bridge — native-messaging stdio host (preferred,

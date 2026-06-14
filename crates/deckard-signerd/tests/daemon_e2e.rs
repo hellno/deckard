@@ -224,14 +224,7 @@ async fn resolve_false_and_ttl_deny_execute() {
     // resolve(false) → execute Denied{user_denied}.
     let over = send(to, PER_TX_CAP + 1);
     let id = needs_approval_id(&client, &over).await;
-    ack(
-        &client,
-        SignerRequest::Resolve {
-            request_id: id,
-            approved: false,
-        },
-    )
-    .await;
+    d.resolve(id, false);
     assert_eq!(
         client.execute(id).await.unwrap(),
         ExecuteResult::Denied {
@@ -300,14 +293,7 @@ async fn toctou_resolve_then_revoke_then_execute_denied() {
 
     let over = send(to, PER_TX_CAP + 1);
     let id = needs_approval_id(&client, &over).await;
-    ack(
-        &client,
-        SignerRequest::Resolve {
-            request_id: id,
-            approved: true,
-        },
-    )
-    .await;
+    d.resolve(id, true);
     assert_eq!(status(&client, id).await, ApprovalStatus::Allowed);
     // STOP after approval but before execute.
     ack(&client, SignerRequest::RevokeAll).await;
@@ -352,14 +338,7 @@ async fn allowed_request_expires() {
 
     let over = send(to, PER_TX_CAP + 1);
     let id = needs_approval_id(&client, &over).await;
-    ack(
-        &client,
-        SignerRequest::Resolve {
-            request_id: id,
-            approved: true,
-        },
-    )
-    .await;
+    d.resolve(id, true);
     assert_eq!(status(&client, id).await, ApprovalStatus::Allowed);
 
     tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
@@ -390,14 +369,7 @@ async fn re_propose_is_idempotent() {
     // (b) a user Deny is sticky — re-propose does NOT re-raise the card.
     let denied = send(to, PER_TX_CAP + 1);
     let id = needs_approval_id(&client, &denied).await;
-    ack(
-        &client,
-        SignerRequest::Resolve {
-            request_id: id,
-            approved: false,
-        },
-    )
-    .await;
+    d.resolve(id, false);
     assert_eq!(
         client.propose(&denied).await.unwrap(),
         Decision::Deny {
@@ -408,14 +380,7 @@ async fn re_propose_is_idempotent() {
     // (c) an approval is not downgraded back to Pending by a re-propose.
     let approved = send(to, PER_TX_CAP + 2);
     let id2 = needs_approval_id(&client, &approved).await;
-    ack(
-        &client,
-        SignerRequest::Resolve {
-            request_id: id2,
-            approved: true,
-        },
-    )
-    .await;
+    d.resolve(id2, true);
     assert_eq!(client.propose(&approved).await.unwrap(), Decision::Allow);
 }
 
@@ -441,18 +406,13 @@ async fn two_clients_interleave_app_and_mcp_sessions() {
     assert_eq!(mcp.propose(&within).await.unwrap(), Decision::Allow);
     let within_id = SignerClient::request_id_for_intent(&within);
 
-    // 2. An over-cap MCP request raises a card; the APP resolves it (it is the designated
-    //    human-facing resolver) and the MCP client observes the approval.
+    // 2. An over-cap MCP request raises a card; the APP resolves it over its private capability
+    //    channel (it is the designated human-facing resolver — the MCP client, like any public
+    //    caller, is refused `Resolve`; see resolver_auth.rs) and the MCP client observes the
+    //    approval.
     let over = send(to, PER_TX_CAP + 1);
     let over_id = needs_approval_id(&mcp, &over).await;
-    ack(
-        &app,
-        SignerRequest::Resolve {
-            request_id: over_id,
-            approved: true,
-        },
-    )
-    .await;
+    d.resolve(over_id, true);
     assert_eq!(status(&mcp, over_id).await, ApprovalStatus::Allowed);
 
     // 3. MCP STOP (revoke_all) — the panic brake cuts BOTH clients: the app's next call

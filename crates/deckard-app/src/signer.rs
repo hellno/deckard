@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use alloy_primitives::{Address, Bytes, B256, U256};
 use deckard_contract::{Decision, ExecuteResult, Intent, IntentKind, RequestId, UnlockOutcome};
-use deckard_signerd::{DaemonSupervisor, SignerClient};
+use deckard_signerd::{ControlChannel, DaemonSupervisor, SignerClient};
 
 /// Result of the app's send path (propose, then execute on `Allow`). The path is implemented
 /// and unit-tested here; the GUI send screen that calls it is T-UX (out of scope), so no view
@@ -55,6 +55,12 @@ impl AppSigner {
     /// shell uses this for unlock/lock/send so the work runs off the UI thread.
     pub fn client(&self) -> SignerClient {
         self.client.clone()
+    }
+
+    /// The private capability channel the daemon authenticates approvals on (PRD-01). The app
+    /// sends `Resolve` here after a completed hold-to-confirm; the public socket refuses it.
+    pub fn control(&self) -> ControlChannel {
+        self._supervisor.control()
     }
 }
 
@@ -111,17 +117,20 @@ pub fn send_blocking(client: &SignerClient, intent: &Intent) -> anyhow::Result<S
 
 /// Execute a reviewed proposal, key-less. For a `NeedsApproval` proposal (over-cap, or the
 /// daemon's mainnet guardrail downgrading an auto-allow), the completed hold-to-confirm IS
-/// the human approval — the app is the wire contract's designated human-facing resolver —
-/// so this first sends `Resolve{approved: true}` to flip the `Pending` record to `Allowed`,
-/// then `Execute`. For an `Allow` proposal it goes straight to `Execute` (byte-identical to
-/// the old path). Blocking; called from a background thread.
+/// the human approval — the app is the wire contract's designated human-facing resolver — so
+/// this first sends `Resolve{approved: true}` over the **private capability channel** (the only
+/// channel the daemon authenticates approvals on, PRD-01) to flip the `Pending` record to
+/// `Allowed`, then `Execute` over the public socket. For an `Allow` proposal it goes straight
+/// to `Execute`. Blocking; called from a background thread. `execute` stays on the public
+/// socket because it only signs an already-`Allowed` record — the authority is the `Resolve`.
 pub fn approve_and_execute_blocking(
     client: &SignerClient,
+    control: &ControlChannel,
     request_id: RequestId,
     needs_resolve: bool,
 ) -> anyhow::Result<ExecuteResult> {
     if needs_resolve {
-        client.resolve_blocking(request_id, true)?;
+        control.resolve(request_id, true)?;
     }
     client.execute_blocking(request_id)
 }
@@ -294,11 +303,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The mainnet-guardrail regression guard: a `NeedsApproval` shield completes via the
-    /// resolve path — the app sends `Resolve{approved: true}` (the hold-to-confirm is the
-    /// human approval) and THEN `Execute`, over the socket, signing nothing in-process.
+    /// The mainnet-guardrail regression guard, post-PRD-01: a `NeedsApproval` shield completes
+    /// by sending `Resolve{approved: true}` over the **private capability channel** (the
+    /// hold-to-confirm is the human approval) and THEN `Execute` over the **public socket**,
+    /// signing nothing in-process. Proves the split: approval authority rides the control
+    /// channel, execution rides the public socket.
     #[test]
-    fn approve_and_execute_resolves_then_executes_over_the_socket() {
+    fn approve_resolves_over_control_then_executes_over_public_socket() {
         let dir =
             std::env::temp_dir().join(format!("deckard-appresolve-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -306,12 +317,12 @@ mod tests {
         let sock = dir.join("signerd.sock");
 
         let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let seen_srv = Arc::clone(&seen);
-        let sock_srv = sock.clone();
         let (ready_tx, ready_rx) = mpsc::channel();
 
-        // Recording server: two per-call connections (Resolve, then Execute).
-        let server = std::thread::spawn(move || {
+        // Public recording server: ONE connection (Execute only — Resolve never arrives here).
+        let seen_pub = Arc::clone(&seen);
+        let sock_srv = sock.clone();
+        let public_server = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -319,35 +330,48 @@ mod tests {
             rt.block_on(async move {
                 let listener = tokio::net::UnixListener::bind(&sock_srv).unwrap();
                 ready_tx.send(()).unwrap();
-                for _ in 0..2 {
-                    let (mut stream, _) = listener.accept().await.unwrap();
-                    let buf = frame::read_frame(&mut stream).await.unwrap().unwrap();
-                    let req: SignerRequest = frame::decode(&buf).unwrap();
-                    let resp = match &req {
-                        SignerRequest::Resolve { approved, .. } => {
-                            assert!(*approved, "hold-to-confirm must approve, not deny");
-                            seen_srv.lock().unwrap().push("Resolve".into());
-                            SignerResponse::Ack
-                        }
-                        SignerRequest::Execute { .. } => {
-                            seen_srv.lock().unwrap().push("Execute".into());
-                            SignerResponse::Execute(ExecuteResult::Broadcast {
-                                tx_hash: B256::repeat_byte(0xCD),
-                            })
-                        }
-                        other => panic!("unexpected request on the wire: {other:?}"),
-                    };
-                    let body = frame::encode(&resp).unwrap();
-                    frame::write_frame(&mut stream, &body).await.unwrap();
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let buf = frame::read_frame(&mut stream).await.unwrap().unwrap();
+                match frame::decode::<SignerRequest>(&buf).unwrap() {
+                    SignerRequest::Execute { .. } => {
+                        seen_pub.lock().unwrap().push("Execute".into());
+                        let resp = SignerResponse::Execute(ExecuteResult::Broadcast {
+                            tx_hash: B256::repeat_byte(0xCD),
+                        });
+                        let body = frame::encode(&resp).unwrap();
+                        frame::write_frame(&mut stream, &body).await.unwrap();
+                    }
+                    other => panic!("public socket must only see Execute, got {other:?}"),
                 }
             });
         });
-
         ready_rx.recv().unwrap();
+
+        // Control channel: a real socketpair (minted exactly as the supervisor does). The app
+        // keeps `control`; a thread plays the daemon end, expecting a single Resolve → Ack.
+        let (app_end, child_fd) = deckard_signerd::supervise::control_pair().unwrap();
+        let control = deckard_signerd::ControlChannel::connected(app_end);
+        let seen_ctrl = Arc::clone(&seen);
+        let control_server = std::thread::spawn(move || {
+            let mut daemon_end = std::os::unix::net::UnixStream::from(child_fd);
+            let buf = frame::read_frame_blocking(&mut daemon_end)
+                .unwrap()
+                .unwrap();
+            match frame::decode::<SignerRequest>(&buf).unwrap() {
+                SignerRequest::Resolve { approved, .. } => {
+                    assert!(approved, "hold-to-confirm must approve, not deny");
+                    seen_ctrl.lock().unwrap().push("Resolve".into());
+                    let body = frame::encode(&SignerResponse::Ack).unwrap();
+                    frame::write_frame_blocking(&mut daemon_end, &body).unwrap();
+                }
+                other => panic!("control channel saw a non-Resolve request: {other:?}"),
+            }
+        });
 
         let client = SignerClient::new(sock);
         let result =
-            approve_and_execute_blocking(&client, RequestId::repeat_byte(0x77), true).unwrap();
+            approve_and_execute_blocking(&client, &control, RequestId::repeat_byte(0x77), true)
+                .unwrap();
 
         assert_eq!(
             result,
@@ -355,12 +379,14 @@ mod tests {
                 tx_hash: B256::repeat_byte(0xCD)
             }
         );
+        // Resolve (control) strictly precedes Execute (public): the Ack gates the execute.
         assert_eq!(
             *seen.lock().unwrap(),
             vec!["Resolve".to_string(), "Execute".to_string()]
         );
 
-        server.join().unwrap();
+        control_server.join().unwrap();
+        public_server.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 

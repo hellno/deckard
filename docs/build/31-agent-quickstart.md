@@ -126,6 +126,7 @@ error is to retry — for two of these (marked **do NOT retry**) that instinct i
 | `broadcast_failed: …` | The RPC refused the transaction; nothing was consumed. | Check the chain/RPC is up (`just demo-check`), then re-run from `deckard_shield`. |
 | `not_approved` | The request needs a human approval that hasn't happened. | Lower the amount under the per-tx cap, or a human edits `policy.json` (no approval card in this alpha). |
 | `user_denied` | A human said no. | Respect it; propose something different only if asked. |
+| `resolve_not_authorized` | A `Resolve` (approval) was sent on the public proposer socket, which can't approve — only the Deckard app, over its private channel, can. | Don't try to self-approve. A human approves in the Deckard app (hold-to-confirm); the sidecar never gets a `resolve` tool. |
 | `chain_mismatch` | Sidecar and daemon disagree on the chain (e.g. demo sidecar → real daemon). | Re-run `deckard-mcp install --demo` and make sure `just demo` is what's running. |
 | `over_cap` | Over the cap with `require_approval = never` — nothing can authorize it. | Lower the amount under `per_tx_cap_wei` (read it with `deckard_policy_get`). |
 | `cap_exceeded` | Executing would pass the spending caps as re-checked at sign time. | Lower the amount or wait for the UTC-midnight rollover; re-read the policy for current numbers. |

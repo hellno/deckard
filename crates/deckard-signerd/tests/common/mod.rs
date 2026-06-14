@@ -70,10 +70,24 @@ pub fn seal_account0(dir: &Path) -> (Address, Address) {
     (wallet, recipient)
 }
 
-/// A spawned daemon process; killed on drop.
+/// A spawned daemon process; killed on drop. Carries the private capability channel the test
+/// harness mints exactly as the app's supervisor does (PRD-01), so a test can approve via
+/// [`DaemonProc::resolve`] — a `Resolve` on the public socket is now refused.
 pub struct DaemonProc {
     child: Child,
     pub socket_path: PathBuf,
+    control: deckard_signerd::ControlChannel,
+}
+
+impl DaemonProc {
+    /// Approve/deny a pending request over the authenticated control channel (the daemon
+    /// refuses `Resolve` on the public socket). Panics on a transport error — a test that
+    /// can't reach the resolver channel should fail loudly.
+    pub fn resolve(&self, request_id: deckard_contract::RequestId, approved: bool) {
+        self.control
+            .resolve(request_id, approved)
+            .expect("resolve over control channel");
+    }
 }
 
 impl Drop for DaemonProc {
@@ -84,13 +98,17 @@ impl Drop for DaemonProc {
 }
 
 /// Spawn the real `deckard-signerd` binary against `dir` (config + socket) and `rpc_url`,
-/// waiting until it binds the socket.
+/// waiting until it binds the socket. Attaches the resolver capability channel by fd
+/// inheritance, mirroring `deckard_signerd::supervise` — the daemon serves `Resolve` only on
+/// that inherited end.
 pub fn spawn_daemon(
     dir: &Path,
     rpc_url: &str,
     chain_id: u64,
     extra_env: &[(&str, &str)],
 ) -> DaemonProc {
+    use std::os::fd::AsRawFd;
+
     let socket = dir.join("signerd.sock");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_deckard-signerd"));
     cmd.env("DECKARD_CONFIG_DIR", dir)
@@ -100,7 +118,16 @@ pub fn spawn_daemon(
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
+
+    // Mint + pass the capability channel exactly as the app supervisor does: the child
+    // inherits `child_fd` (named in DECKARD_RESOLVE_FD); the harness keeps the app end.
+    let (app_end, child_fd) = deckard_signerd::supervise::control_pair().expect("control pair");
+    cmd.env("DECKARD_RESOLVE_FD", child_fd.as_raw_fd().to_string());
+
     let child = cmd.spawn().expect("spawn deckard-signerd binary");
+    drop(child_fd); // the child inherited its own copy
+    let control = deckard_signerd::ControlChannel::connected(app_end);
+
     assert!(
         wait_for(|| socket.exists(), Duration::from_secs(5)),
         "daemon never bound its socket"
@@ -108,6 +135,7 @@ pub fn spawn_daemon(
     DaemonProc {
         child,
         socket_path: socket,
+        control,
     }
 }
 
