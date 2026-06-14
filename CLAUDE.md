@@ -48,6 +48,13 @@ before you're done. (For UI work you must build the app: `just check`.)
 
 **Always, every crate:** never log or `Debug`-print a seed, key, or passphrase — secrets stay in `Zeroizing`.
 
+## Visual verification (GUI changes)
+Touching any `crates/deckard-app` view? Tests alone don't prove a screen renders — **run the app and
+attach before/after screenshots to the PR** (the un-gated Send PR #54 is the template: Portfolio with
+the action enabled + the clear-signing review card). On macOS: `just run`. In a headless Linux /
+Claude-on-the-web session, follow `docs/dev/headless-gui-screenshots.md` (software Vulkan + Xvfb) to
+launch, drive, and capture. QA and review flag a GUI PR that ships without screenshots.
+
 ## Language
 In docs, UI copy, and refusal/error strings: prefer plain words over crypto jargon, and explain a
 term once where it first appears (e.g. "shield — move funds to a private balance").
