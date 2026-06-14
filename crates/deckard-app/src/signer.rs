@@ -10,8 +10,8 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use alloy_primitives::{Address, B256, U256};
-use deckard_contract::{Decision, ExecuteResult, Intent, RequestId, UnlockOutcome};
+use alloy_primitives::{Address, Bytes, B256, U256};
+use deckard_contract::{Decision, ExecuteResult, Intent, IntentKind, RequestId, UnlockOutcome};
 use deckard_signerd::{ControlChannel, DaemonSupervisor, SignerClient};
 
 /// Result of the app's send path (propose, then execute on `Allow`). The path is implemented
@@ -152,6 +152,23 @@ pub fn build_shield_intent(
         .parse()
         .map_err(|e| anyhow::anyhow!("not a valid 0zk address: {e}"))?;
     deckard_core::build_shield_native_intent(chain_id, recipient, value_wei)
+}
+
+/// Build a key-less native-ETH **send** intent: a plain transfer of `value_wei` to `to`, on
+/// `chain_id`. Native only (`token: None`) with empty calldata — the empty payload IS the
+/// native/contract-call discriminator the daemon switches on, and the policy gate requires a
+/// `Send` to carry no calldata (`deckard-contract::policy::calldata_ok`). Infallible: the
+/// recipient is already a resolved [`Address`] (the caller turns `0x…`/ENS into one), and the
+/// amount is pre-parsed wei, so there is nothing left to fail. The daemon decides + signs.
+pub fn build_native_send_intent(chain_id: u64, to: Address, value_wei: U256) -> Intent {
+    Intent {
+        chain_id,
+        to,
+        token: None,
+        value: value_wei,
+        calldata: Bytes::new(),
+        kind: IntentKind::Send,
+    }
 }
 
 /// Parse a decimal ETH amount (`"0.05"`, `"1"`, `"1.234"`) into wei. Pure + total: rejects
@@ -371,6 +388,21 @@ mod tests {
         control_server.join().unwrap();
         public_server.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The Send builder produces a *native* transfer: no token, empty calldata (so the
+    /// daemon broadcasts it as a plain ETH send and the policy gate's `calldata_ok` admits
+    /// it), `kind == Send`, with `to`/`value` carried verbatim.
+    #[test]
+    fn build_native_send_intent_is_a_native_send() {
+        let to = Address::repeat_byte(0x44);
+        let intent = build_native_send_intent(31337, to, U256::from(1_234u64));
+        assert_eq!(intent.chain_id, 31337);
+        assert_eq!(intent.to, to);
+        assert_eq!(intent.token, None);
+        assert_eq!(intent.value, U256::from(1_234u64));
+        assert!(intent.calldata.is_empty());
+        assert_eq!(intent.kind, IntentKind::Send);
     }
 
     #[test]
