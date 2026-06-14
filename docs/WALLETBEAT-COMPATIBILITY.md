@@ -106,7 +106,7 @@ plus #26/#27 (account abstraction / batching) gated behind a 7702 spike. We opti
 
 | # | Attribute | What Walletbeat wants (PASS) | Deckard now | Requirement to pass |
 |---|---|---|---|---|
-| 13 | **L1 provider independence** | Self-hosted node configurable **before any request hits a default RPC**; all basic ops work through it | **PARTIAL→PASS-able** — RPC is overridable (`eth.rs`, `settings.rs`); Helios verifies against the user endpoint | Ensure a **custom RPC can be set during onboarding before the first request** to clear the strict `YES_BEFORE_ANY_REQUEST` bar. Small, high-value change. |
+| 13 | **L1 provider independence** | Self-hosted node configurable **before any request hits a default RPC**; all basic ops work through it | **PARTIAL — bar not yet met** — RPC overridable (`eth.rs`, `settings.rs`) but the provider spawns with `DEFAULT_RPC` at `Shell::new()` *before* the auth gate; custom RPC only applies on settings-blur, so the first read hits the default unless `DECKARD_RPC_URL` is set | Add an **onboarding RPC step or lazy provider spawn** so a custom RPC binds before the first request (`YES_BEFORE_ANY_REQUEST`). **Re-tiered to `L` (app-flow change), not a quick win (2026-06-14).** |
 | 14 | **Account portability** | Standards-compliant **BIP-39 + BIP-32 + BIP-44** with exportable seed/key | **PASS** — BIP-39 keystore, hold-to-reveal seed export (`keystore.rs`, `DESIGN.md`) | Maintain. Confirm full BIP-32/44 derivation path is standard and documented. |
 | 15 | **Transaction inclusion** (censorship resistance) | Withdraw L2 funds to L1 without intermediaries (force-withdraw); mempool independence | **OUT OF SCOPE (2026-06-14)** — L1-focused, no L2 force-exit | **Deliberately out of scope for v0** (no L2 roadmap yet). Stage-2 item; revisit if/when L2s are supported via **permissionless L2→L1 withdrawal**. |
 | 16 | **Chain verification** | Verify integrity of the Ethereum chain (light client) | **PASS** — **Helios** light-client verified reads with a Verified/Unsynced badge (`helios.rs`, `shell_chrome.rs`) | Maintain. A standout strength most wallets fail. |
@@ -134,28 +134,98 @@ plus #26/#27 (account abstraction / batching) gated behind a 7702 spike. We opti
 
 ---
 
+## Architecture fit & core-expansion map
+
+Validates the **code-fit layer**: where each item lands in the crate boundary, whether the seam already
+exists or the engine must be **expanded**, rough size, and risk. From a four-cluster read of the actual
+code (2026-06-14). Altitude only — no line-level diffs. This is the answer to "did we read our own
+infra correctly, and does the core need expanding?"
+
+**Headline: `deckard-core` was built with the right seams.** Most items need *new typed surfaces*, not
+*new crypto* — multi-account derivation already exists, the keystore header already reserves an
+enclave/biometric flag, the shield builder is key-less (reusable for simulate), and the signerd
+broadcast path is alloy/7702-ready and builder-agnostic. Two findings correct the first survey:
+
+- **Re-tiered UP — #13 "custom RPC before first request" is NOT a quick win (now L).** The provider is
+  spawned at `Shell::new()` with `DEFAULT_RPC` *before the auth gate*; a custom RPC only applies on
+  settings-blur, so the first read after unlock hits the default RPC unless `DECKARD_RPC_URL` is set.
+  Passing the literal bar needs an onboarding RPC step or lazy provider spawn (an app-flow change).
+- **Re-tiered DOWN — #8/#9 multi-identity is cheaper (no core crypto).** `deckard-core` already derives
+  any account (`account_signer(index)`/`account_address(index)`, Railgun per-index too); the daemon
+  hard-wires index 0. It's a daemon `active_account` + a `SelectAccount` wire request + a switcher UI.
+
+| Item | Crate(s) | Seam vs. expansion | Size | Risk |
+|---|---|---|---|---|
+| **Un-gate Send** (linchpin) | app (daemon/contract done) | **Seam exists** — `IntentKind::Send` fully handled + tested (`daemon_e2e`/`anvil_e2e`/`parity`); only `send_view.rs` missing | **S** | none |
+| **#3** clear-sign all + EIP-712 decode | app + core | Partial (shield card only); **core expansion** — generic EIP-712 decoder (`cow_types` machinery is CoW-specific) | M–L | med — decoder scope (start CoW/Send/ERC-20-Permit, leave extension point) |
+| **#2** simulate + scam warnings | core + app (+contract maybe) | **Expansion** — key-less `simulate_intent` (eth_call) app-side; heuristic address checks | L | high — racy + detection is heuristic, not cryptographic; UX must be honest |
+| **#18** approvals viewer + revoke | core + app + contract + signerd | Partial (`PendingPayloadView::Approve` exists); **expansion** — `enumerate_approvals` + likely new `IntentKind::RevokeApproval` | M | med — ERC-20 has no `allApprovals`; curated-spender list is fast but incomplete |
+| **#5** enclave / Touch ID unlock | core + app | **Seam reserved** (keystore header `flags` bit); **expansion** — pluggable `UnlockBackend` (passphrase-only today); enclave wraps the DEK, not the secp256k1 key | M | med — secret-handling edge |
+| **#7** idle auto-lock | signerd + app | **Seam exists** — add TTL to daemon + app keepalive | S | low — pure state |
+| **#8/#9** multi-identity | signerd + contract + app (**core ready**) | Core seam exists; expansion in daemon (`active_account`) + `SelectAccount` wire request + UI | L | med-low — no new secrets (index is public) |
+| **#13** RPC-before-first-request | app + core | Partial (respawn-on-blur); **expansion** — onboarding RPC step or lazy provider spawn | **L** | high — currently **not met** (first read hits `DEFAULT_RPC`) |
+| **#24** ENS forward resolve | core + app | **Seam exists** but isolated to the watch-address field; surface in Send/Receive | M | low |
+| **#24** ENS reverse + verified badge | core + app + contract | **No seam** — no `ReverseResolveName`; name results aren't wrapped in `Read<>` for the badge | M | low-med |
+| **#26** EIP-7702 on-chain policy | signerd + core (+app); contract can stay policy-blind | **Seam** (alloy `TransactionBuilder7702`, builder-agnostic broadcast); **expansion** — session-key derivation + `broadcast_7702` | L (spike) | med — new on-chain delegation trust surface |
+| **#27** atomic batching | signerd + contract + core | **Expansion** — `Intent::Batch` + bundle policy semantics; practically gated on 7702 | M–L | med — bundle evaluation soundness |
+| **#11** per-agent isolation | contract + signerd + mcp | **Expansion** — policy is global/immutable today (one `policy.json`, no `SetPolicy`); needs session-token in the wire contract | M | med — token leak = agent impersonation |
+
+**Cross-cutting findings:**
+
+1. **Send is a UI-only unlock and the dependency hub.** The whole Intent→Policy→Decision→sign→broadcast
+   path already handles Send (tested); un-gating it (an `S` app surface) is what enables #2, #3, #18, and
+   the Send half of #24. Do this first.
+2. **The frozen wire contract (`deckard-contract`) is the higher-ceremony expansion point.** Three items
+   want to touch it — `RevokeApproval` (#18), `Intent::Batch` (#27), session-token fields (#11). **Batch
+   those contract decisions together**; don't let them sprawl across separate changes.
+3. **Simulation & scam detection are app-side, key-less, off the daemon mutex, non-blocking, and
+   heuristic** — the UX must say "double-check this address," never "this is safe."
+4. **`specs/strategy.md` already anticipates v2 session keys**, so the 7702 direction aligns with existing
+   strategy — keep the two docs cross-linked, not divergent.
+
+### EIP-7702 spike brief (#26 → #27)
+
+Scoped go/no-go, **testnet-only, non-autonomous, ~4–6 dev-days (Rust only).** 7702 would **complement,
+not replace** the local policy gate (defense-in-depth: local gate = usability + incident prevention;
+on-chain scope = blast-radius containment).
+
+- **Build:** derive a scoped session key from the master seed; build a 7702 authorization delegating the
+  EOA to the audited `Simple7702Account`, scoped by cap / target / block-height expiry; construct + sign +
+  broadcast via alloy `TransactionBuilder7702`; verify on-chain that **over-cap / expired / out-of-scope
+  are rejected**; document file deltas + the delegation-signing UX; update `THREAT-MODEL.md` for the new
+  delegation surface.
+- **Go/no-go questions the spike must answer:** (1) session-key source — master-seed-derived vs.
+  fresh/enclave-backed; (2) revocation atomicity — can a pre-revocation session tx still land? (implies
+  block-height TTL); (3) per-chain vs. all-chain delegation scope; (4) is the local `Policy` mirrored
+  on-chain, or is on-chain just auth/expiry/scope; (5) is per-agent isolation (#11) v1 or v2.
+
 ## Recommended sequencing
 
-Grouped by leverage vs. effort. This is a **suggested ordering for discussion, not a committed roadmap.**
+Grouped by leverage vs. effort, updated with the architecture-fit sizes above. **Suggested ordering for
+discussion, not a committed roadmap.**
 
-### Quick wins (low effort, high rubric value)
-1. **`FUNDING.md`** — funding/revenue disclosure (#21). **Content locked (2026-06-14): self-funded, no protocol revenue.** Hours of work; not started. Stage-2 gate.
-2. **Custom RPC before first request** in onboarding (#13) — flips L1-provider-independence to PASS.
+### Tier 0 — the linchpin
+0. **Un-gate Send** (`S`, UI-only — daemon path is production-ready and tested). Unblocks #2/#3/#18 and the Send half of #24.
+
+### Quick wins (low effort, no core expansion)
+1. **`FUNDING.md`** — funding/revenue disclosure (#21). **Content locked (2026-06-14): self-funded, no protocol revenue.** Hours; not started.
+2. **Idle auto-lock** (#7, `S`) — daemon TTL + app keepalive; flagged missing in `STATUS.md`.
 3. **Reproducible-build instructions + signed releases** in `RELEASING.md` (#23) — also satisfies WalletScrutiny.
-4. **ENS in the Send/Receive UI** (#24) — engine work largely done; Stage-1 gate.
-5. **Idle auto-lock** (#7) — already flagged missing in `STATUS.md`.
+4. **ENS forward-resolve in Send/Receive** (#24, `M`) — engine has forward resolve; surface it.
 
-### Core product work (medium effort, unblocks multiple attributes)
-6. **Clear-signing for all writes + EIP-712 decode** (#3) — pairs with un-gating Send.
-7. **Simulate-before-sign + scam/malicious-address warnings** (#2).
-8. **Token-approval viewer + per-allowance revoke** (#18).
-9. **Multi-account / identity switching** with non-correlation guidance (#8, #9).
-10. **Secure-enclave / OS-keychain key path** (#5) — pushes security-best-practices toward PASS; pairs with Touch ID.
+### Core product work (medium effort; some core/contract expansion)
+5. **Clear-signing for all writes + generic EIP-712 decoder** (#3, `M–L`) — rides on un-gated Send.
+6. **Multi-account / identity switching** (#8/#9, `L` — **core already derives accounts**, no crypto work).
+7. **Token-approval viewer + per-allowance revoke** (#18, `M`) — core `enumerate_approvals` + likely a new `RevokeApproval` wire kind.
+8. **Secure-enclave / Touch ID unlock** (#5, `M`) — pluggable `UnlockBackend`; pushes security-best-practices toward PASS.
+9. **ENS reverse resolve + verified badge** (#24, `M`).
+10. **Custom RPC before first request** (#13, **`L`** — re-tiered: onboarding step or lazy provider spawn).
+11. **Simulate-before-sign + scam warnings** (#2, `L`) — app-side key-less simulate; honest heuristic UX.
 
 ### Strategic / large (sets the ceiling)
-11. **External security audit + funded bug bounty** (#1, and Stage-2 bug bounty) — *the* highest-leverage item. **Decision spike — budget/vendor undecided (2026-06-14); not yet an actionable issue.**
-12. **EIP-7702 spike** (#26) → if adopted, unlocks **atomic batching** (#27) and on-chain scoped agent permissions. **Research-spike first** (weigh the delegation-contract trust surface).
-13. **Per-agent isolation** (#11) → scope each agent/session in the policy gate (the agent-paradigm analog of app isolation).
+12. **External security audit + funded bug bounty** (#1, and Stage-2 bug bounty) — *the* highest-leverage item. **Decision spike — budget/vendor undecided (2026-06-14); not yet an actionable issue.**
+13. **EIP-7702 spike** (#26, ~4–6 dev-days) → if adopted, unlocks **atomic batching** (#27) and on-chain scoped agent permissions. See the spike brief above. Batch its wire-contract changes with #18/#27/#11.
+14. **Per-agent isolation** (#11, `M`) → session-token in the wire contract; policy is global/immutable today.
 
 ### Out of scope / deferred for v0 (decided 2026-06-14 — acknowledge, don't chase)
 - **Hardware-wallet signing** (#4) — deliberate non-goal (keyboard-first, native, single-binary).
