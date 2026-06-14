@@ -1,5 +1,5 @@
-//! The typed error catalog: every failure an agent (or a CLI user) can hit maps to a
-//! three-part `problem + cause + fix` — actionable, deterministic, and secret-free. An LLM's
+//! The typed error catalog shared by key-less Deckard local interfaces: every failure maps to a
+//! three-part `problem + cause + fix` — actionable, deterministic, and secret-free. An agent's
 //! default instinct on error is to retry; these messages say explicitly when retrying is
 //! wrong (broadcast-timeout, already_executed) and what to do instead.
 

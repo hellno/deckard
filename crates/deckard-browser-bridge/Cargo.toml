@@ -1,0 +1,28 @@
+[package]
+name = "deckard-browser-bridge"
+version = "0.0.1-alpha"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+description = "Deckard's experimental key-less EIP-1193 localhost browser bridge."
+
+[lib]
+name = "deckard_browser_bridge"
+path = "src/lib.rs"
+
+[[bin]]
+name = "deckard-browser-bridge"
+path = "src/main.rs"
+
+[dependencies]
+deckard-wallet-client = { path = "../deckard-wallet-client" }
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util"] }
+serde = { workspace = true }
+serde_json = "1"
+anyhow = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true

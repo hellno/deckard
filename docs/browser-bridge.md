@@ -9,7 +9,8 @@ local test dapp
   -> injected `window.ethereum` EIP-1193 provider
   -> unpacked browser extension
   -> localhost Deckard bridge endpoint on 127.0.0.1
-  -> Deckard sidecar/session handling
+  -> shared key-less wallet client/session primitives
+  -> deckard-signerd
   -> selected account/address returned to the dapp
 ```
 
@@ -17,17 +18,49 @@ It does **not** ship a production wallet extension. The extension contains no ke
 signing logic, or durable wallet state. It only forwards a tiny allowlist of methods to a local
 Deckard process.
 
+## Architecture
+
+The browser bridge is a dapp/browser interface. It is intentionally separate from `deckard-mcp`,
+which is an MCP/agent interface. Both are key-less local clients over shared wallet capabilities:
+
+```text
+deckard-signerd
+      ↑
+crates/deckard-wallet-client
+      ↑                         ↑
+crates/deckard-mcp      crates/deckard-browser-bridge
+                                ↑
+                            extension/
+```
+
+`deckard-wallet-client` owns reusable non-browser-specific pieces:
+
+- signer-daemon client access (`SignerClient` wiring)
+- chain id configuration (`DECKARD_CHAIN_ID`, default `1`)
+- wallet/account address lookup
+- common failure mapping for daemon denies and socket errors
+
+`deckard-browser-bridge` owns browser/dapp-specific pieces:
+
+- the loopback `/rpc` HTTP endpoint
+- EIP-1193 request/response types
+- EIP-1193 error mapping for unsupported methods
+- per-origin in-memory dapp sessions
+- dev/mock account mode for local extension and dapp testing
+
+`deckard-mcp` stays focused on MCP/agent interaction and reuses the same wallet client primitives for
+its CLI/tools. It does not own or serve the browser bridge.
+
 ## Repo map
 
 - Desktop app / UI: `crates/deckard-app` (`deckard` GPUI binary).
-- Existing local daemon / signer API: `crates/deckard-signerd`, over a same-uid Unix-domain socket.
-- Key-less sidecar / API surface: `crates/deckard-mcp`; this milestone adds the experimental
-  `deckard-mcp browser-bridge` localhost endpoint here instead of creating a competing daemon.
-- Existing account/address state: the unlocked signer daemon answers `SignerRequest::Address`, surfaced
-  by `Sidecar::wallet_address()`.
+- Local signer daemon / signer API: `crates/deckard-signerd`, over a same-uid Unix-domain socket.
+- Shared key-less wallet client primitives: `crates/deckard-wallet-client`.
+- Agent/MCP interface: `crates/deckard-mcp`.
+- Browser/dapp interface: `crates/deckard-browser-bridge` (`deckard-browser-bridge` binary).
 - Browser connector scaffold: `extension/`.
 - Local test dapp: `examples/browser-bridge-dapp/index.html`.
-- Tests: `crates/deckard-mcp/src/browser_bridge.rs`.
+- Browser bridge tests: `crates/deckard-browser-bridge/src/lib.rs`.
 
 ## Supported methods
 
@@ -61,7 +94,7 @@ reviewed permissions registry with explicit approval UI, anti-phishing copy, rev
 This is the smallest way to test the browser bridge without an unlocked wallet:
 
 ```sh
-cargo run -p deckard-mcp -- browser-bridge \
+cargo run -p deckard-browser-bridge -- \
   --bind 127.0.0.1:8765 \
   --dev-mock-account 0xdeC0ded0000000000000000000000000000001193
 ```
@@ -70,7 +103,7 @@ Alternatively, the same dev mock can be supplied through the environment:
 
 ```sh
 export DECKARD_BRIDGE_DEV_ACCOUNT=0xdeC0ded0000000000000000000000000000001193
-cargo run -p deckard-mcp -- browser-bridge --bind 127.0.0.1:8765
+cargo run -p deckard-browser-bridge -- --bind 127.0.0.1:8765
 ```
 
 ## Run against local Deckard
@@ -86,11 +119,11 @@ In another terminal, run the bridge on loopback:
 
 ```sh
 export DECKARD_CHAIN_ID=11155111
-cargo run -p deckard-mcp -- browser-bridge --bind 127.0.0.1:8765
+cargo run -p deckard-browser-bridge -- --bind 127.0.0.1:8765
 ```
 
 The bridge uses the existing Deckard socket path (`DECKARD_SOCKET_PATH` or the default) and calls the
-same key-less sidecar path as `deckard-mcp address`.
+same shared key-less wallet client path that `deckard-mcp address` uses.
 
 ## Load the unpacked extension
 
@@ -134,4 +167,5 @@ Open <http://127.0.0.1:8777/> in the browser where the unpacked extension is loa
 - Add a real approval UI for `eth_requestAccounts` and per-origin revocation.
 - Add EIP-6963 provider announcement.
 - Persist permissions safely.
+- Consider a small integration test for the loopback `/rpc` HTTP boundary.
 - Add clear-signing/message-signing only after Deckard has the reviewed intent model for it.

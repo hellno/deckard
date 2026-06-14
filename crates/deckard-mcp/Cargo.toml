@@ -19,6 +19,7 @@ path = "src/main.rs"
 # The frozen wire contract + the key-less socket client (re-exported from signerd).
 deckard-contract = { path = "../deckard-contract" }
 deckard-signerd = { path = "../deckard-signerd", default-features = false }
+deckard-wallet-client = { path = "../deckard-wallet-client" }
 # Only the key-less shield-calldata builder (`shield`); no verified-reads — the sidecar
 # reads balances THROUGH the daemon, it never owns an RPC/Helios client.
 deckard-core = { path = "../deckard-core", default-features = false, features = ["shield"] }
