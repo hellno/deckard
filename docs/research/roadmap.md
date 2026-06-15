@@ -6,19 +6,34 @@
 > Citations `[NN]` point to the KB file that grounds the item. The `/autoplan` consensus + decision
 > log are at the end of this file.
 
+> **Reconciliation update (2026-06-14).** This roadmap predates the alpha build, and two things in the
+> NOW set below did **not** ship as written. **EIP-7702 session keys** moved to **LATER** (deferred, now
+> tracked as issue `#33`; see `STATUS.md`), and with them the **chain-enforced** limits. What shipped is
+> the **software-enforced** policy gate plus human hold-to-confirm. So v1's honest claim is *"a compromised
+> agent cannot exfiltrate the key, and can only request actions the policy permits and you approve,"* not
+> *"cannot exceed on-chain limits."* The full agent-authorization picture, grounded against code, lives in
+> [`docs/agent-authorization-map.md`](../agent-authorization-map.md); the agent-wallet / session-key
+> positioning is [`docs/adr/0002`](../adr/0002-agent-wallet-and-session-keys.md). Items below are kept as
+> the original decision log; inline `⏸` marks what deferred.
+
 ## What Deckard is (fixed constraints)
 
 - A **native, cross-platform (macOS + Linux) desktop** Ethereum wallet, written in **Rust on GPUI**.
 - **Self-custodial**, **local-first**. Keys live on the user's device.
 - Today (v0): a single alloy-generated **secp256k1 EOA**, persisted as **plaintext hex** in the OS config dir.
 - North-star: an **"operator wallet"** — an LLM that manages the wallet semi-autonomously, running
-  locally or wired to the user's chosen AI, **under limits it cannot exceed**.
+  locally or wired to the user's chosen AI, **under limits you set and can revoke** (software-enforced
+  in v1, every move approved by hand; chain-enforced is the post-audit upgrade).
 
 ## Decisions applied (from the `/autoplan` review)
 
 The review found the v1 draft **engineering-correct but strategically inverted**: it led with a
 conventional security floor and enforced the operator's limits in a *same-process software gate* that
 all four voices judged unsafe to call "the agent never sees the seed." The decisions below re-spine it.
+
+> **⏸ Update (2026-06-14):** Decision ①B below pulled EIP-7702 / chain-enforced limits into NOW. That half
+> **deferred to LATER** (now issue `#33`); v1 shipped the software-enforced gate plus hold-to-confirm. See
+> the reconciliation note at the top.
 
 1. **Safety boundary (①B):** the signer runs in an **isolated process** (key + policy inside it; the
    AI gets a key-less client), **and** a **minimal EIP-7702 session-key** path is pulled into NOW so
@@ -59,7 +74,7 @@ LATER = gated on a further prerequisite. NEVER = excluded by positioning.
 |---|---|---|---|
 | **Process-isolated signer daemon** — holds the decrypted key + runs the policy; exposes only a `sign(intent)` RPC over an authenticated local socket; **no "sign arbitrary bytes"**; single-instance lock; audit log | `[05][08]` | The real trust boundary; the AI process never holds the key (Decision ①) | L |
 | **Policy gate (inside the daemon)** — caps, allowlists, expiry, sim-on-deviation; **decodes calldata** (approvals/permits/7702 SetCode); **default-deny** unrecognized; returns **typed allow/deny/needs-approval + machine-readable reason + remediation** | `[05]` | Limits the agent can't bypass in-process; typed refusals stop agent flailing | L |
-| **Minimal EIP-7702 session keys** — reversible, address-preserving delegation to an audited target (`Simple7702Account`/session-key validator); **chain-enforced** caps/expiry/allowlist; legible "what am I delegating to" UX | `[01][02]` | Makes the operator's limits **unbreakable**, not just local (Decision ①B) | L |
+| ⏸ **Minimal EIP-7702 session keys** *(deferred → LATER 2026-06-14; now `#33`)* — reversible, address-preserving delegation to an audited target (`Simple7702Account`/session-key validator); **chain-enforced** caps/expiry/allowlist; legible "what am I delegating to" UX | `[01][02]` | Makes the operator's limits **unbreakable**, not just local (Decision ①B) | L |
 | **Local MCP sidecar** — key-less client of the daemon; `read`/`simulate`/`draft`/`scoped-execute` tools; **refuses flag-based secrets**; stdio or authed-localhost-HTTP with documented auth + revocation | `[04][05]` | The converged integration surface (Splits' one-binary CLI+MCP) | M |
 | **Native approval surface** — desktop modal/tray showing intent + asset delta + counterparty + sim source + "why the agent wants this"; **deny / approve-once / approve-rule / pause-agent** | `[05]` | The most-seen operator interaction; Deckard's native edge over browser MCP (Decision ④) | M |
 | **Owner-key override / STOP / revoke-all-agent-authority** | `[05]` | The operator panic button (Decision ④) | S |
