@@ -37,6 +37,29 @@ run-tray:
     cargo build -p deckard-signerd
     cargo run -p deckard-app --features tray
 
+# ─── QA fast-unlock vault (DevEx) ────────────────────────────────────────────
+# Skip onboarding (Create -> passphrase -> seed reveal -> backup challenge) on every
+# clicky QA run. `qa-vault` seals a THROWAWAY vault (anvil's dev mnemonic — account 0
+# is prefunded on any anvil/fork) under a fixed passphrase with FAST KDF into an
+# isolated /tmp config dir; `qa` then launches the app there so it boots straight to
+# Unlock — type the passphrase it prints (decrypts in ~tens of ms, not ~1 s).
+# Throwaway only; never real funds. Production create/import keep KdfParams::PRODUCTION.
+
+# Seal the QA vault into /tmp/deckard-qa (re-run anytime to reset it).
+qa-vault:
+    DECKARD_CONFIG_DIR="/tmp/deckard-qa" cargo run -q -p deckard-core --example qa-vault
+
+# Launch the app against the QA vault, pointed at a local anvil (start `anvil` first
+# for live balances / send / shield). Run `just qa-vault` once before this.
+qa:
+    cargo build -p deckard-signerd
+    DECKARD_CONFIG_DIR="/tmp/deckard-qa" \
+    DECKARD_SOCKET_PATH="/tmp/deckard-qa/signerd.sock" \
+    DECKARD_CHAIN_ID="31337" \
+    DECKARD_RPC_URL="http://127.0.0.1:8545" \
+    DECKARD_VERIFIED_READS="0" \
+        cargo run
+
 # Full walkthrough (onboard -> demo-fund -> shield): CONTRIBUTING "Demo / local-chain dev loop".
 # Wires an isolated ~/.deckard/demo config dir; verified reads are OFF; Ctrl-C tears anvil down.
 # Start the demo: a local anvil fork of Sepolia (pinned block) + the Deckard app & daemon.

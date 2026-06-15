@@ -11,7 +11,11 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use alloy_primitives::{Address, Bytes, B256, U256};
-use deckard_contract::{Decision, ExecuteResult, Intent, IntentKind, RequestId, UnlockOutcome};
+use deckard_contract::{
+    Decision, ExecuteResult, Intent, IntentKind, RequestId, SignOrderResult, SwapOrder,
+    UnlockOutcome,
+};
+use deckard_core::{APPROVE_SELECTOR, GPV2_VAULT_RELAYER};
 use deckard_signerd::{ControlChannel, DaemonSupervisor, SignerClient};
 
 /// Result of the app's send path (propose, then execute on `Allow`). The path is implemented
@@ -169,6 +173,80 @@ pub fn build_native_send_intent(chain_id: u64, to: Address, value_wei: U256) -> 
         calldata: Bytes::new(),
         kind: IntentKind::Send,
     }
+}
+
+/// Build the **exact-gross** ERC-20 approve intent for a swap (#25). The CoW vault relayer must
+/// be allowed to move the order's GROSS sell amount (= `quote.sellAmount + quote.feeAmount`, which
+/// is exactly `order.sell_amount`) of the sell token before the order can settle. Shape (codex
+/// must-do #1):
+/// - `to` = the sell token (the ERC-20 contract the approve targets),
+/// - `value` = 0 (a value-bearing approve is denied `approve_with_value`),
+/// - `kind` = `ContractCall`, `token` = None,
+/// - `calldata` = `approve(GPV2_VAULT_RELAYER, gross)`.
+///
+/// The daemon admits this approve ONLY when a matching pending `Order` exists (same sell token +
+/// same gross sell amount), so the caller MUST `propose_order` BEFORE proposing this approve, else
+/// the daemon answers `approve_no_matching_order`. The calldata layout mirrors
+/// [`deckard_core::decode_approve`] byte-for-byte (selector ‖ 12 pad ‖ 20-byte spender ‖ 32-byte
+/// amount), so the daemon's `decode_approve` round-trips it back to `(GPV2_VAULT_RELAYER, gross)`.
+pub fn build_exact_approve_intent(chain_id: u64, sell_token: Address, gross: U256) -> Intent {
+    Intent {
+        chain_id,
+        to: sell_token,
+        token: None,
+        value: U256::ZERO,
+        calldata: encode_approve(GPV2_VAULT_RELAYER, gross),
+        kind: IntentKind::ContractCall,
+    }
+}
+
+/// ABI-encode `approve(address spender, uint256 amount)`: the 4-byte selector, the spender
+/// left-padded to a 32-byte word, then the amount as a big-endian 32-byte word. Built by hand
+/// (no `sol!`) so the bytes are the exact inverse of [`deckard_core::decode_approve`]'s manual
+/// decode — the daemon's shaped-approve admission decodes this back to `(spender, amount)`.
+fn encode_approve(spender: Address, amount: U256) -> Bytes {
+    let mut calldata = Vec::with_capacity(4 + 32 + 32);
+    calldata.extend_from_slice(&APPROVE_SELECTOR);
+    // address arg: left-pad the 20-byte address to a 32-byte word.
+    calldata.extend_from_slice(&[0u8; 12]);
+    calldata.extend_from_slice(spender.as_slice());
+    // uint256 arg: the big-endian 32-byte amount.
+    calldata.extend_from_slice(&amount.to_be_bytes::<32>());
+    Bytes::from(calldata)
+}
+
+/// Authorize + sign a stored swap order, key-less. The completed hold-to-confirm IS the human
+/// approval (swaps are ALWAYS `NeedsApproval` in v1), so this first sends `Resolve{approved: true}`
+/// over the **private capability channel** (the daemon authenticates approvals only there, PRD-01)
+/// to flip the `Pending` record to `Allowed`, then `SignOrder` over the public socket to get the
+/// order's 65-byte EIP-712 signature. NO HTTP, NO broadcast: the app posts the signed order to the
+/// CoW orderbook itself. Mirrors [`approve_and_execute_blocking`]'s control-then-public split, but
+/// the public step is `sign_order` (signature) instead of `execute` (broadcast). Blocking; called
+/// from a background thread.
+pub fn sign_and_resolve_blocking(
+    client: &SignerClient,
+    control: &ControlChannel,
+    request_id: RequestId,
+) -> anyhow::Result<Bytes> {
+    control.resolve(request_id, true)?;
+    match client.sign_order_blocking(request_id)? {
+        SignOrderResult::Signed { signature } => Ok(signature),
+        SignOrderResult::Denied { reason } => {
+            anyhow::bail!("{reason}")
+        }
+    }
+}
+
+/// Bind a swap order's `owner`/`receiver` to the wallet, exactly as the daemon does before it
+/// hashes the record, so the caller can derive the matching `request_id`. The daemon never trusts
+/// a client-supplied owner — it rebinds owner = wallet (and `evaluate_order` enforces receiver ==
+/// wallet) — so an id derived from the UN-bound order would not match the stored record. Returns
+/// the bound order; derive its id with [`SignerClient::request_id_for_swap_order`].
+pub fn bind_swap_order(order: &SwapOrder, wallet: Address) -> SwapOrder {
+    let mut bound = order.clone();
+    bound.owner = wallet;
+    bound.receiver = wallet;
+    bound
 }
 
 /// Parse a decimal ETH amount (`"0.05"`, `"1"`, `"1.234"`) into wei. Pure + total: rejects
@@ -450,6 +528,103 @@ mod tests {
         let default = deckard_signerd::socket::default_socket_path();
         assert_eq!(socket_path_from(None), default);
         assert_eq!(socket_path_from(Some(OsString::new())), default);
+    }
+
+    /// The exact-gross approve intent (codex must-do #1): targets the SELL TOKEN, carries no ETH
+    /// (`value == 0`), is a `ContractCall` with `token: None`, and its calldata decodes — through
+    /// the daemon's own `decode_approve` — back to `(GPV2_VAULT_RELAYER, gross)`. A regression to
+    /// the wrong spender or the after-fee amount would be caught here AND denied by the daemon.
+    #[test]
+    fn exact_approve_intent_targets_relayer_for_the_gross_amount() {
+        let sell_token = Address::repeat_byte(0x55);
+        let gross = U256::from(1_005_000_000_000_000_000u128); // after-fee 1e18 + fee 5e15
+        let intent = build_exact_approve_intent(11155111, sell_token, gross);
+
+        assert_eq!(intent.chain_id, 11155111);
+        assert_eq!(intent.to, sell_token, "approve targets the sell-token ERC-20");
+        assert_eq!(intent.value, U256::ZERO, "approve must carry no ETH");
+        assert_eq!(intent.token, None);
+        assert_eq!(intent.kind, IntentKind::ContractCall);
+
+        // The daemon decodes this back to (spender, amount) for its shaped-approve admission.
+        let (spender, amount) =
+            deckard_core::decode_approve(&intent.calldata).expect("calldata is a valid approve");
+        assert_eq!(
+            spender,
+            deckard_core::GPV2_VAULT_RELAYER,
+            "spender must be the GPv2 vault relayer"
+        );
+        assert_eq!(amount, gross, "approve amount is the GROSS sell amount");
+    }
+
+    /// The approve amount tracks the order's GROSS `sell_amount` exactly (built off a quote via
+    /// `swap_order_from_quote`), not the after-fee quote amount — so the on-chain allowance covers
+    /// the full amount the vault relayer pulls.
+    #[test]
+    fn approve_amount_equals_order_gross_sell_amount() {
+        let quote = deckard_core::QuoteResponse {
+            quote: deckard_core::QuoteOrderParameters {
+                sell_token: Address::repeat_byte(0x55),
+                buy_token: Address::repeat_byte(0x66),
+                receiver: None,
+                sell_amount: U256::from(37_989_365_556_267_132u64), // after-fee
+                buy_amount: U256::from(1_953_742_300_219_817_002u64),
+                valid_to: 1_781_261_340,
+                fee_amount: U256::from(12_010_634_443_732_868u64), // fee
+            },
+            from: None,
+            expiration: None,
+            id: Some(1),
+            verified: Some(true),
+        };
+        let wallet = Address::repeat_byte(0x11);
+        let order = deckard_core::swap_order_from_quote(
+            &quote,
+            11155111,
+            wallet,
+            wallet,
+            deckard_core::DEFAULT_SLIPPAGE_BPS,
+        );
+        let gross = U256::from(50_000_000_000_000_000u64); // == sellAmountBeforeFee
+        assert_eq!(order.sell_amount, gross);
+
+        let intent = build_exact_approve_intent(11155111, order.sell_token, order.sell_amount);
+        let (_, amount) = deckard_core::decode_approve(&intent.calldata).expect("valid approve");
+        assert_eq!(amount, gross, "the approve covers the full gross sell amount");
+    }
+
+    /// `bind_swap_order` pins BOTH owner and receiver to the wallet. The app builds the order with
+    /// `receiver = wallet` (so `evaluate_order` doesn't deny `receiver_not_wallet`), and the daemon
+    /// rebinds `owner = wallet` before hashing. Pinning both locally gives the SAME bytes the daemon
+    /// hashes its stored record under — so the derived `request_id` matches and we can resolve/sign.
+    #[test]
+    fn bind_swap_order_pins_owner_and_receiver_to_wallet() {
+        let wallet = Address::repeat_byte(0x11);
+        // The order as the app builds it: receiver already == wallet; owner is a placeholder the
+        // daemon will rebind. `bind_swap_order` produces the post-bind canonical form.
+        let order = SwapOrder {
+            chain_id: 11155111,
+            owner: Address::repeat_byte(0xEE), // a placeholder owner the daemon rebinds to `wallet`
+            receiver: wallet,                  // app already binds receiver (else receiver_not_wallet)
+            sell_token: Address::repeat_byte(0x55),
+            buy_token: Address::repeat_byte(0x66),
+            sell_amount: U256::from(1_000u64),
+            buy_amount_min: U256::from(990u64),
+            valid_to: 1_700_000_000,
+            app_data: deckard_core::APP_DATA_HASH,
+        };
+        let bound = bind_swap_order(&order, wallet);
+        assert_eq!(bound.owner, wallet);
+        assert_eq!(bound.receiver, wallet);
+        // The daemon binds only owner (receiver is already wallet) before hashing the stored
+        // record; our locally-bound id must equal that.
+        let id_from_bound = SignerClient::request_id_for_swap_order(&bound);
+        let mut daemon_bound = order.clone();
+        daemon_bound.owner = wallet; // daemon's pre-hash binding (receiver untouched, already wallet)
+        assert_eq!(
+            id_from_bound,
+            SignerClient::request_id_for_swap_order(&daemon_bound)
+        );
     }
 
     #[test]

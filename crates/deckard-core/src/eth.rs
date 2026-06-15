@@ -31,10 +31,18 @@
 use alloy::ens::ProviderEnsExt;
 use alloy::primitives::{Address, U256};
 use alloy::providers::{DynProvider, Provider, ProviderBuilder};
+use alloy::sol;
 
 use deckard_contract::ReadStatus;
 
 use crate::balances::{fetch_portfolio, Portfolio};
+
+sol! {
+    #[sol(rpc)]
+    interface IERC20Allowance {
+        function allowance(address owner, address spender) external view returns (uint256);
+    }
+}
 
 /// A reliable public mainnet RPC, used as the execution-layer endpoint Helios proves
 /// against (or, with `verified-reads` off, read directly). Overridable via settings.
@@ -71,6 +79,12 @@ enum EthReq {
         addr: Address,
         reply: Reply<Read<Portfolio>>,
     },
+    Allowance {
+        owner: Address,
+        spender: Address,
+        token: Address,
+        reply: Reply<U256>,
+    },
     ResolveName {
         name: String,
         reply: Reply<Address>,
@@ -85,10 +99,11 @@ pub struct EthProvider {
 }
 
 impl EthProvider {
-    /// Spawn the network worker pointed at `rpc_url`. Never blocks; the runtime, the
-    /// embedded Helios client (when `verified-reads` is on), and the alloy provider are
-    /// all built on the worker thread.
-    pub fn spawn(rpc_url: impl Into<String>) -> Self {
+    /// Spawn the network worker pointed at `rpc_url` for `chain_id`. The chain id selects the
+    /// curated token set the portfolio read uses (see [`crate::tokens::tokens_for`]). Never
+    /// blocks; the runtime, the embedded Helios client (when `verified-reads` is on), and the
+    /// alloy provider are all built on the worker thread.
+    pub fn spawn(rpc_url: impl Into<String>, chain_id: u64) -> Self {
         let rpc_url = rpc_url.into();
         let (tx, rx) = flume::unbounded::<EthReq>();
         // Fatal-at-startup boundary: if the OS refuses to spawn the network thread the app cannot
@@ -96,7 +111,7 @@ impl EthProvider {
         #[allow(clippy::expect_used)]
         std::thread::Builder::new()
             .name("deckard-eth".into())
-            .spawn(move || run_worker(rpc_url, rx))
+            .spawn(move || run_worker(rpc_url, chain_id, rx))
             .expect("spawn deckard-eth worker thread");
         Self { tx }
     }
@@ -117,6 +132,24 @@ impl EthProvider {
     /// round-trip, with its trust label. Non-blocking; await on the UI executor.
     pub fn portfolio(&self, addr: Address) -> flume::Receiver<anyhow::Result<Read<Portfolio>>> {
         self.request(|reply| EthReq::Portfolio { addr, reply })
+    }
+
+    /// Read the ERC-20 `allowance(owner, spender)` of `token` — how much `spender` may move
+    /// of `owner`'s `token` balance. The swap path uses this to decide whether `owner` still
+    /// needs to approve the CoW vault relayer. Not value-bearing in the trust sense, so no
+    /// trust label; non-blocking, await on the UI executor.
+    pub fn allowance(
+        &self,
+        owner: Address,
+        spender: Address,
+        token: Address,
+    ) -> flume::Receiver<anyhow::Result<U256>> {
+        self.request(|reply| EthReq::Allowance {
+            owner,
+            spender,
+            token,
+            reply,
+        })
     }
 
     /// Forward-resolve an ENS name (e.g. `vitalik.eth`) to an address. Not value-bearing,
@@ -146,7 +179,7 @@ impl EthProvider {
 
 /// The worker entry point: build the runtime + the read provider (verified or raw),
 /// then service requests until every `EthProvider` handle has dropped (closing `rx`).
-fn run_worker(rpc_url: String, rx: flume::Receiver<EthReq>) {
+fn run_worker(rpc_url: String, chain_id: u64, rx: flume::Receiver<EthReq>) {
     // Fatal-at-startup boundary: a current-thread runtime we cannot build leaves the worker unable
     // to do anything; panicking with a clear message beats silently servicing nothing.
     #[allow(clippy::expect_used)]
@@ -156,7 +189,7 @@ fn run_worker(rpc_url: String, rx: flume::Receiver<EthReq>) {
         .expect("build tokio current-thread runtime");
 
     rt.block_on(async move {
-        let read_path = ReadPath::build(&rpc_url).await;
+        let read_path = ReadPath::build(&rpc_url, chain_id).await;
 
         while let Ok(req) = rx.recv_async().await {
             match req {
@@ -168,6 +201,14 @@ fn run_worker(rpc_url: String, rx: flume::Receiver<EthReq>) {
                 }
                 EthReq::Portfolio { addr, reply } => {
                     let _ = reply.send(read_path.portfolio(addr).await);
+                }
+                EthReq::Allowance {
+                    owner,
+                    spender,
+                    token,
+                    reply,
+                } => {
+                    let _ = reply.send(read_path.allowance(owner, spender, token).await);
                 }
                 EthReq::ResolveName { name, reply } => {
                     let _ = reply.send(read_path.resolve_name(&name).await);
@@ -181,6 +222,9 @@ fn run_worker(rpc_url: String, rx: flume::Receiver<EthReq>) {
 /// `verified-reads` is on, the embedded Helios client that owns the localhost server
 /// (kept alive for the worker's lifetime — its Drop tears the server down).
 struct ReadPath {
+    /// The chain this path reads against. Selects the curated token set for a portfolio read
+    /// (see [`crate::tokens::tokens_for`]).
+    chain_id: u64,
     /// `None` when the URL was unparseable / Helios failed to come up. Every read then
     /// answers with an error or an `Unsynced` status (fail-closed; the UI never hangs).
     provider: Option<DynProvider>,
@@ -196,7 +240,7 @@ struct ReadPath {
 impl ReadPath {
     /// Build the read path on the worker thread, inside the worker's tokio runtime.
     #[cfg(feature = "verified-reads")]
-    async fn build(rpc_url: &str) -> Self {
+    async fn build(rpc_url: &str, chain_id: u64) -> Self {
         // Demo / local-fork mode: when verified reads are disabled at runtime
         // (`DECKARD_VERIFIED_READS=0`), skip the Helios bootstrap entirely. Embedded Helios is
         // mainnet-only and would stall a Balance read against a Sepolia fork; instead read the
@@ -207,6 +251,7 @@ impl ReadPath {
                 .ok()
                 .map(|url| ProviderBuilder::new().connect_http(url).erased());
             return Self {
+                chain_id,
                 provider,
                 unverified_reason: Some("verification disabled (demo mode)".to_string()),
                 _helios: None,
@@ -231,6 +276,7 @@ impl ReadPath {
                 // VerifiedReader is retained so the server task stays alive.
                 let provider = reader.provider().clone();
                 Self {
+                    chain_id,
                     provider: Some(provider),
                     unverified_reason: None, // verified path: label by head freshness
                     _helios: Some(reader),
@@ -247,6 +293,7 @@ impl ReadPath {
                     .ok()
                     .map(|url| ProviderBuilder::new().connect_http(url).erased());
                 Self {
+                    chain_id,
                     provider,
                     unverified_reason: Some(reason),
                     _helios: None,
@@ -257,12 +304,13 @@ impl ReadPath {
 
     /// Feature-off build: the original raw-RPC path, always tagged Unsynced.
     #[cfg(not(feature = "verified-reads"))]
-    async fn build(rpc_url: &str) -> Self {
+    async fn build(rpc_url: &str, chain_id: u64) -> Self {
         let provider = rpc_url
             .parse()
             .ok()
             .map(|url| ProviderBuilder::new().connect_http(url).erased());
         Self {
+            chain_id,
             provider,
             unverified_reason: Some("verification disabled".to_string()),
         }
@@ -316,8 +364,25 @@ impl ReadPath {
             .provider
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("no RPC/Helios read path"))?;
-        let value = fetch_portfolio(provider, addr).await?;
+        let value = fetch_portfolio(provider, addr, self.chain_id).await?;
         Ok(Read::new(value, self.status().await))
+    }
+
+    /// `eth_call` of ERC-20 `allowance(owner, spender)` on `token`. Not value-bearing in the
+    /// trust sense (it gates an approval, it isn't a balance the user reads), so no trust label.
+    async fn allowance(
+        &self,
+        owner: Address,
+        spender: Address,
+        token: Address,
+    ) -> anyhow::Result<U256> {
+        let provider = self
+            .provider
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no RPC/Helios read path"))?;
+        let erc20 = IERC20Allowance::new(token, provider);
+        let allowed = erc20.allowance(owner, spender).call().await?;
+        Ok(allowed)
     }
 
     async fn resolve_name(&self, name: &str) -> anyhow::Result<Address> {
@@ -357,6 +422,7 @@ mod tests {
             .connect_mocked_client(asserter)
             .erased();
         ReadPath {
+            chain_id: 1,
             provider: Some(provider),
             unverified_reason: Some("test (no helios)".to_string()),
             #[cfg(feature = "verified-reads")]
@@ -377,15 +443,40 @@ mod tests {
         assert!(!read.status.is_trustworthy());
     }
 
+    /// The read path decodes an ERC-20 allowance off a mocked transport (no trust label).
+    /// An `eth_call` returns ABI-encoded bytes, so the mock must reply with the encoded
+    /// `allowance(...)` return (a 32-byte word), not a bare U256 RPC value.
+    #[tokio::test]
+    async fn allowance_reads_from_mocked_transport() {
+        use alloy::primitives::Bytes;
+        use alloy::sol_types::SolValue;
+
+        let asserter = Asserter::new();
+        let encoded = Bytes::from(U256::from(1_000_000u64).abi_encode());
+        asserter.push_success(&encoded);
+        let path = mocked_path(asserter);
+
+        let allowed = path
+            .allowance(Address::ZERO, Address::ZERO, Address::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(allowed, U256::from(1_000_000u64));
+    }
+
     /// A missing provider fails closed with an error rather than panicking or hanging.
     #[tokio::test]
     async fn no_provider_errors_cleanly() {
         let path = ReadPath {
+            chain_id: 1,
             provider: None,
             unverified_reason: Some("test (no provider)".to_string()),
             #[cfg(feature = "verified-reads")]
             _helios: None,
         };
         assert!(path.balance(Address::ZERO).await.is_err());
+        assert!(path
+            .allowance(Address::ZERO, Address::ZERO, Address::ZERO)
+            .await
+            .is_err());
     }
 }

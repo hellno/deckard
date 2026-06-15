@@ -52,13 +52,20 @@ hands the wheel to Claude Desktop.
 - **`just`** — `brew install just` (macOS) or `cargo install just` (any platform).
 - **Foundry** (`anvil` + `cast`) — `brew install foundry` (macOS), or
   `curl -L https://foundry.paradigm.xyz | bash && foundryup` (any platform).
-- **A free Sepolia _archive_ RPC** — this is anvil's upstream fork source (it is **not** read by
-  any Deckard binary). A free archive endpoint works, e.g. [drpc.org](https://drpc.org),
-  Alchemy, or Infura Sepolia. Export it:
+- **A Sepolia _archive_ RPC** — this is anvil's upstream fork source (it is **not** read by
+  any Deckard binary). The **zero-setup option is the keyless public endpoint** — no signup, no
+  key (it may rate-limit; for heavy use get a free keyed endpoint from Alchemy/Infura/dRPC):
 
   ```sh
-  export RPC_URL_SEPOLIA=https://eth-sepolia.g.alchemy.com/v2/<your-key>
+  export RPC_URL_SEPOLIA=https://sepolia.drpc.org          # keyless — works out of the box
+  # or a free keyed endpoint:
+  # export RPC_URL_SEPOLIA=https://eth-sepolia.g.alchemy.com/v2/<your-key>
   ```
+
+  > It only needs **archive depth at the pinned fork block** (`10822990`, where the Railgun
+  > contracts live) — verify with `cast block 10822990 --rpc-url "$RPC_URL_SEPOLIA"`.
+  > Local Railgun shield/swap testing is documented in
+  > [`docs/dev/railgun-local-testing.md`](docs/dev/railgun-local-testing.md).
 
 ### macOS (Claude Desktop)
 

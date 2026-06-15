@@ -77,8 +77,9 @@ pub use config::{config_dir, policy_path, vault_path};
 pub use cow_client::{
     get_account_orders, get_order_status, parse_account_orders, parse_error_body,
     parse_order_status, parse_order_uid, parse_quote_response, post_order, post_quote,
-    put_app_data, swap_order_from_quote, AccountOrder, AppDataDoc, CowError, OrderCreation,
-    OrderStatusResponse, QuoteOrderParameters, QuoteRequest, QuoteResponse, DEFAULT_SLIPPAGE_BPS,
+    put_app_data, swap_order_from_quote, AccountOrder, AppDataDoc, CowError, CowOrderbook,
+    OrderCreation, OrderStatusResponse, QuoteOrderParameters, QuoteRequest, QuoteResponse,
+    DEFAULT_SLIPPAGE_BPS,
 };
 pub use env::{demo_fork_block, screen_capture_allowed, verified_reads_enabled};
 pub use eth::{EthProvider, Read, DEFAULT_RPC};
