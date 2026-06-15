@@ -91,6 +91,8 @@ exceptions = [
     { allow = ["AGPL-3.0-or-later"], crate = "deckard-mcp" },
     { allow = ["AGPL-3.0-or-later"], crate = "deckard-contract" },
     { allow = ["AGPL-3.0-or-later"], crate = "deckard-signerd" },
+    { allow = ["AGPL-3.0-or-later"], crate = "deckard-wallet-client" },
+    { allow = ["AGPL-3.0-or-later"], crate = "deckard-browser-bridge" },
     { allow = ["GPL-3.0-or-later"], crate = "zlog" },
     { allow = ["GPL-3.0-or-later"], crate = "ztracing" },
     { allow = ["GPL-3.0-or-later"], crate = "ztracing_macro" },

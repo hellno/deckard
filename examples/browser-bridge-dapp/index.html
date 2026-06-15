@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Deckard EIP-1193 bridge test dapp</title>
+    <style>
+      :root { color-scheme: dark; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+      body { margin: 2rem; background: #090b0b; color: #f4d58d; }
+      button { margin-right: .75rem; padding: .6rem .8rem; border: 1px solid #f4d58d; background: #111; color: #f4d58d; cursor: pointer; }
+      pre { margin-top: 1rem; padding: 1rem; border: 1px solid #3b3322; background: #111; color: #e6e1d2; min-height: 8rem; }
+      .warn { color: #ffb86b; max-width: 52rem; }
+    </style>
+  </head>
+  <body>
+    <h1>Deckard EIP-1193 bridge test dapp</h1>
+    <p class="warn">Experimental local-only bridge. Use throwaway/dev accounts only; do not use real funds.</p>
+    <button id="accounts">eth_requestAccounts</button>
+    <button id="chain">eth_chainId</button>
+    <pre id="output">Waiting for window.ethereum…</pre>
+
+    <script>
+      const output = document.querySelector('#output');
+      const log = (value) => { output.textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2); };
+
+      if (window.ethereum) {
+        log('window.ethereum detected');
+      } else {
+        window.addEventListener('ethereum#initialized', () => log('window.ethereum detected'));
+      }
+
+      document.querySelector('#accounts').addEventListener('click', async () => {
+        try {
+          const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+          log({ eth_requestAccounts: accounts, selected: accounts[0] || null });
+        } catch (error) {
+          log({ error: { code: error.code, message: error.message } });
+        }
+      });
+
+      document.querySelector('#chain').addEventListener('click', async () => {
+        try {
+          const chainId = await window.ethereum.request({ method: 'eth_chainId' });
+          log({ eth_chainId: chainId });
+        } catch (error) {
+          log({ error: { code: error.code, message: error.message } });
+        }
+      });
+    </script>
+  </body>
+</html>

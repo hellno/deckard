@@ -1,0 +1,22 @@
+[package]
+name = "deckard-wallet-client"
+version = "0.0.1-alpha"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+description = "Shared key-less wallet client primitives for local Deckard interfaces."
+
+[lib]
+name = "deckard_wallet_client"
+path = "src/lib.rs"
+
+[dependencies]
+deckard-contract = { path = "../deckard-contract" }
+deckard-signerd = { path = "../deckard-signerd", default-features = false }
+deckard-core = { path = "../deckard-core", default-features = false }
+alloy-primitives = { workspace = true }
+serde = { workspace = true }
+serde_json = "1"
+anyhow = "1"
+
+[lints]
+workspace = true

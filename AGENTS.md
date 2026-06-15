@@ -15,6 +15,9 @@ Treat key material with care.
   belongs here, not in the app.
 - `crates/deckard-contract` — the frozen wire contract (Intent / Decision / Policy / RPC / ReadStatus).
 - `crates/deckard-signerd` — the process-isolated signer daemon (owns the key; UDS server).
+- `crates/deckard-wallet-client` — shared key-less signer client/account/chain/error primitives for local interfaces.
+- `crates/deckard-mcp` — MCP/agent interface over shared wallet capabilities.
+- `crates/deckard-browser-bridge` — EIP-1193 dapp/browser interface over shared wallet capabilities.
 
 ## Commands
 - Iterate fast: `just core` — clippy + test the GPUI-free engine (`deckard-core`) without building the
