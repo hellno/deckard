@@ -170,7 +170,9 @@ impl MockState {
                 }
                 SignerResponse::Ack
             }
-            SignerRequest::Propose { intent } => SignerResponse::Decision(self.propose(&intent)),
+            SignerRequest::Propose { intent, .. } => {
+                SignerResponse::Decision(self.propose(&intent))
+            }
             SignerRequest::Execute { request_id } => {
                 SignerResponse::Execute(self.execute(request_id))
             }
