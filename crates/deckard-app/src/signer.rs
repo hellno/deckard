@@ -541,7 +541,10 @@ mod tests {
         let intent = build_exact_approve_intent(11155111, sell_token, gross);
 
         assert_eq!(intent.chain_id, 11155111);
-        assert_eq!(intent.to, sell_token, "approve targets the sell-token ERC-20");
+        assert_eq!(
+            intent.to, sell_token,
+            "approve targets the sell-token ERC-20"
+        );
         assert_eq!(intent.value, U256::ZERO, "approve must carry no ETH");
         assert_eq!(intent.token, None);
         assert_eq!(intent.kind, IntentKind::ContractCall);
@@ -590,7 +593,10 @@ mod tests {
 
         let intent = build_exact_approve_intent(11155111, order.sell_token, order.sell_amount);
         let (_, amount) = deckard_core::decode_approve(&intent.calldata).expect("valid approve");
-        assert_eq!(amount, gross, "the approve covers the full gross sell amount");
+        assert_eq!(
+            amount, gross,
+            "the approve covers the full gross sell amount"
+        );
     }
 
     /// `bind_swap_order` pins BOTH owner and receiver to the wallet. The app builds the order with
@@ -605,7 +611,7 @@ mod tests {
         let order = SwapOrder {
             chain_id: 11155111,
             owner: Address::repeat_byte(0xEE), // a placeholder owner the daemon rebinds to `wallet`
-            receiver: wallet,                  // app already binds receiver (else receiver_not_wallet)
+            receiver: wallet, // app already binds receiver (else receiver_not_wallet)
             sell_token: Address::repeat_byte(0x55),
             buy_token: Address::repeat_byte(0x66),
             sell_amount: U256::from(1_000u64),

@@ -45,6 +45,41 @@ pub fn humanize_deny(reason: &str) -> String {
     }
 }
 
+/// Map a daemon deny `reason` to calm, **swap-specific** copy (#25). [`humanize_deny`] is
+/// deposit/shield-worded ("the deposit…"), which reads wrong on a swap, so the swap path routes
+/// its denies here. The swap-only policy/admission tags get distinct copy; anything else falls
+/// through to [`humanize_deny`] so the shared session/process tags (`locked`, `chain_mismatch`,
+/// `broadcast_*`, …) keep their single source of truth.
+pub fn humanize_swap_deny(reason: &str) -> String {
+    match reason {
+        // --- order admission (deckard-contract::evaluate_order) ---
+        "receiver_not_wallet" | "receiver_zero" => {
+            "a swap can only send the bought token back to your own wallet".into()
+        }
+        "off_swap_list" => "one of these tokens isn't on the agent's swap allow-list".into(),
+        "valid_to_too_far" => {
+            "the order's expiry is too far out — re-quote and try the swap again".into()
+        }
+        "zero_amount" => "enter an amount greater than zero to swap".into(),
+        // --- shaped-approve admission (the exact-gross relayer approve) ---
+        "approve_with_value" => "the token approval must not move any ETH".into(),
+        "approve_wrong_spender" => {
+            "the token approval targets the wrong contract — review the swap again".into()
+        }
+        "approve_no_matching_order" => {
+            "the approval didn't match a pending order — review the swap again".into()
+        }
+        // --- order sign / id guards ---
+        "already_signed" => {
+            "this order was already signed — it's on its way to the orderbook".into()
+        }
+        "not_an_order" => "the signer session was reset — review the swap again".into(),
+        "swap_unsupported_in_mock" => "swaps aren't available in this test build".into(),
+        // Everything else (session/process tags) keeps the shared humanizer's copy.
+        other => humanize_deny(other),
+    }
+}
+
 /// True for a daemon `reason` that means the unlock **session ended** — the key was zeroized
 /// by a STOP (an external `RevokeAll` from an MCP client, or the daemon is otherwise `Locked`).
 /// The app must return to the unlock gate, not just show an inline error: a propose against a
@@ -145,6 +180,40 @@ mod tests {
         assert_eq!(
             humanize_deny("broadcast_failed: connection refused (http://localhost:8545)"),
             line
+        );
+    }
+
+    #[test]
+    fn humanize_swap_deny_uses_swap_worded_copy_and_falls_through() {
+        use super::humanize_swap_deny;
+        // Swap-only tags get swap-worded copy (never "deposit").
+        for tag in [
+            "receiver_not_wallet",
+            "off_swap_list",
+            "valid_to_too_far",
+            "approve_with_value",
+            "approve_wrong_spender",
+            "approve_no_matching_order",
+            "already_signed",
+        ] {
+            let line = humanize_swap_deny(tag);
+            assert!(!line.is_empty(), "{tag} must map to copy");
+            assert!(
+                !line.to_lowercase().contains("deposit"),
+                "{tag} must not be deposit-worded: {line}"
+            );
+            assert_ne!(line, tag, "{tag} must be humanized, not shown raw");
+        }
+        // A shared session/process tag falls through to the shared humanizer (one source of truth).
+        assert_eq!(humanize_swap_deny("locked"), humanize_deny("locked"));
+        assert_eq!(
+            humanize_swap_deny("chain_mismatch"),
+            humanize_deny("chain_mismatch")
+        );
+        // An unknown tag still falls through unchanged (never swallowed).
+        assert_eq!(
+            humanize_swap_deny("some_new_swap_reason"),
+            "some_new_swap_reason"
         );
     }
 

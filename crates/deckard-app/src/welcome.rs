@@ -13,7 +13,7 @@ use gpui_component::{
     h_flex, v_flex, ActiveTheme, Disableable, IconName,
 };
 
-use deckard_core::U256;
+use deckard_core::{tokens_for, U256};
 
 use crate::money::money;
 use crate::shell::{Shell, Surface};
@@ -231,9 +231,10 @@ impl Shell {
                     // allocation bar, and the composition lines (Wave 2 T10).
                     .child(self.render_shielded_hero(native_wei, cx))
                     // Primary actions. Shield (the privacy hero) is the live, primary CTA; Send
-                    // is now live too (native ETH). Both sign from YOUR wallet, so both are
-                    // disabled while viewing a watched read-only account. Swap stays gated to
-                    // the next release and shown disabled rather than inert-but-active.
+                    // and Swap are now live too (native ETH / CoW). All sign from YOUR wallet, so
+                    // all three are disabled while viewing a watched read-only account. Swap also
+                    // needs a chain with a curated token list (mainnet/Sepolia) — a plain anvil
+                    // fork (chain 31337) has none, so it's disabled there.
                     .child(
                         h_flex()
                             .w_full()
@@ -258,13 +259,16 @@ impl Shell {
                                     .disabled(self.viewing_watch)
                                     .on_click(cx.listener(|this, _, _, cx| this.open_send(cx))),
                             )
-                            .child(Button::new("swap").ghost().label("Swap").disabled(true)),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(muted)
-                            .child("Swap arrives in the next release."),
+                            .child(
+                                Button::new("swap")
+                                    .ghost()
+                                    .label("Swap")
+                                    .disabled(
+                                        self.viewing_watch
+                                            || tokens_for(self.chain_id()).is_empty(),
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| this.open_swap(cx))),
+                            ),
                     )
                     // Holdings, or a state.
                     .child(self.render_holdings(first_sync, has_tokens, holdings, cx))

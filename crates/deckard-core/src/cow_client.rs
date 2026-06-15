@@ -517,6 +517,37 @@ impl CowOrderbook {
     ) -> anyhow::Result<Vec<AccountOrder>> {
         get_account_orders(&self.client, base, owner).await
     }
+
+    /// Blocking [`Self::quote`] for callers without a tokio reactor (the GPUI app runs on its own
+    /// executor; reqwest/hickory require a tokio runtime). Bridges through a dedicated current-thread
+    /// runtime — see [`block_on_orderbook`].
+    pub fn quote_blocking(&self, base: &str, req: &QuoteRequest) -> anyhow::Result<QuoteResponse> {
+        block_on_orderbook(self.quote(base, req))
+    }
+
+    /// Blocking [`Self::put_app_data`] — see [`Self::quote_blocking`].
+    pub fn put_app_data_blocking(&self, base: &str, doc: &str) -> anyhow::Result<()> {
+        block_on_orderbook(self.put_app_data(base, doc))
+    }
+
+    /// Blocking [`Self::submit`] — see [`Self::quote_blocking`].
+    pub fn submit_blocking(&self, base: &str, order: &OrderCreation) -> anyhow::Result<String> {
+        block_on_orderbook(self.submit(base, order))
+    }
+}
+
+/// Drive a CoW orderbook future to completion on a dedicated current-thread tokio runtime. The CoW
+/// HTTP client (reqwest/hickory DNS) requires a tokio reactor; callers on a non-tokio executor (the
+/// GPUI app, whose worker model keeps the UI off tokio — see `eth.rs`) use the `*_blocking` methods,
+/// which bridge through here. Returns an error (never panics) if the runtime can't be built. CoW
+/// calls are user-initiated and infrequent, so a fresh current-thread runtime per call is fine.
+fn block_on_orderbook<T, F: std::future::Future<Output = anyhow::Result<T>>>(
+    fut: F,
+) -> anyhow::Result<T> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(fut)
 }
 
 // ---------------------------------------------------------------------------
