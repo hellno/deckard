@@ -240,6 +240,16 @@ impl Shell {
                         .as_ref()
                         .map(|q| self.render_quote_summary(q, chain_id, fg, muted, cx)),
                 )
+                // Once a quote is in, the primary CTA to proceed to the clear-signing order review +
+                // hold-to-confirm. (Re-clicking "Get quote" above re-prices.)
+                .children(self.swap_quote.as_ref().map(|_| {
+                    Button::new(SWAP_VIEW.review_button_id)
+                        .primary()
+                        .w_full()
+                        .label(SWAP_VIEW.review_label)
+                        .disabled(self.swap.busy)
+                        .on_click(cx.listener(|this, _, _, cx| this.review_swap(cx)))
+                }))
                 .child(
                     div().text_xs().text_color(muted).child(
                         "A quote is good for about 30 minutes; we re-check the price the moment you confirm.",
