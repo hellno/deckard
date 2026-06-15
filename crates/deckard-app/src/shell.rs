@@ -33,8 +33,8 @@ use crate::signer::{self, AppSigner};
 use crate::theme;
 use crate::wallet;
 use crate::{
-    GoBack, NewItem, OpenSettings, PaletteNext, PalettePrev, ToggleMask, TogglePalette,
-    ToggleTheme, APP_NAME,
+    GoBack, NewItem, OpenApprovals, OpenSettings, PaletteNext, PalettePrev, ToggleMask,
+    TogglePalette, ToggleTheme, APP_NAME,
 };
 
 /// How long the user must hold the shield confirm before it signs — the deliberate-gesture
@@ -128,6 +128,11 @@ pub enum Surface {
     Send,
     /// The shield trigger flow (T5): compose a deposit → review card → hold-to-confirm.
     Shield,
+    /// The agent-approval queue (+ its clear-signing review): pending writes an agent breached
+    /// its budget/scope on, waiting on a human approve/deny. Keyboard-first (j/k/x/Enter/⌘Enter).
+    Approvals,
+    /// The session activity feed: terminal records (allowed / denied / expired), grouped by day.
+    Activity,
     Settings,
 }
 
@@ -226,6 +231,68 @@ pub struct Shell {
     /// deliberately succeeds while locked — the fence is config, not a secret); `None`
     /// until the first fetch lands or when the daemon is unreachable.
     pub agent_policy: Option<Policy>,
+
+    // --- agent approvals queue + activity ---
+    /// The latest `PendingList` snapshot from the daemon — every in-flight + recently-terminal
+    /// record with its payload. The Approvals queue derives its pending rows from this
+    /// (`approvals_queue`); Activity derives its terminal rows (`activity_days`). Refreshed by
+    /// `refresh_pending` and the poller; read by both views.
+    pub pending: Vec<deckard_contract::PendingRecord>,
+    /// The highlighted queue row (0-based into `approvals_queue(&self.pending)`). j/k move it;
+    /// clamped to the queue length on every refresh so it never points past a now-shorter list.
+    pub approvals_selected: usize,
+    /// True while a `PendingList` round-trip is in flight (drives the loading skeletons, but
+    /// only when there's no prior snapshot to render).
+    pub approvals_loading: bool,
+    /// A fail-loud one-liner when a `PendingList` fetch fails (the queue shows it in `danger`
+    /// rather than silently render an empty/stale inbox).
+    pub approvals_error: Option<String>,
+    /// `Some` ⇒ the clear-signing review is open for that request id (the queue dispatches to
+    /// the review card). Cleared on cancel / approve / deny and on opening the surface fresh.
+    /// `pub(crate)` so the read-only `approvals_view` can dispatch on it (it never mutates it).
+    pub(crate) approvals_reviewing: Option<deckard_contract::RequestId>,
+    /// Bumped on each `refresh_pending` so a slow reply for a since-superseded fetch can't
+    /// install a stale snapshot (mirrors the send/shield review epochs).
+    approvals_epoch: u64,
+    /// The Approvals surface's focus handle — `track_focus`'d so its `key_context("Approvals")`
+    /// listener receives the in-queue keys (j/k/x/Enter/⌘Enter/Esc). Focused on open.
+    approvals_focus: gpui::FocusHandle,
+    /// True while the recurring pending-list poller loop is alive, so opening a surface twice
+    /// can't spawn a second loop (the loop self-terminates when neither surface is active).
+    pending_poller_running: bool,
+
+    // --- activity feed (#60: the see-and-stop ledger) ---
+    /// The latest `ActivityFeed` snapshot — every tracked action (auto-allowed, pending, denied,
+    /// executed), newest-first, with `tx_hash`/`timestamp_ms`/breached-cap. The Activity surface
+    /// renders this; refreshed by `refresh_activity` + the shared poller. Distinct from `pending`
+    /// (the queue's pending-only view) because the feed retains executed/auto-allowed rows.
+    pub activity: Vec<deckard_contract::ActivityRecord>,
+    /// The highlighted feed row, 0-based into the APPROVABLE (still-proposed) subset of
+    /// `activity` — clamped on every refresh so it never points past a now-shorter list. j/k move
+    /// it; the feed renders all rows but only proposed ones are selectable/approvable.
+    pub activity_selected: usize,
+    /// `Some` ⇒ the inline clear-signing review is open on the feed for that request id. Cleared
+    /// on cancel / approve / deny. `pub(crate)` so the read-only `activity_view` can dispatch on it.
+    pub(crate) activity_reviewing: Option<deckard_contract::RequestId>,
+    /// True while an `ActivityFeed` round-trip is in flight (drives a first-load skeleton only).
+    pub activity_loading: bool,
+    /// Fail-loud one-liner when an `ActivityFeed` fetch fails (shown in `danger`, never a silent
+    /// empty feed).
+    pub activity_error: Option<String>,
+    /// Bumped on each `refresh_activity` so a slow reply for a superseded fetch can't install a
+    /// stale snapshot (mirrors `approvals_epoch`).
+    activity_epoch: u64,
+    /// The Activity surface's focus handle — `track_focus`'d so its `key_context("Activity")`
+    /// listener owns the in-feed keys (j/k/x/Enter/⌘Enter/Esc) without colliding with Approvals.
+    activity_focus: gpui::FocusHandle,
+    /// STOP confirm arming: a first click on the feed's STOP control arms it (shows "confirm"),
+    /// a second confirms — so the irreversible key-zeroize is never a single click. Esc disarms.
+    activity_stop_arming: bool,
+    /// Set once a STOP from the feed succeeded — drives the "Stopped — key zeroized, unlock to
+    /// re-arm" banner. The feed stays visible (the daemon answers `ActivityFeed` while locked) so
+    /// the revoked rows are seen; the next unlock clears it.
+    activity_stopped: bool,
+
     /// The capture-block state last pushed to the OS, so `render` only re-issues the
     /// native `setSharingType` call when `capture_block && mask` actually changes.
     capture_applied: bool,
@@ -583,6 +650,23 @@ impl Shell {
             mask,
             agent_acting: false,
             agent_policy: None,
+            pending: Vec::new(),
+            approvals_selected: 0,
+            approvals_loading: false,
+            approvals_error: None,
+            approvals_reviewing: None,
+            approvals_epoch: 0,
+            approvals_focus: cx.focus_handle(),
+            pending_poller_running: false,
+            activity: Vec::new(),
+            activity_selected: 0,
+            activity_reviewing: None,
+            activity_loading: false,
+            activity_error: None,
+            activity_epoch: 0,
+            activity_focus: cx.focus_handle(),
+            activity_stop_arming: false,
+            activity_stopped: false,
             capture_applied: false,
             allow_screen_capture,
             shield_amount,
@@ -694,6 +778,11 @@ impl Shell {
         self.pending_shield_clear = true;
         self.reset_shield();
         self.reset_send();
+        // Clear the feed's STOP banner + arming + any open inline review (a fresh unlock re-arms
+        // the wallet, so a stale "Stopped" banner or half-open review must not survive).
+        self.activity_stopped = false;
+        self.activity_stop_arming = false;
+        self.activity_reviewing = None;
         self.auth = AuthStep::Unlock;
         self.palette_open = false;
         cx.notify();
@@ -1407,7 +1496,8 @@ impl Shell {
         let chain_id = self.chain_id;
         let task = cx.background_spawn(async move {
             let intent = signer::build_shield_intent(chain_id, &recipient, value_wei)?;
-            let decision = client.propose_blocking(&intent)?;
+            let decision =
+                client.propose_blocking(&intent, deckard_contract::ProposalOrigin::App)?;
             Ok::<(Intent, Decision), anyhow::Error>((intent, decision))
         });
         cx.spawn(async move |this, cx| {
@@ -1641,7 +1731,8 @@ impl Shell {
                     .map_err(|e| anyhow::anyhow!("couldn't resolve name — {}", short_err(e)))?,
             };
             let intent = signer::build_native_send_intent(chain_id, to, value_wei);
-            let decision = client.propose_blocking(&intent)?;
+            let decision =
+                client.propose_blocking(&intent, deckard_contract::ProposalOrigin::App)?;
             Ok::<(Intent, Address, Decision), anyhow::Error>((intent, to, decision))
         });
         cx.spawn(async move |this, cx| {
@@ -1810,6 +1901,476 @@ impl Shell {
         self.set_mode(next, cx);
     }
 
+    // --- agent approvals queue + activity ---
+
+    /// Open the Approvals surface: clear any half-open review, route to the surface, focus its
+    /// key handler so j/k/x/Enter land there, and kick a fresh `PendingList` fetch + the
+    /// recurring poller. The queue is keyboard-first, so focusing the surface is load-bearing.
+    pub fn open_approvals(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.approvals_reviewing = None;
+        self.open(Surface::Approvals, cx);
+        window.focus(&self.approvals_focus, cx);
+        self.refresh_pending(cx);
+        self.start_pending_poller(cx);
+    }
+
+    /// Open the Activity feed (#60): the see-and-stop ledger of what the agent + you did. Unlike
+    /// the old terminal-only view this is keyboard-first (proposed rows are inline-approvable),
+    /// so it captures focus for its `key_context("Activity")` handler and kicks a fresh
+    /// `ActivityFeed` fetch + the shared poller.
+    pub fn open_activity(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.activity_reviewing = None;
+        self.activity_stop_arming = false;
+        self.open(Surface::Activity, cx);
+        window.focus(&self.activity_focus, cx);
+        self.refresh_activity(cx);
+        self.start_pending_poller(cx);
+    }
+
+    /// Fetch the latest `ActivityFeed` off the UI thread and fold it into `self.activity`,
+    /// epoch-guarded (a slow reply for a superseded fetch can't clobber a newer snapshot) and
+    /// clamping `activity_selected` to the new approvable-row count. Mirrors `refresh_pending`.
+    pub fn refresh_activity(&mut self, cx: &mut Context<Self>) {
+        self.activity_epoch = self.activity_epoch.wrapping_add(1);
+        let epoch = self.activity_epoch;
+        self.activity_loading = true;
+        cx.notify();
+        let client = self.signer.client();
+        let task = cx.background_spawn(async move { client.activity_feed_blocking() });
+        cx.spawn(async move |this, cx| {
+            let res = task.await;
+            this.update(cx, |this, cx| {
+                if this.activity_epoch != epoch {
+                    return;
+                }
+                this.activity_loading = false;
+                match res {
+                    Ok(records) => {
+                        this.activity_error = None;
+                        this.activity = records;
+                        let len = crate::activity_view::activity_pending(&this.activity).len();
+                        this.activity_selected = if len == 0 {
+                            0
+                        } else {
+                            this.activity_selected.min(len - 1)
+                        };
+                    }
+                    Err(e) => this.activity_error = Some(short_err(e)),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Move the feed highlight down one approvable (still-proposed) row, clamped (no wrap, no
+    /// panic on an all-terminal feed). j / ↓ route here.
+    pub fn activity_select_next(&mut self) {
+        let len = crate::activity_view::activity_pending(&self.activity).len();
+        if len > 0 {
+            self.activity_selected = (self.activity_selected + 1).min(len - 1);
+        }
+    }
+
+    /// Move the feed highlight up one row (saturating at the top). k / ↑ route here.
+    pub fn activity_select_prev(&mut self) {
+        self.activity_selected = self.activity_selected.saturating_sub(1);
+    }
+
+    /// Open the inline clear-signing review for the highlighted approvable feed row. No-op when
+    /// there are no proposed rows / the selection points past them (guarded via `.get`).
+    pub fn open_selected_activity_review(&mut self, cx: &mut Context<Self>) {
+        let pending = crate::activity_view::activity_pending(&self.activity);
+        if let Some(rec) = pending.get(self.activity_selected) {
+            self.activity_reviewing = Some(rec.request_id);
+            cx.notify();
+        }
+    }
+
+    /// Open the inline review for a specific feed row (a click on a proposed row), aligning the
+    /// keyboard selection with it so a subsequent ⌘Enter/Esc targets the same record.
+    pub fn review_activity_row(
+        &mut self,
+        request_id: deckard_contract::RequestId,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(i) = crate::activity_view::activity_pending(&self.activity)
+            .iter()
+            .position(|r| r.request_id == request_id)
+        {
+            self.activity_selected = i;
+        }
+        self.activity_reviewing = Some(request_id);
+        cx.notify();
+    }
+
+    /// Leave the feed's inline review (Esc, or a completed approve/deny). Pure UI state.
+    pub fn cancel_activity_review(&mut self, cx: &mut Context<Self>) {
+        self.activity_reviewing = None;
+        cx.notify();
+    }
+
+    /// Approve the reviewed feed row. Like the Approvals queue, approval ALWAYS routes through
+    /// the open review (no blind-approve from a list row): with no review open, `⌘Enter` opens
+    /// the highlighted row's review; with one open it resolves `approved == true` over the
+    /// private capability channel (the agent then executes its own write once it flips to
+    /// `Allowed` — the app never broadcasts).
+    pub fn approve_activity(&mut self, cx: &mut Context<Self>) {
+        if self.activity_reviewing.is_none() {
+            self.open_selected_activity_review(cx);
+            return;
+        }
+        self.resolve_activity_target(true, cx);
+    }
+
+    /// Deny the target feed row (the reviewed record, else the highlighted proposed row).
+    pub fn deny_activity(&mut self, cx: &mut Context<Self>) {
+        self.resolve_activity_target(false, cx);
+    }
+
+    /// Shared resolve body for the feed (mirrors `resolve_target` but refreshes the feed). Drives
+    /// `Resolve` over the capability channel off-thread and reconciles against the daemon's reply;
+    /// on success it leaves the review and re-fetches the feed (the now-decided row updates in
+    /// place); on a control-channel failure it fails loud and stays put. No `Execute` ever.
+    fn resolve_activity_target(&mut self, approved: bool, cx: &mut Context<Self>) {
+        let target = self.activity_reviewing.or_else(|| {
+            crate::activity_view::activity_pending(&self.activity)
+                .get(self.activity_selected)
+                .map(|r| r.request_id)
+        });
+        let Some(request_id) = target else {
+            return;
+        };
+        let control = self.signer.control();
+        self.activity_loading = true;
+        cx.notify();
+        let task =
+            cx.background_spawn(
+                async move { signer::resolve_blocking(&control, request_id, approved) },
+            );
+        cx.spawn(async move |this, cx| {
+            let res = task.await;
+            this.update(cx, |this, cx| match res {
+                Ok(()) => {
+                    this.activity_reviewing = None;
+                    this.refresh_activity(cx);
+                }
+                Err(e) => {
+                    this.activity_loading = false;
+                    this.activity_error = Some(short_err(e));
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The feed's STOP control: a deliberate two-step so the irreversible key-zeroize is never a
+    /// single click — the first call arms it (the button flips to "Confirm STOP"), the second
+    /// fires [`stop_revoke_all`](Self::stop_revoke_all). Esc on the surface disarms.
+    pub fn stop_button_clicked(&mut self, cx: &mut Context<Self>) {
+        if self.activity_stop_arming {
+            self.activity_stop_arming = false;
+            self.stop_revoke_all(cx);
+        } else {
+            self.activity_stop_arming = true;
+            cx.notify();
+        }
+    }
+
+    /// STOP / panic brake from the feed (or the ⌘K command): zeroize the key + deny in-flight via
+    /// `revoke_all` off-thread, then refresh so the feed SHOWS the revoke (the daemon answers
+    /// `ActivityFeed` while locked). The wallet is now locked; a banner tells the operator to
+    /// unlock to re-arm. We deliberately stay on the feed (not jump to the unlock gate) so the
+    /// kill is visible — #60 acceptance 3.
+    pub fn stop_revoke_all(&mut self, cx: &mut Context<Self>) {
+        self.activity_stop_arming = false;
+        let client = self.signer.client();
+        self.activity_loading = true;
+        cx.notify();
+        let task = cx.background_spawn(async move { client.revoke_all_blocking() });
+        cx.spawn(async move |this, cx| {
+            let res = task.await;
+            this.update(cx, |this, cx| match res {
+                Ok(()) => {
+                    this.activity_stopped = true;
+                    this.agent_acting = false;
+                    this.refresh_activity(cx);
+                }
+                Err(e) => {
+                    this.activity_loading = false;
+                    this.activity_error = Some(short_err(e));
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The Activity feed's per-surface key handler (mirrors `on_approvals_key`): j/↓ k/↑ move the
+    /// highlight, x denies, Enter opens the selected row's review, ⌘Enter approves, Esc disarms
+    /// STOP then leaves an open review. Scoped via `key_context("Activity")` so it never collides
+    /// with the Approvals queue's identical bindings (the two surfaces never render at once).
+    fn on_activity_key(
+        &mut self,
+        ev: &gpui::KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ks = &ev.keystroke;
+        let key = ks.key.as_str();
+        let m = ks.modifiers;
+        match key {
+            "j" | "down" => {
+                self.activity_select_next();
+                cx.notify();
+            }
+            "k" | "up" => {
+                self.activity_select_prev();
+                cx.notify();
+            }
+            "x" => self.deny_activity(cx),
+            "escape" => {
+                if self.activity_stop_arming {
+                    self.activity_stop_arming = false;
+                    cx.notify();
+                } else if self.activity_reviewing.is_some() {
+                    self.cancel_activity_review(cx);
+                }
+            }
+            "enter" => {
+                if m.platform {
+                    self.approve_activity(cx);
+                } else {
+                    self.open_selected_activity_review(cx);
+                }
+            }
+            _ => return,
+        }
+        cx.stop_propagation();
+    }
+
+    /// Leave the clear-signing review and fall back to the queue (Esc, or a completed
+    /// approve/deny). Pure UI state — it never resolves anything on its own.
+    pub fn cancel_review(&mut self, cx: &mut Context<Self>) {
+        self.approvals_reviewing = None;
+        cx.notify();
+    }
+
+    /// Open the clear-signing review for the currently-highlighted queue row. No-op when the
+    /// queue is empty / the selection somehow points past it (guarded via `.get`), so Enter on
+    /// an empty inbox can't panic.
+    pub fn open_selected_review(&mut self, cx: &mut Context<Self>) {
+        let queue = crate::approvals_view::approvals_queue(&self.pending);
+        if let Some(record) = queue.get(self.approvals_selected) {
+            self.approvals_reviewing = Some(record.request_id);
+            cx.notify();
+        }
+    }
+
+    /// Fetch the latest `PendingList` off the UI thread and fold it into `self`, epoch-guarded
+    /// so a slow reply for a superseded fetch can't clobber a newer snapshot (mirrors
+    /// `review_send`/`review_shield`). On success it stores the snapshot and clamps
+    /// `approvals_selected` to the new queue length; on transport failure it fails loud.
+    pub fn refresh_pending(&mut self, cx: &mut Context<Self>) {
+        self.approvals_epoch = self.approvals_epoch.wrapping_add(1);
+        let epoch = self.approvals_epoch;
+        self.approvals_loading = true;
+        cx.notify();
+        let client = self.signer.client();
+        let task = cx.background_spawn(async move { client.pending_list_blocking() });
+        cx.spawn(async move |this, cx| {
+            let res = task.await;
+            this.update(cx, |this, cx| {
+                // Guard FIRST: a stale reply must not even clear `loading` (a newer fetch owns it).
+                if this.approvals_epoch != epoch {
+                    return;
+                }
+                this.approvals_loading = false;
+                match res {
+                    Ok(records) => {
+                        this.approvals_error = None;
+                        this.pending = records;
+                        // Clamp the highlight to the (possibly shorter) new pending queue.
+                        let len = crate::approvals_view::approvals_queue(&this.pending).len();
+                        this.approvals_selected = if len == 0 {
+                            0
+                        } else {
+                            this.approvals_selected.min(len - 1)
+                        };
+                    }
+                    Err(e) => this.approvals_error = Some(short_err(e)),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Approve the reviewed pending record. Money-safety: approval ALWAYS routes through the
+    /// open clear-signing review — you can never blind-approve a spend from a list row or the
+    /// palette (DESIGN/spec: "you cannot blind-approve from a list row"). With no review open,
+    /// `⌘Enter` / "Approve selected" OPENS the highlighted row's review instead of resolving;
+    /// the deliberate step is the review screen plus a second `⌘Enter`. Once a review is open it
+    /// resolves `approved == true` over the **private capability channel** and STOPS there — for
+    /// an agent-origin proposal the agent executes its own write once the record flips to
+    /// `Allowed`; the app never broadcasts.
+    pub fn approve_selected(&mut self, cx: &mut Context<Self>) {
+        if self.approvals_reviewing.is_none() {
+            self.open_selected_review(cx);
+            return;
+        }
+        self.resolve_target(true, cx);
+    }
+
+    /// Deny the target pending record (same target resolution as `approve_selected`). Resolves
+    /// `approved == false` over the capability channel — the daemon flips the record to
+    /// `Denied`; nothing is executed.
+    pub fn deny_selected(&mut self, cx: &mut Context<Self>) {
+        self.resolve_target(false, cx);
+    }
+
+    /// Shared body for approve/deny. Picks the target request id (the reviewed record for an
+    /// approve — guaranteed by `approve_selected` — else the highlighted queue row, which is the
+    /// spec's one-key list-row deny). A resolve is a money-movement decision, so it is NOT
+    /// optimistic: it drives `Resolve` off-thread and reconciles against the daemon's
+    /// authoritative reply — only on success does it leave the review and re-fetch (the
+    /// now-terminal record drops out of the Pending queue, auto-advancing the highlight to the
+    /// next proposal); on a control-channel failure it fails loud and stays put, so the operator
+    /// sees the proposal is still unresolved. No `Execute` ever — the authority is the `Resolve`;
+    /// the agent does the broadcast once the record flips to `Allowed`.
+    fn resolve_target(&mut self, approved: bool, cx: &mut Context<Self>) {
+        let target = self.approvals_reviewing.or_else(|| {
+            crate::approvals_view::approvals_queue(&self.pending)
+                .get(self.approvals_selected)
+                .map(|r| r.request_id)
+        });
+        let Some(request_id) = target else {
+            return;
+        };
+        let control = self.signer.control();
+        self.approvals_loading = true;
+        cx.notify();
+        let task =
+            cx.background_spawn(
+                async move { signer::resolve_blocking(&control, request_id, approved) },
+            );
+        cx.spawn(async move |this, cx| {
+            let res = task.await;
+            this.update(cx, |this, cx| match res {
+                Ok(()) => {
+                    this.approvals_reviewing = None;
+                    this.refresh_pending(cx);
+                }
+                Err(e) => {
+                    this.approvals_loading = false;
+                    this.approvals_error = Some(short_err(e));
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Move the queue highlight down one row, clamped to the pending queue (no wrap, no panic on
+    /// an empty queue). j / ↓ route here.
+    pub fn approvals_select_next(&mut self) {
+        let len = crate::approvals_view::approvals_queue(&self.pending).len();
+        if len > 0 {
+            self.approvals_selected = (self.approvals_selected + 1).min(len - 1);
+        }
+    }
+
+    /// Move the queue highlight up one row (saturating at the top). k / ↑ route here.
+    pub fn approvals_select_prev(&mut self) {
+        self.approvals_selected = self.approvals_selected.saturating_sub(1);
+    }
+
+    /// Start the recurring `PendingList` poller: a ~2s loop that re-fetches while the Approvals
+    /// or Activity surface is open, so an agent-parked record (or a settled outcome) shows up
+    /// without a manual refresh. Idempotent — guarded by `pending_poller_running` so a second
+    /// open never spawns a second loop. The loop self-terminates the moment neither surface is
+    /// active (and clears the flag so the next open restarts it). Mirrors `watch_shielded_sync`.
+    fn start_pending_poller(&mut self, cx: &mut Context<Self>) {
+        if self.pending_poller_running {
+            return;
+        }
+        self.pending_poller_running = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(2)).await;
+                let keep = this.update(cx, |this, cx| match this.surface {
+                    // Each surface refreshes only its own data set (the feed retains executed
+                    // rows the pending queue drops, so they are distinct fetches).
+                    Surface::Approvals => {
+                        this.refresh_pending(cx);
+                        true
+                    }
+                    Surface::Activity => {
+                        this.refresh_activity(cx);
+                        true
+                    }
+                    _ => {
+                        // Off both surfaces: stop polling and let the next open restart the loop.
+                        this.pending_poller_running = false;
+                        false
+                    }
+                });
+                match keep {
+                    Ok(true) => continue,
+                    // Either the view is gone (Err) or we left both surfaces (Ok(false)) — stop.
+                    _ => break,
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// The Approvals surface's per-surface key handler (mirrors `on_palette_key`): j/↓ and k/↑
+    /// move the highlight, x denies, Esc leaves an open review, Enter opens the selected row's
+    /// review, and ⌘Enter (`m.platform`) approves outright. Scoped via `key_context("Approvals")`
+    /// + the focused `approvals_focus`, and `stop_propagation` keeps a bare key off the globals.
+    fn on_approvals_key(
+        &mut self,
+        ev: &gpui::KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ks = &ev.keystroke;
+        let key = ks.key.as_str();
+        let m = ks.modifiers;
+        match key {
+            "j" | "down" => {
+                self.approvals_select_next();
+                cx.notify();
+            }
+            "k" | "up" => {
+                self.approvals_select_prev();
+                cx.notify();
+            }
+            "x" => self.deny_selected(cx),
+            "escape" => {
+                if self.approvals_reviewing.is_some() {
+                    self.cancel_review(cx);
+                }
+            }
+            "enter" => {
+                if m.platform {
+                    self.approve_selected(cx);
+                } else {
+                    self.open_selected_review(cx);
+                }
+            }
+            _ => return,
+        }
+        cx.stop_propagation();
+    }
+
     // --- Action handlers (wired in `render`) ---
     //
     // While the palette is open it OWNS the keyboard: gpui dispatches these global ⌘-shortcuts
@@ -1831,6 +2392,18 @@ impl Shell {
             return;
         }
         self.open(Surface::Settings, cx);
+    }
+
+    fn on_open_approvals(
+        &mut self,
+        _: &OpenApprovals,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.palette_open {
+            return;
+        }
+        self.open_approvals(window, cx);
     }
 
     fn on_go_back(&mut self, _: &GoBack, _: &mut Window, cx: &mut Context<Self>) {
@@ -1909,6 +2482,13 @@ impl Shell {
             "send" => self.open_send(cx),
             "receive" => self.open(Surface::Receive, cx),
             "shield" => self.open_shield(cx),
+            "approvals" => self.open_approvals(window, cx),
+            "activity" => self.open_activity(window, cx),
+            "approve-selected" => self.approve_selected(cx),
+            "deny-selected" => self.deny_selected(cx),
+            // STOP / panic brake — its OWN id, never overloading the demo `agent` toggle. The
+            // ⌘K selection is itself the deliberate act, so this fires the kill directly.
+            "revoke-all" => self.stop_revoke_all(cx),
             "settings" => self.open(Surface::Settings, cx),
             "copy" => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(
@@ -2062,6 +2642,30 @@ impl Render for Shell {
                 (_, Surface::Receive) => self.render_receive(cx).into_any_element(),
                 (_, Surface::Send) => self.render_send(cx).into_any_element(),
                 (_, Surface::Shield) => self.render_shield(cx).into_any_element(),
+                // Approvals owns the keyboard while it's the active surface: track its focus
+                // handle + scope the in-queue keys (j/k/x/Enter/⌘Enter/Esc) to `key_context`,
+                // so they never leak to a global binding behind it.
+                (_, Surface::Approvals) => div()
+                    .id("scroll-approvals")
+                    .size_full()
+                    .overflow_y_scrollbar()
+                    .track_focus(&self.approvals_focus)
+                    .key_context("Approvals")
+                    .on_key_down(cx.listener(Self::on_approvals_key))
+                    .child(self.render_approvals(cx))
+                    .into_any_element(),
+                // The feed owns the keyboard while it's the active surface: track its focus +
+                // scope j/k/x/Enter/⌘Enter/Esc to `key_context("Activity")` so they never collide
+                // with the Approvals queue's identical bindings or leak to a global behind it.
+                (_, Surface::Activity) => div()
+                    .id("scroll-activity")
+                    .size_full()
+                    .overflow_y_scrollbar()
+                    .track_focus(&self.activity_focus)
+                    .key_context("Activity")
+                    .on_key_down(cx.listener(Self::on_activity_key))
+                    .child(self.render_activity(cx))
+                    .into_any_element(),
                 (Selection::Wallet, Surface::Home) => div()
                     .id("scroll-wallet")
                     .size_full()
@@ -2127,6 +2731,7 @@ impl Render for Shell {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::on_new_item))
             .on_action(cx.listener(Self::on_open_settings))
+            .on_action(cx.listener(Self::on_open_approvals))
             .on_action(cx.listener(Self::on_go_back))
             .on_action(cx.listener(Self::on_toggle_theme))
             .on_action(cx.listener(Self::on_toggle_palette))

@@ -92,6 +92,7 @@ pub fn send_blocking(client: &SignerClient, intent: &Intent) -> anyhow::Result<S
 
     let decision = match client.request_blocking(&SignerRequest::Propose {
         intent: intent.clone(),
+        origin: deckard_contract::ProposalOrigin::App,
     })? {
         deckard_contract::SignerResponse::Decision(d) => d,
         other => anyhow::bail!("unexpected propose response: {other:?}"),
@@ -133,6 +134,21 @@ pub fn approve_and_execute_blocking(
         control.resolve(request_id, true)?;
     }
     client.execute_blocking(request_id)
+}
+
+/// Resolve a pending record over the private capability channel — **without** executing it. The
+/// Approvals queue uses this for both the human approve (an agent-origin proposal: the agent
+/// executes its OWN write once the record flips to `Allowed`; the app must not also broadcast)
+/// and the human deny (`approved == false`). This is the Resolve half of
+/// [`approve_and_execute_blocking`] in isolation: it carries the human's decision over the only
+/// channel the daemon authenticates approvals on (PRD-01) and stops there — never `Execute`.
+/// Blocking; called from a background thread.
+pub fn resolve_blocking(
+    control: &ControlChannel,
+    request_id: RequestId,
+    approved: bool,
+) -> anyhow::Result<()> {
+    control.resolve(request_id, approved)
 }
 
 /// Build a key-less Railgun **shield** intent from a free-text `0zk…` recipient (T5). Parses

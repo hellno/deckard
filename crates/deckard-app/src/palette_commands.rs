@@ -118,6 +118,52 @@ pub const COMMANDS: &[Command] = &[
         shortcut: None,
         icon: None, // no lock glyph in the bundled subset
     },
+    Command {
+        id: "approvals",
+        title: "Approvals",
+        aliases: &["queue", "pending", "approve", "review"],
+        shortcut: Some("⌘⇧A"),
+        icon: None, // no inbox glyph in the bundled subset
+    },
+    Command {
+        id: "activity",
+        title: "Activity",
+        aliases: &["history", "log", "feed", "timeline"],
+        shortcut: None,
+        icon: None,
+    },
+    Command {
+        id: "approve-selected",
+        title: "Approve selected",
+        aliases: &["approve", "accept", "allow"],
+        shortcut: None,
+        icon: None,
+    },
+    Command {
+        id: "deny-selected",
+        title: "Deny selected",
+        aliases: &["deny", "reject", "x"],
+        shortcut: None,
+        icon: None,
+    },
+    Command {
+        // The panic brake: zeroize the key, lock the daemon, deny every in-flight request. Its
+        // OWN id — never overloads the demo `agent` toggle (whose "stop" means "stop the demo
+        // animation"). "stop"/"panic"/"kill" all land here so the operator reaches it fast.
+        id: "revoke-all",
+        title: "STOP — lock & revoke all",
+        aliases: &[
+            "stop",
+            "panic",
+            "kill",
+            "revoke",
+            "halt",
+            "emergency",
+            "freeze",
+        ],
+        shortcut: None,
+        icon: None,
+    },
 ];
 
 /// Two fuzzy scores count as "near-equal" within this gap; only then does
@@ -297,13 +343,12 @@ mod tests {
     }
 
     #[test]
-    fn empty_query_returns_all_ten() {
+    fn empty_query_returns_every_command() {
         let mut m = matcher();
         let usage = empty_usage();
         let results = rank("", COMMANDS, &usage, 0, &mut m);
 
         assert_eq!(results.len(), COMMANDS.len());
-        assert_eq!(COMMANDS.len(), 10);
         for r in &results {
             assert!(r.positions.is_empty());
         }
@@ -331,9 +376,9 @@ mod tests {
             return;
         }
         let results = rank("", COMMANDS, &usage, 0, &mut m);
-        // Flat frecency ⇒ stable registry order.
+        // Flat frecency ⇒ stable registry order: first + last entries of the registry.
         assert_eq!(id_at(&results, 0), "portfolio");
-        assert_eq!(id_at(&results, COMMANDS.len() - 1), "lock");
+        assert_eq!(id_at(&results, COMMANDS.len() - 1), "revoke-all");
     }
 
     #[test]

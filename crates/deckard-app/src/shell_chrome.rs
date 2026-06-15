@@ -87,6 +87,8 @@ impl Shell {
             Surface::Receive => "Receive",
             Surface::Send => "Send",
             Surface::Shield => "Shield",
+            Surface::Approvals => "Approvals",
+            Surface::Activity => "Activity",
             Surface::Home => match self.selection {
                 Selection::Project => "Personal",
                 Selection::Wallet => "Wallet",
@@ -110,6 +112,12 @@ impl Shell {
         let id_square = theme::identity_square(is_dark);
         let agent = theme::agent(is_dark);
         let agent_tint = theme::agent_tint(is_dark);
+        let amber = theme::amber(is_dark);
+        let amber_tint = theme::amber_tint(is_dark);
+        // The live pending-count badge (amber = "awaiting you"); reuses the queue's Pending filter.
+        let pending_count = crate::approvals_view::approvals_queue(&self.pending).len();
+        let approvals_active = self.surface == Surface::Approvals;
+        let activity_active = self.surface == Surface::Activity;
 
         let project_selected =
             self.surface == Surface::Home && self.selection == Selection::Project;
@@ -141,6 +149,40 @@ impl Shell {
             .bg(theme.sidebar)
             .border_r_1()
             .border_color(border)
+            // Approvals inbox — a top-level surface ABOVE Projects with a live pending-count
+            // badge (amber = "awaiting you"). The agent-approval queue's home (spec T1); the
+            // queue is also summonable from anywhere via ⌘⇧A.
+            .child(
+                div()
+                    .id("nav-approvals")
+                    .mx_2()
+                    .mt_2()
+                    .px_2()
+                    .py_1p5()
+                    .rounded_md()
+                    .when(approvals_active, |e| e.bg(lift))
+                    .cursor_pointer()
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(div().text_sm().text_color(fg).child("Approvals"))
+                            .when(pending_count > 0, |row| {
+                                row.child(
+                                    div()
+                                        .px_1p5()
+                                        .rounded_md()
+                                        .bg(amber_tint)
+                                        .text_xs()
+                                        .text_color(amber)
+                                        .child(format!("{pending_count}")),
+                                )
+                            }),
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| this.open_approvals(window, cx))),
+            )
             // PROJECTS header.
             .child(group_label("PROJECTS"))
             // Project row.
@@ -238,8 +280,26 @@ impl Shell {
                     )
                     .on_click(cx.listener(|this, _, _, cx| this.select(Selection::Agent, cx))),
             )
-            // Spacer pushes the footer gear to the bottom.
+            // Spacer pushes the footer rows to the bottom.
             .child(div().flex_1())
+            // Activity ledger — a sibling of Settings (bottom): the full cross-agent record.
+            .child(
+                div()
+                    .id("nav-activity")
+                    .mx_2()
+                    .px_2()
+                    .py_1p5()
+                    .rounded_md()
+                    .when(activity_active, |e| e.bg(lift))
+                    .cursor_pointer()
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().text_sm().text_color(muted).child("Activity")),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.open_activity(cx))),
+            )
             // Footer gear → Settings.
             .child(
                 div()
