@@ -63,7 +63,10 @@ async fn shield_admitted_only_at_the_relay_adapt() {
     // Correct target on a supported chain → admitted (within cap → Allow).
     assert_eq!(
         client
-            .propose(&shield(SEPOLIA, relay_adapt, 1_000))
+            .propose(
+                &shield(SEPOLIA, relay_adapt, 1_000),
+                deckard_contract::ProposalOrigin::App
+            )
             .await
             .unwrap(),
         Decision::Allow
@@ -72,7 +75,10 @@ async fn shield_admitted_only_at_the_relay_adapt() {
     // Any other target → refused before the policy gate ever runs.
     assert_eq!(
         client
-            .propose(&shield(SEPOLIA, other, 2_000))
+            .propose(
+                &shield(SEPOLIA, other, 2_000),
+                deckard_contract::ProposalOrigin::App
+            )
             .await
             .unwrap(),
         Decision::Deny {
@@ -85,7 +91,10 @@ async fn shield_admitted_only_at_the_relay_adapt() {
     let mut empty = shield(SEPOLIA, relay_adapt, 3_000);
     empty.calldata = Bytes::new();
     assert_eq!(
-        client.propose(&empty).await.unwrap(),
+        client
+            .propose(&empty, deckard_contract::ProposalOrigin::App)
+            .await
+            .unwrap(),
         Decision::Deny {
             reason: "undecodable".into()
         }

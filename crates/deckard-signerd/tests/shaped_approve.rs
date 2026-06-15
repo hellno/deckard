@@ -94,10 +94,13 @@ async fn shaped_approve_admission_matrix() {
     assert!(
         matches!(
             client
-                .propose(&contract_call(
-                    sell_token(),
-                    approve_calldata(relayer, U256::from(SELL_AMOUNT))
-                ))
+                .propose(
+                    &contract_call(
+                        sell_token(),
+                        approve_calldata(relayer, U256::from(SELL_AMOUNT))
+                    ),
+                    deckard_contract::ProposalOrigin::Agent
+                )
                 .await
                 .unwrap(),
             Decision::NeedsApproval { .. }
@@ -108,10 +111,13 @@ async fn shaped_approve_admission_matrix() {
     // (b) wrong spender (not the vault relayer) → Deny.
     assert_eq!(
         client
-            .propose(&contract_call(
-                sell_token(),
-                approve_calldata(Address::repeat_byte(0x99), U256::from(SELL_AMOUNT))
-            ))
+            .propose(
+                &contract_call(
+                    sell_token(),
+                    approve_calldata(Address::repeat_byte(0x99), U256::from(SELL_AMOUNT))
+                ),
+                deckard_contract::ProposalOrigin::Agent
+            )
             .await
             .unwrap(),
         Decision::Deny {
@@ -122,10 +128,13 @@ async fn shaped_approve_admission_matrix() {
     // (c) no matching stored order (approve targets a DIFFERENT token) → Deny.
     assert_eq!(
         client
-            .propose(&contract_call(
-                Address::repeat_byte(0x66), // no order has this sell token
-                approve_calldata(relayer, U256::from(SELL_AMOUNT))
-            ))
+            .propose(
+                &contract_call(
+                    Address::repeat_byte(0x66), // no order has this sell token
+                    approve_calldata(relayer, U256::from(SELL_AMOUNT))
+                ),
+                deckard_contract::ProposalOrigin::Agent
+            )
             .await
             .unwrap(),
         Decision::Deny {
@@ -137,10 +146,10 @@ async fn shaped_approve_admission_matrix() {
     //     the order's EXACT sell amount, so an infinite allowance can never be admitted.
     assert_eq!(
         client
-            .propose(&contract_call(
-                sell_token(),
-                approve_calldata(relayer, U256::MAX)
-            ))
+            .propose(
+                &contract_call(sell_token(), approve_calldata(relayer, U256::MAX)),
+                deckard_contract::ProposalOrigin::Agent
+            )
             .await
             .unwrap(),
         Decision::Deny {
@@ -151,10 +160,10 @@ async fn shaped_approve_admission_matrix() {
     // (e) a generic (non-approve) ContractCall is still denied outright.
     assert_eq!(
         client
-            .propose(&contract_call(
-                sell_token(),
-                Bytes::from_static(&[0xde, 0xad, 0xbe, 0xef])
-            ))
+            .propose(
+                &contract_call(sell_token(), Bytes::from_static(&[0xde, 0xad, 0xbe, 0xef])),
+                deckard_contract::ProposalOrigin::Agent
+            )
             .await
             .unwrap(),
         Decision::Deny {
@@ -171,7 +180,10 @@ async fn shaped_approve_admission_matrix() {
     );
     approve_with_value.value = U256::from(1u64);
     assert_eq!(
-        client.propose(&approve_with_value).await.unwrap(),
+        client
+            .propose(&approve_with_value, deckard_contract::ProposalOrigin::Agent)
+            .await
+            .unwrap(),
         Decision::Deny {
             reason: "approve_with_value".into()
         }

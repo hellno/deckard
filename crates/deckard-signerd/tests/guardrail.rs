@@ -12,7 +12,7 @@ mod common;
 use alloy_primitives::{Address, Bytes, U256};
 use deckard_contract::{
     ApprovalMode, ApprovalStatus, Decision, ExecuteResult, Intent, IntentKind, Policy,
-    SignerRequest, SignerResponse,
+    ProposalOrigin, SignerRequest, SignerResponse,
 };
 use deckard_signerd::SignerClient;
 
@@ -73,9 +73,12 @@ async fn classify(mode: ApprovalMode, chain: u64, override_on: bool) -> (Decisio
     let client = SignerClient::new(d.socket_path.clone());
     client.unlock(PASS).await.unwrap();
 
-    let within = client.propose(&send(chain, to, 1_000)).await.unwrap();
+    let within = client
+        .propose(&send(chain, to, 1_000), ProposalOrigin::Agent)
+        .await
+        .unwrap();
     let over = client
-        .propose(&send(chain, to, PER_TX_CAP + 1))
+        .propose(&send(chain, to, PER_TX_CAP + 1), ProposalOrigin::Agent)
         .await
         .unwrap();
     (within, over)
@@ -163,7 +166,11 @@ async fn guardrail_needs_approval_resolves_then_executes() {
     client.unlock(PASS).await.unwrap();
 
     let intent = send(1, to, 1_000); // within cap — auto-allow without the guardrail
-    let id = match client.propose(&intent).await.unwrap() {
+    let id = match client
+        .propose(&intent, ProposalOrigin::Agent)
+        .await
+        .unwrap()
+    {
         Decision::NeedsApproval { request_id } => request_id,
         other => panic!("guardrail must downgrade to NeedsApproval, got {other:?}"),
     };
@@ -219,7 +226,13 @@ async fn broadcast_error_reasons_are_redacted() {
     client.unlock(PASS).await.unwrap();
 
     let intent = send(SEPOLIA, to, 1_000);
-    assert_eq!(client.propose(&intent).await.unwrap(), Decision::Allow);
+    assert_eq!(
+        client
+            .propose(&intent, ProposalOrigin::Agent)
+            .await
+            .unwrap(),
+        Decision::Allow
+    );
     let id = SignerClient::request_id_for_intent(&intent);
     match client.execute(id).await.unwrap() {
         ExecuteResult::Denied { reason } => {

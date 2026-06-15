@@ -34,8 +34,16 @@ fn send(to: Address, value: u64) -> Intent {
 }
 
 /// Propose an over-cap Send → its `NeedsApproval` request id (a `Pending` card to approve).
+/// These scenarios model the MCP sidecar (the proposer), so the proposal is agent-origin.
 async fn pending_id(client: &SignerClient, to: Address) -> deckard_contract::RequestId {
-    match client.propose(&send(to, PER_TX_CAP + 1)).await.unwrap() {
+    match client
+        .propose(
+            &send(to, PER_TX_CAP + 1),
+            deckard_contract::ProposalOrigin::Agent,
+        )
+        .await
+        .unwrap()
+    {
         Decision::NeedsApproval { request_id } => request_id,
         other => panic!("expected NeedsApproval, got {other:?}"),
     }
