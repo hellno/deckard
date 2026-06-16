@@ -52,10 +52,16 @@ discipline:
    approval mode are evaluated by the daemon process that owns the key — the sidecar
    and the app only *propose*.
 2. **The mainnet guardrail removes hands-free spend on chain 1.** See below.
-3. **The launch tool surface is 6 tools** (`mcp.v0.1`): no raw `propose` (intents are
+3. **The launch tool surface is 9 tools** (`mcp.v0.1`): no raw `propose` (intents are
    constructed daemon-side from typed `shield` arguments and the Shield target is
    pre-checked against the canonical RelayAdapt address), and no `resolve` (an
-   injected agent cannot approve its own request).
+   injected agent cannot approve its own request). The three swap tools
+   (`deckard_swap_quote` / `deckard_swap` / `deckard_submit_order`) carry **no `resolve`**
+   either: a swap is proposed and later signed, but the **approval is human-only** over the
+   private control channel the sidecar cannot reach, and on a demo fork the fill is a
+   clearly-labelled simulation (`simulated: true`), never a fabricated mainnet success. The
+   `DECKARD_DEMO_SWAP_STUB` knob that drives that simulation is demo-only — unset in
+   production, where the real CoW orderbook is always used.
 4. **Reasons are redacted at the daemon boundary.** Error/`reason` strings cross into
    agent transcripts that leave your machine; every embedded URL is scrubbed to
    `scheme://host[:port]` before it leaves the daemon (transport errors love to echo

@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::types::TransactionReceipt;
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
 use deckard_core::{KdfParams, Vault};
 
 /// Anvil's default dev mnemonic — account 0 is prefunded with 10000 ETH at the same BIP-44
@@ -283,4 +283,70 @@ pub async fn wait_receipt(url: &str, hash: B256) -> Option<TransactionReceipt> {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     None
+}
+
+// --- ERC-20 fork seeding (swap_e2e) --------------------------------------------------------
+//
+// `swap_e2e` needs the wallet to hold an ERC-20 (WETH) so the real exact-gross approve broadcast
+// succeeds, and it credits a buy token to demonstrate the simulated fill. Both go through
+// `anvil_setStorageAt`, the standard cheatcode for editing an arbitrary contract slot on a fork —
+// it's just a JSON-RPC POST, so it reuses the alloy provider the rest of this file already uses
+// (`raw_request`, no new dependency).
+
+/// The storage key of `balanceOf[holder]` for a Solidity `mapping(address => uint256)` at slot
+/// `slot`: `keccak256(left_pad32(holder) ‖ left_pad32(slot))`. (The canonical WETH9 / OZ ERC-20
+/// layout; the exact slot index differs per token and is the helper's `slot` argument.)
+pub fn erc20_balance_slot_key(holder: Address, slot: U256) -> B256 {
+    let mut preimage = [0u8; 64];
+    let (key, slot_word) = preimage.split_at_mut(32);
+    // `mapping` key word: the 20-byte address left-padded into the low bytes of a 32-byte word.
+    key[12..].copy_from_slice(holder.as_slice());
+    slot_word.copy_from_slice(&slot.to_be_bytes::<32>());
+    keccak256(preimage)
+}
+
+/// Credit `amount` of an ERC-20 `token` to `holder` on a fork by writing the token's
+/// `balanceOf[holder]` slot directly via `anvil_setStorageAt`. Used by `swap_e2e` to give the
+/// wallet the sell token (WETH) so the real exact-gross approve broadcast + (stubbed) order can
+/// proceed on a fork, and to seed a buy token for the simulated fill. SETS the balance (overwrites,
+/// not adds) — the seed runs on a freshly-forked deterministic anvil. Panics on a transport error,
+/// like the other helpers: a seed that can't reach anvil should fail the test loudly.
+pub async fn set_erc20_balance(
+    url: &str,
+    token: Address,
+    holder: Address,
+    slot: U256,
+    amount: U256,
+) {
+    let provider = ProviderBuilder::new().connect_http(url.parse().unwrap());
+    let key = erc20_balance_slot_key(holder, slot);
+    let value = B256::from(amount.to_be_bytes::<32>());
+    let _: bool = provider
+        .raw_request("anvil_setStorageAt".into(), (token, key, value))
+        .await
+        .expect("anvil_setStorageAt");
+}
+
+/// ERC-20 `balanceOf(holder)` of `token` via `url` — `eth_call` of the 0x70a08231 selector with
+/// the holder left-padded to a 32-byte word, decoded as a big-endian U256. Lets `swap_e2e` assert
+/// the seeded sell token and the simulated-fill buy token landed.
+pub async fn erc20_balance(url: &str, token: Address, holder: Address) -> U256 {
+    use alloy::network::{Ethereum, TransactionBuilder};
+    use alloy::rpc::types::TransactionRequest;
+
+    let provider = ProviderBuilder::new().connect_http(url.parse().unwrap());
+    // balanceOf(address) selector ‖ holder left-padded to 32 bytes.
+    let mut calldata = Vec::with_capacity(4 + 32);
+    calldata.extend_from_slice(&[0x70, 0xa0, 0x82, 0x31]);
+    calldata.extend_from_slice(&[0u8; 12]);
+    calldata.extend_from_slice(holder.as_slice());
+
+    // Disambiguate the builder to alloy's `Ethereum` network: verified-reads pulls in
+    // helios-ethereum, which adds a second `TransactionBuilder` impl for `TransactionRequest`
+    // (mirrors the note in signerd's `signing.rs`).
+    let mut tx = TransactionRequest::default();
+    <TransactionRequest as TransactionBuilder<Ethereum>>::set_to(&mut tx, token);
+    <TransactionRequest as TransactionBuilder<Ethereum>>::set_input(&mut tx, Bytes::from(calldata));
+    let raw = provider.call(tx).await.expect("balanceOf eth_call");
+    U256::from_be_slice(raw.as_ref())
 }

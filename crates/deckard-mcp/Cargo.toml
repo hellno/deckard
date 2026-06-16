@@ -3,7 +3,7 @@ name = "deckard-mcp"
 version = "0.0.1-alpha"
 edition = "2021"
 license = "AGPL-3.0-or-later"
-description = "Deckard's key-less agent surface: one binary that is both a CLI and an MCP stdio server (mcp.v0.1 — 6 tools). It holds no key material; every write is an Intent proposed to the process-isolated deckard-signerd, which enforces policy and signs."
+description = "Deckard's key-less agent surface: one binary that is both a CLI and an MCP stdio server (mcp.v0.1 — 9 tools). It holds no key material; every write is an Intent proposed to the process-isolated deckard-signerd, which enforces policy and signs."
 
 # lib + bin like signerd: the lib holds the tool/CLI logic (unit-testable, reused by the
 # acceptance tests); the bin is the entry point Claude Desktop registers.
@@ -19,9 +19,13 @@ path = "src/main.rs"
 # The frozen wire contract + the key-less socket client (re-exported from signerd).
 deckard-contract = { path = "../deckard-contract" }
 deckard-signerd = { path = "../deckard-signerd", default-features = false }
-# Only the key-less shield-calldata builder (`shield`); no verified-reads — the sidecar
-# reads balances THROUGH the daemon, it never owns an RPC/Helios client.
-deckard-core = { path = "../deckard-core", default-features = false, features = ["shield"] }
+# The key-less shield-calldata builder (`shield`) + the CoW orderbook client (`cow-client`,
+# for the swap tools' quote/submit). No verified-reads — the sidecar reads balances THROUGH
+# the daemon, it never owns an RPC/Helios client. The `cow-client` flag is a feature-flip on an
+# existing path dep (reqwest/hickory are already vendored via deckard-app's default build); it
+# adds zero new Cargo.lock entries. The daemon still builds core `default-features = false`, so
+# it never compiles `cow_client`.
+deckard-core = { path = "../deckard-core", default-features = false, features = ["shield", "cow-client"] }
 
 # The official Rust MCP SDK (approved dep): stdio transport + #[tool] macros. Its `schemars`
 # re-export drives the tool input schemas — no separate direct schemars dependency.

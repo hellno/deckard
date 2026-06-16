@@ -22,8 +22,9 @@ Legend: ✅ done + tested · 🟡 partial / integrated-not-finished · 🧪 spik
 > `just demo` read the policy at **~20 s**, proposed the shield at **~28 s**, and broadcast at **~32 s** — about
 > **0.5 min** to the hero transaction (two runs: 30 s with the doc read locally, 38 s with the doc fetched over the
 > network; receipts verified on the fork); **Send UI stays gated**
-> ("next release") and **Swap is a disabled TODO** (Send + Swap is the first post-launch milestone). "Tested" below
-> still includes some mocked-transport / fake-daemon unit tests — noted per row.
+> ("next release") and **Swap v1 is agent-reachable** via MCP (`deckard_swap_quote` → `deckard_swap` → human approves
+> in the app → `deckard_submit_order`); on the demo fork the fill is a labelled simulation (`simulated: true`), never a
+> fabricated mainnet success. "Tested" below still includes some mocked-transport / fake-daemon unit tests — noted per row.
 
 ## The v1 demo — *receive → instantly private → can't switch it off* (agent-driven)
 
@@ -32,7 +33,7 @@ Legend: ✅ done + tested · 🟡 partial / integrated-not-finished · 🧪 spik
 | **1 · receive** | detect inbound + surface it | 🟡 receive (addr + QR) built; manual refresh; **auto-detect watcher ⬜** | `deckard-app/receive.rs`; `policy.auto_shield_min_wei` exists | a Helios `get_logs` watcher that emits the shield intent |
 | **2 · shield (HERO)** | shield received funds via Railgun | ✅ **app-reachable** (compose → review → hold-to-confirm) + **shielded-balance view** (Total + composition, real lifecycle states, privacy mask); core builder + daemon broadcast; black-box `shield_e2e` proves the privacy property (`#[ignore]`, network) | `deckard-app/shield_view.rs` + `render_shield` in `shell.rs`; `deckard-core/shield.rs` + `railgun_keys.rs` (KAT-gated 0zk derivation) + signerd broadcast + `shield_e2e` | re-record demo `.gif`; auto-watcher trigger |
 | **3 · walkaway** | cut the RPC on camera, stay verified | ✅ R2 spiked + verified-reads integrated; 🟡 in-app live cut | spike `5e3a16d`; reads `9e19e9a`; `ReadStatus` badge in app | failover supervisor (`Degraded`) + the in-app cut |
-| **agent surface (MCP)** | Claude Desktop drives `shield` via MCP | ✅ `deckard-mcp` shipped — key-less CLI + MCP stdio sidecar, `mcp.v0.1` 6-tool profile over the daemon socket | `deckard-mcp` (`server.rs`/`sidecar.rs`); `docs/build/30-mcp-shape.md` | (post-launch) `simulate` (deferred to the daemon) |
+| **agent surface (MCP)** | Claude Desktop drives `shield` + `swap` via MCP | ✅ `deckard-mcp` shipped — key-less CLI + MCP stdio sidecar, `mcp.v0.1` 9-tool profile over the daemon socket | `deckard-mcp` (`server.rs`/`sidecar.rs`); `docs/build/30-mcp-shape.md` | (post-launch) `simulate` (deferred to the daemon) |
 
 ## Crates / tracks
 
@@ -41,8 +42,8 @@ Legend: ✅ done + tested · 🟡 partial / integrated-not-finished · 🧪 spik
 | `deckard-contract` | ✅ `Intent`/`Decision`/`Policy` + `ReadStatus` + `calldata_ok` non-empty invariant | 32 | `da29a37` `9e19e9a` `a0a37fd` |
 | `deckard-core` | ✅ `EthProvider` (C1) + balances/Multicall3 (C2) + encrypted keystore (C3) + Helios verified reads + key-less shield builder + KAT-gated Railgun seed→0zk viewing-key derivation (`railgun_keys.rs`) | 13+ | `e1aa079` `42e04ad` `57f21bc` `9e19e9a` `3aae92d` |
 | `deckard-signerd` | ✅ process-isolated signer daemon + policy gate + STOP/zeroize + Helios read + calldata broadcast + **mainnet guardrail** (chain-1 auto-Allow → `NeedsApproval`, resolved by the app's hold-to-confirm) + RelayAdapt pre-check + **reason/RPC redaction** | `daemon_e2e` · `parity` · `anvil_e2e` · `shield_e2e` (#[ignore]) | `a24f62c` `9e19e9a` `2f28b8b` `72ad5cb` |
-| `deckard-mcp` | ✅ key-less CLI + MCP stdio sidecar (`mcp.v0.1` 6-tool profile: `deckard_wallet_address` / `wallet_balance` / `policy_get` / `shield` / `execute` / `revoke_all`); holds no key, proposes Intents to the daemon socket; secret-flag hard-reject + transcript canary scan | `acceptance` 9, all run by default against a *mock signerd* (T1 six-tool profile · T6 within-cap shield → mock `tx_hash` · T7/T9 secret-free transcript) | `a82cc38` |
-| `deckard-app` (GPUI) | ✅ onboarding / portfolio / receive / palette / settings + **shield view** (compose → review → hold-to-confirm + shielded-balance composition + privacy mask) + `ReadStatus` badge + socket signer client + **env plumbing** (`DECKARD_CONFIG_DIR`/`SOCKET_PATH`/`CHAIN_ID`/`RPC_URL`, `DECKARD_VERIFIED_READS`, `DECKARD_DEMO_FORK_BLOCK`) + **"DEMO FORK — not mainnet" banner**; 🟡 Send UI gated ("next release"), Swap ⬜ | `send_path` | C1–C3 + the shield/MCP/demo work |
+| `deckard-mcp` | ✅ key-less CLI + MCP stdio sidecar (`mcp.v0.1` 9-tool profile: `deckard_wallet_address` / `wallet_balance` / `policy_get` / `shield` / `execute` / `swap_quote` / `swap` / `submit_order` / `revoke_all`); holds no key, proposes Intents + swap orders to the daemon socket; secret-flag hard-reject + transcript canary scan | `acceptance` 11, all run by default against a *mock signerd* (T1 nine-tool profile · T6 within-cap shield → mock `tx_hash` · swap quote/propose + submit-needs-approval · T7/T9 secret-free transcript) | `a82cc38` |
+| `deckard-app` (GPUI) | ✅ onboarding / portfolio / receive / palette / settings + **shield view** (compose → review → hold-to-confirm + shielded-balance composition + privacy mask) + `ReadStatus` badge + socket signer client + **env plumbing** (`DECKARD_CONFIG_DIR`/`SOCKET_PATH`/`CHAIN_ID`/`RPC_URL`, `DECKARD_VERIFIED_READS`, `DECKARD_DEMO_FORK_BLOCK`) + **"DEMO FORK — not mainnet" banner**; 🟡 Send UI gated ("next release"), Swap ✅ (CoW compose → quote → review; agent-reachable via MCP, human-approved; demo-fork fill simulated) | `send_path` | C1–C3 + the shield/MCP/demo work |
 
 > Test caveats: `signerd/shield_e2e` is `#[ignore]` (network — needs a local `anvil`/fork + archive RPC, NOT run by default `cargo test`); `anvil_e2e` runs by default but **silently skips if `anvil` is missing**; `deckard-core`'s reads are tested against a *mocked* transport (live-Helios path is untested by default); `deckard-app`'s `send_path` test uses a *fake recording daemon*, not real signerd/chain. The **MCP acceptance suite runs by default but drives a *mock signerd*** (deterministic `mock_tx_hash`, no live chain) — it asserts the tool surface, the decision/approval flow, and the secret-free transcript, not a real broadcast. The daemon STOP/zeroize + propose→Decision→execute tests, the mainnet-guardrail/redaction tests, and the railgun-key KAT are real and run by default.
 
@@ -58,7 +59,7 @@ Legend: ✅ done + tested · 🟡 partial / integrated-not-finished · 🧪 spik
 
 ## v0 wallet base (`specs/SPEC-v0.md`)
 
-balances ✅ · receive ✅ · keystore + onboarding ✅ (BIP-39 vault) · **send** (daemon + app-socket path ✅/tested, UI gated 🟡) · **swap** ⬜ (CoW, deferred; button disabled)
+balances ✅ · receive ✅ · keystore + onboarding ✅ (BIP-39 vault) · **send** (daemon + app-socket path ✅/tested, UI gated 🟡) · **swap** ✅ (CoW; compose → quote → review in-app, agent-reachable via MCP with human approval; demo-fork fill simulated)
 
 ## Remaining for a minimum recordable demo
 
@@ -67,7 +68,7 @@ The reachability + visible-state gaps the 2026-06-06 audit flagged are now built
 - **A · Beat 2 (hero) — shield on screen** ✅ built: shield view (compose → review → hold-to-confirm) + shielded-balance composition + privacy mask; viewing key derived from the seed (`railgun_keys.rs`, KAT-gated). Re-record the demo `.gif`.
 - **B · Beat 3 — in-app walkaway** 🟡: the `ReadStatus` badge already renders; the single-client "cut → NOT VERIFIED → reconnect → Verified" framing is the minimum viable cut. (Shape-A failover supervisor still deferred.)
 - **C · Beat 1 — receive landing** 🟡: balance refreshes on manual refresh (QR exists); auto-watcher → auto-shield is the fuller version, still ⬜.
-- **D · the "agent-driven" spine** ✅: `deckard-mcp` ships — drive `deckard_shield`/`deckard_execute` from Claude Desktop, or fall back to an in-app agent loop over the same daemon socket.
+- **D · the "agent-driven" spine** ✅: `deckard-mcp` ships — drive `deckard_shield`/`deckard_execute` (and the swap flow `deckard_swap_quote`/`deckard_swap`/`deckard_submit_order`) from Claude Desktop, or fall back to an in-app agent loop over the same daemon socket.
 - **E · one continuous take + polish** to `DESIGN.md` (onboarding → funded → 3 beats) — pending, plus the `.gif` re-record.
 
 **Smallest take:** A + B + C with D as the live agent (or narrated stand-in). **Largest remaining item is recording the take, not a build.**

@@ -10,7 +10,7 @@ use deckard_mcp::{install, secrets, server, Sidecar};
 #[command(
     name = "deckard-mcp",
     version,
-    about = "Deckard's key-less agent surface: CLI + MCP stdio server (mcp.v0.1, 6 tools). \
+    about = "Deckard's key-less agent surface: CLI + MCP stdio server (mcp.v0.1, 9 tools). \
              Holds no keys — every write is proposed to the local deckard-signerd, which \
              enforces policy and signs.",
     after_help = "Env: DECKARD_SOCKET_PATH (daemon socket), DECKARD_CHAIN_ID (default 1), \
@@ -46,6 +46,38 @@ enum Command {
     /// is UNKNOWN — do not re-run it; check the Deckard app.
     Execute {
         /// The 0x-hex request id returned by `shield`.
+        request_id: String,
+    },
+    /// Price a CoW swap read-only (no proposal, no approval) and print the request_id it
+    /// would get. On the demo fork the quote is simulated.
+    SwapQuote {
+        /// The 0x-hex address of the token to sell.
+        #[arg(long = "sell-token")]
+        sell_token: String,
+        /// The 0x-hex address of the token to buy.
+        #[arg(long = "buy-token")]
+        buy_token: String,
+        /// Amount to sell, a decimal ETH-units string, e.g. 0.05 (the sell token's units).
+        #[arg(long = "amount-eth")]
+        sell_amount_eth: String,
+    },
+    /// Propose a CoW swap. Always needs a human approval in the Deckard app, then
+    /// `submit-order` with the printed request id. Signs and broadcasts nothing.
+    Swap {
+        /// The 0x-hex address of the token to sell.
+        #[arg(long = "sell-token")]
+        sell_token: String,
+        /// The 0x-hex address of the token to buy.
+        #[arg(long = "buy-token")]
+        buy_token: String,
+        /// Amount to sell, a decimal ETH-units string, e.g. 0.05 (the sell token's units).
+        #[arg(long = "amount-eth")]
+        sell_amount_eth: String,
+    },
+    /// Sign + submit a previously-approved swap order (the request id from `swap`) to the
+    /// CoW orderbook. Refused with `not_approved` until a human approves it in the app.
+    SubmitOrder {
+        /// The 0x-hex request id returned by `swap`.
         request_id: String,
     },
     /// STOP — the panic brake: zeroize the key, lock the daemon, deny everything
@@ -110,6 +142,21 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Policy => sidecar.policy_get().await,
         Command::Shield { amount_eth } => sidecar.shield(amount_eth).await,
         Command::Execute { request_id } => sidecar.execute(request_id).await,
+        Command::SwapQuote {
+            sell_token,
+            buy_token,
+            sell_amount_eth,
+        } => {
+            sidecar
+                .swap_quote(sell_token, buy_token, sell_amount_eth)
+                .await
+        }
+        Command::Swap {
+            sell_token,
+            buy_token,
+            sell_amount_eth,
+        } => sidecar.swap(sell_token, buy_token, sell_amount_eth).await,
+        Command::SubmitOrder { request_id } => sidecar.submit_order(request_id).await,
         Command::Stop => sidecar.revoke_all().await,
         Command::Install { .. } => unreachable!("handled above"),
     };

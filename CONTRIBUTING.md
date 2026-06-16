@@ -66,6 +66,11 @@ under `crates/`:
 - **`just run`** — builds `deckard-signerd`, then runs the app (the signerd binary is spawned as a
   sibling). This is the command you'll use most for UI work.
 - **`cargo test --workspace`** — runs the full test suite.
+- **`just swap-e2e`** — the live-ish swap end-to-end on a fresh anvil Sepolia fork (needs `anvil`
+  + an archive `RPC_URL_SEPOLIA`, same as `just demo`). A real CoW order can't be accepted from a
+  fork, so this drives the in-fork swap stub: propose → human-approve → real exact-gross approve
+  broadcast → sign → stubbed submit + fill. It's an `#[ignore]`d test, so default `cargo test`
+  skips it.
 - **`just bundle`** — builds a distributable macOS `Deckard.app`.
 
 > The fast `just core` loop is for iterating — the **full Definition of Done still applies before
@@ -121,6 +126,21 @@ cargo build -p deckard-mcp      # one-time: builds ./target/debug/deckard-mcp (n
 ./target/debug/deckard-mcp policy                     # read the active fence
 ```
 
+The swap flow has a human approval in the middle — the CLI can't self-approve, so a human
+must approve the proposed order in the Deckard app before `submit-order` will sign:
+
+```sh
+./target/debug/deckard-mcp swap-quote --sell-token 0x… --buy-token 0x… --sell-amount-eth 0.05
+                                                      # price only -> prints buy_amount_min + a request_id
+./target/debug/deckard-mcp swap --sell-token 0x… --buy-token 0x… --sell-amount-eth 0.05
+                                                      # propose -> needs_approval + a request_id
+# a human approves the swap in the Deckard app (hold-to-confirm), then:
+./target/debug/deckard-mcp submit-order <request_id>  # sign + submit to the CoW orderbook
+```
+
+On the demo fork the quote and the fill are a labelled simulation (`simulated: true`) — the
+live CoW orderbook can't accept a fork order.
+
 > The CLI reads the demo env from your shell. If you didn't launch it from a shell that
 > has the demo env exported, prefix the demo block (the same four vars `install --demo`
 > emits): `DECKARD_SOCKET_PATH`, `DECKARD_CONFIG_DIR`, `DECKARD_CHAIN_ID=11155111`,
@@ -165,13 +185,16 @@ is the odd one out — it's anvil's upstream fork source, read only by `just dem
 | `DECKARD_RPC_URL` | app, daemon | public RPC | **Yes** — may carry an API key; redacted in logs |
 | `DECKARD_VERIFIED_READS` | core (app/daemon) | on (`1`) | No |
 | `DECKARD_DEMO_FORK_BLOCK` | core (app/daemon) | unset (live, unpinned) | No |
+| `DECKARD_DEMO_SWAP_STUB` | core (cow-client) on/off flag; set by `just demo` + `install --demo` (fill RPC = `DECKARD_RPC_URL`) | unset (real orderbook) | No |
 | `DECKARD_ALLOW_SCREEN_CAPTURE` | app (capture block) | off (block honored per setting) | No |
 | `DECKARD_SIGNERD_BIN` | app (daemon resolution) | sibling of app binary | No |
 | `RPC_URL_SEPOLIA` | `just demo` / `just demo-check` only (anvil `--fork-url`) | unset (required for demo) | **Yes** — archive RPC, may carry an API key |
 
 > Demo block (set by `just demo`, emitted by `deckard-mcp install --demo`):
 > `DECKARD_CONFIG_DIR=~/.deckard/demo`, `DECKARD_SOCKET_PATH=~/.deckard/demo/signerd.sock`,
-> `DECKARD_CHAIN_ID=11155111`, `DECKARD_RPC_URL=http://127.0.0.1:8545`. `just demo` also
+> `DECKARD_CHAIN_ID=11155111`, `DECKARD_RPC_URL=http://127.0.0.1:8545`,
+> `DECKARD_DEMO_SWAP_STUB=1` (on/off flag: fixture quote + simulated fork fill — a live CoW order
+> can't be accepted from a fork; the fill credits balances on `DECKARD_RPC_URL`). `just demo` also
 > sets `DECKARD_VERIFIED_READS=0` (Helios is mainnet-only) and `DECKARD_DEMO_FORK_BLOCK=10822990`.
 
 ## Definition of Done
@@ -251,10 +274,12 @@ Per `STATUS.md` — don't overstate maturity:
   that holds the key and gates writes; the shield hero (auto-private via Railgun), which is **wired
   and black-box tested on an anvil fork.**
 - **Not done / partial:** the **Send** UI is gated ("next release", first post-launch
-  milestone); **Swap** is TODO; the receive-watcher auto-detect is TODO. The agent / MCP
-  surface (`deckard-mcp`) **is built** — a key-less CLI + MCP stdio server that proposes
-  writes to the daemon (see the demo loop above). Some tests are `#[ignore]` (they need
-  `anvil` + an archive RPC) — see the test caveats in `STATUS.md`.
+  milestone); the receive-watcher auto-detect is TODO. **Swap** v1 is built — agent-reachable
+  via the MCP swap flow (`swap-quote` / `swap` / `submit-order`), human-approved in the app, and
+  on the demo fork the fill is a labelled simulation. The agent / MCP surface (`deckard-mcp`)
+  **is built** — a key-less CLI + MCP stdio server that proposes writes to the daemon (see the
+  demo loop above). Some tests are `#[ignore]` (they need `anvil` + an archive RPC) — see the
+  test caveats in `STATUS.md`.
 
 ## Reporting security issues
 
