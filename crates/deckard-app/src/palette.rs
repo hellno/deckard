@@ -8,9 +8,8 @@
 //! handler (`on_palette_key`) that owns the query `String` directly — every key reaches us.
 //!
 //! Color law (DESIGN §Color): the selected row is a brightness lift (`secondary`), NEVER a
-//! colored keyline; matched chars are a weight/brightness lift, NOT a new hue; cyan appears
-//! only on the agent squircle. Curated Lucide icons sit in a fixed gutter so labels stay
-//! aligned even when a command has no glyph.
+//! colored keyline; matched chars are a weight/brightness lift, NOT a new hue. Curated Lucide
+//! icons sit in a fixed gutter so labels stay aligned even when a command has no glyph.
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -24,11 +23,11 @@ use gpui_component::{
 use crate::palette_commands::{self, COMMANDS};
 use crate::settings::ThemeModePref;
 use crate::shell::{Selection, Shell};
-use crate::shell_chrome::{agent_squircle, short_addr};
+use crate::shell_chrome::short_addr;
 use crate::theme;
 
-/// The live display label for a command — the registry title, except mask/theme/agent flip
-/// to reflect the current state (e.g. "Show balances" while masked). Ranking always uses the
+/// The live display label for a command — the registry title, except mask/theme flip to
+/// reflect the current state (e.g. "Show balances" while masked). Ranking always uses the
 /// static title (handled in `palette_commands`), so the alternate sense stays reachable.
 fn display_label(this: &Shell, id: &str, title: &str) -> String {
     match id {
@@ -37,13 +36,6 @@ fn display_label(this: &Shell, id: &str, title: &str) -> String {
                 "Show balances".to_string()
             } else {
                 "Mask balances".to_string()
-            }
-        }
-        "agent" => {
-            if this.agent_acting {
-                "Stop agent activity (demo)".to_string()
-            } else {
-                "Simulate agent activity (demo)".to_string()
             }
         }
         _ => title.to_string(),
@@ -78,8 +70,6 @@ impl Shell {
         let mono = theme.mono_font_family.clone();
         let is_dark = theme.is_dark();
         let id_square = theme::identity_square(is_dark);
-        let agent = theme::agent(is_dark);
-        let agent_tint = theme::agent_tint(is_dark);
 
         // --- Query row: a muted Search glyph, then the typed query with the caret RIGHT AFTER it
         // (or the caret then the placeholder when empty), left-packed so the caret tracks the text
@@ -115,9 +105,8 @@ impl Shell {
                     }),
             );
 
-        // --- Context line: the active scope (wallet identity / agent squircle / project). ---
-        let context_line =
-            self.palette_context_line(id_square, agent, agent_tint, muted, mono.clone());
+        // --- Context line: the active scope (wallet identity / project). ---
+        let context_line = self.palette_context_line(id_square, muted, mono.clone());
 
         // --- Results: the ranked rows (or an empty-state line). ---
         let results = if self.palette_results.is_empty() {
@@ -144,8 +133,6 @@ impl Shell {
                         fg,
                         muted,
                         lift,
-                        agent,
-                        agent_tint,
                         mono.clone(),
                     )
                     .on_mouse_down(
@@ -202,28 +189,16 @@ impl Shell {
     }
 
     /// The context line under the query: the active scope. A wallet selection shows the
-    /// identity square + truncated mono address; an agent selection shows the cyan squircle +
-    /// "Atlas"; the project shows the identity square + "Personal".
+    /// identity square + truncated mono address; the project shows the identity square +
+    /// "Personal".
     fn palette_context_line(
         &self,
         id_square: gpui::Hsla,
-        agent: gpui::Hsla,
-        agent_tint: gpui::Hsla,
         muted: gpui::Hsla,
         mono: SharedString,
     ) -> impl IntoElement {
         let row = h_flex().items_center().gap_2().px_4().pb_2().text_xs();
         match self.selection {
-            Selection::Agent => row
-                .child(agent_squircle(
-                    px(14.0),
-                    px(4.0),
-                    self.agent_acting,
-                    agent,
-                    agent_tint,
-                    "palette-context-agent",
-                ))
-                .child(div().text_color(muted).child("Atlas")),
             Selection::Wallet => {
                 let addr = short_addr(&self.wallet_address_string());
                 let label = if addr.is_empty() {
@@ -253,8 +228,6 @@ impl Shell {
         fg: gpui::Hsla,
         muted: gpui::Hsla,
         lift: gpui::Hsla,
-        agent: gpui::Hsla,
-        agent_tint: gpui::Hsla,
         mono: SharedString,
     ) -> gpui::Stateful<gpui::Div> {
         let label = display_label(self, cmd.id, cmd.title);
@@ -265,12 +238,12 @@ impl Shell {
             .flex_shrink_0()
             .flex()
             .items_center()
-            .child(self.palette_icon(cmd, muted, agent, agent_tint));
+            .child(self.palette_icon(cmd, muted));
 
         // The title row: matched chars (positions) are a brightness/weight lift, the rest muted.
-        // Positions index the STATIC title; a dynamic relabel (mask/theme/agent) can differ in
-        // length, so only apply them when the displayed label IS the title — otherwise render flat
-        // (a title-match highlight on the shorter "Stop agent activity" label would bold stray chars).
+        // Positions index the STATIC title; a dynamic relabel (mask/theme) can differ in length,
+        // so only apply them when the displayed label IS the title — otherwise render flat (a
+        // title-match highlight on the shorter "Show balances" label would bold stray chars).
         let title_positions: &[usize] = if label == cmd.title { positions } else { &[] };
         let label_row = self.highlighted_label(&label, title_positions, fg, muted);
 
@@ -318,24 +291,10 @@ impl Shell {
     }
 
     /// The curated glyph for a row's gutter: the command's static icon, the live Eye/EyeOff for
-    /// `mask`, the live Sun/Moon for `theme`, or the cyan agent squircle for `agent`. Commands
-    /// with no curated glyph render an empty (but still fixed-width) gutter.
-    fn palette_icon(
-        &self,
-        cmd: &palette_commands::Command,
-        muted: gpui::Hsla,
-        agent: gpui::Hsla,
-        agent_tint: gpui::Hsla,
-    ) -> gpui::AnyElement {
+    /// `mask`, or the live Sun/Moon for `theme`. Commands with no curated glyph render an empty
+    /// (but still fixed-width) gutter.
+    fn palette_icon(&self, cmd: &palette_commands::Command, muted: gpui::Hsla) -> gpui::AnyElement {
         match cmd.id {
-            "agent" => agent_squircle(
-                px(16.0),
-                px(5.0),
-                self.agent_acting,
-                agent,
-                agent_tint,
-                "palette-row-agent",
-            ),
             "mask" => {
                 // Match the breadcrumb's state-reflecting glyph: a slashed eye while masked.
                 let icon = if self.mask {

@@ -318,7 +318,7 @@ mod roundtrip_tests {
         }
         assert_eq!(BreachedLimit::default(), BreachedLimit::None);
 
-        // An executed agent shield: tx hash present, no cap breached (auto-allowed within cap).
+        // An executed agent shield: tx hash present, no cap breached, hands-free auto-allowed.
         let executed = ActivityRecord {
             request_id: B256::repeat_byte(0x07),
             origin: ProposalOrigin::Agent,
@@ -327,11 +327,12 @@ mod roundtrip_tests {
             tx_hash: Some(B256::repeat_byte(0x6e)),
             lifecycle: ActivityLifecycle::Executed,
             reason: BreachedLimit::None,
+            auto_allowed: true,
         };
         roundtrip(&executed);
 
-        // A pending over-daily-cap card: no tx hash, the daily-cap cite, u64::MAX timestamp
-        // (full wire width) over the structured Approve payload.
+        // A pending over-daily-cap card: no tx hash, the daily-cap cite, NOT auto-allowed (a human
+        // is in the loop), u64::MAX timestamp (full wire width) over the structured Approve payload.
         roundtrip(&ActivityRecord {
             request_id: B256::repeat_byte(0x08),
             origin: ProposalOrigin::App,
@@ -344,7 +345,19 @@ mod roundtrip_tests {
             tx_hash: None,
             lifecycle: ActivityLifecycle::Proposed,
             reason: BreachedLimit::DailyCap,
+            auto_allowed: false,
         });
+
+        // The `#[serde(default)]` path: an ActivityRecord JSON without `auto_allowed` decodes to
+        // the safe `false` (= a human was involved), never a phantom hands-free auto-allow.
+        let without: ActivityRecord = serde_json::from_str(
+            r#"{"request_id":"0x0707070707070707070707070707070707070707070707070707070707070707","origin":"Agent","payload":{"Tx":{"chain_id":1,"to":"0x2222222222222222222222222222222222222222","token":null,"value":"0x1","calldata":"0x","kind":"Send"}},"timestamp_ms":1,"tx_hash":null,"lifecycle":"Proposed","reason":"None"}"#,
+        )
+        .expect("decode without auto_allowed");
+        assert!(
+            !without.auto_allowed,
+            "missing auto_allowed defaults to false"
+        );
 
         // The full request/response round-trip for the new feed variant.
         roundtrip(&SignerRequest::ActivityFeed);

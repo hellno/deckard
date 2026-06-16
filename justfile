@@ -140,11 +140,22 @@ demo:
     fi
     echo "→ anvil ready (chain id ${CHAIN_ID} = {{demo_chain_id}}, Sepolia fork)."
 
+    # 7c. Seal a throwaway QA vault for anvil account 0 so the app boots straight to Unlock
+    #     (no hand-onboarding) and the headless agent (`just demo-agent`) can drive it. Only
+    #     seals if absent — a re-run never clobbers a vault you already unlocked.
+    if [[ ! -f "${DEMO_DIR}/vault.bin" ]]; then
+        just demo-vault
+    else
+        echo "→ demo vault already present at ${DEMO_DIR}/vault.bin (left as-is)"
+    fi
+
     echo
     echo "  Demo world:  config=${DEMO_DIR}  socket={{demo_socket}}"
-    echo "  Next: create a THROWAWAY wallet in the app, then in another terminal:"
-    echo "        just demo-fund        # funds the wallet the app onboarded"
-    echo "        deckard-mcp install --demo   # register the sidecar with Claude/CLI"
+    echo "  Next: in the app, Unlock with: deckard-demo   (anvil account 0). Then, in another terminal:"
+    echo "        just demo-deposit     # send a real 0.02 ETH inbound transfer (a positive delta)"
+    echo "        just demo-agent       # run the headless 'watch & shield' agent loop"
+    echo "        just demo-fund        # (optional) top the wallet up with 10 ETH"
+    echo "        deckard-mcp install --demo   # (optional) register the sidecar with Claude/CLI"
     echo
 
     # 8. Build the daemon (sibling binary the app spawns), then run the app with the
@@ -212,6 +223,80 @@ demo-fund addr="":
     BAL="$(cast balance "${ADDR}" --rpc-url "{{demo_rpc_url}}" 2>/dev/null || echo "?")"
     echo "→ done. ${ADDR} balance now ${BAL} wei (${FUND_ETH} ETH)."
     echo "  In the app the public balance should refresh shortly (reads are raw/Unsynced on the fork)."
+
+# The passphrase is fixed and printed below — this is a PUBLIC dev key on a local fork, never
+# a real keystore. `just demo` calls this for you; run it standalone only to (re)create the vault.
+# Seal a throwaway QA vault (anvil account 0) so the app boots straight to Unlock (no onboarding).
+demo-vault:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{demo_dir}}"
+    cargo run -q -p deckard-core --example seal_qa_vault -- "{{demo_dir}}" deckard-demo
+    echo "→ sealed demo vault (anvil account 0) at {{demo_dir}}/vault.bin"
+    echo "  Unlock passphrase: deckard-demo"
+
+# Unlike `just demo-fund` (anvil_setBalance, which SETS the balance and yields no repeatable
+# delta), this is a genuine value transfer from anvil account 1, so you can fire it again and
+# again to drive successive shields:
+#   just demo-deposit          # 0.02 ETH — within the cap → the auto-shield hero beat
+#   just demo-deposit 0.15     # over the 0.1 ETH per-tx cap → the human-approval beat
+# Send a REAL inbound transfer to the demo wallet (a positive balance delta the agent notices).
+demo-deposit amount='0.02':
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # The demo wallet (anvil account 0) and the funding key (anvil account 1) come from anvil's
+    # well-known dev mnemonic "test test test test …junk" — public test keys, safe to hardcode.
+    WALLET="0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+    FUNDER_KEY="0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+
+    # anvil must be up.
+    if ! cast block-number --rpc-url "{{demo_rpc_url}}" >/dev/null 2>&1; then
+        echo "error: no demo anvil on {{demo_anvil_port}}. Start it first: just demo" >&2
+        exit 1
+    fi
+
+    # SAFETY: never broadcast a transfer with a well-known dev key on mainnet. If the RPC is
+    # chain 1, the funding key is a publicly-known account — refuse loudly.
+    CHAIN_ID="$(cast chain-id --rpc-url "{{demo_rpc_url}}" 2>/dev/null || echo "?")"
+    if [[ "${CHAIN_ID}" == "1" ]]; then
+        echo "error: refusing to run — the RPC reports chain 1 (mainnet)." >&2
+        echo "  demo-deposit signs with a PUBLIC anvil dev key; broadcasting it on mainnet is unsafe." >&2
+        echo "  Point {{demo_rpc_url}} at the local demo fork (just demo) and retry." >&2
+        exit 1
+    fi
+
+    WEI="$(cast to-wei "{{amount}}" ether)"
+    echo "→ sending {{amount}} ETH (${WEI} wei) to ${WALLET} on the demo fork (chain ${CHAIN_ID})…"
+    cast send "${WALLET}" --value "${WEI}" --private-key "${FUNDER_KEY}" --rpc-url "{{demo_rpc_url}}" >/dev/null
+    BAL="$(cast balance "${WALLET}" --rpc-url "{{demo_rpc_url}}" 2>/dev/null || echo "?")"
+    echo "→ done. ${WALLET} public balance now ${BAL} wei."
+    echo "  Watch the agent pick it up:   just demo-agent"
+    echo "  One-shot smoke (asserts a broadcast): just demo-agent --once"
+
+# Drives ONLY the key-less deckard-mcp CLI — same authority as the Claude-Desktop prompt, no
+# keys here. Needs `just demo` running with the wallet UNLOCKED (passphrase: deckard-demo).
+# Pass through extra flags:
+#   just demo-agent            # watch forever; shield deposits within the cap, wait on over-cap
+#   just demo-agent --once     # one iteration (CI smoke): shields one fresh deposit, else fails
+#   just demo-agent --capture  # print propose→decision→broadcast millis per shield
+# Run the headless watch-and-shield agent loop (scripts/demo-agent.sh) against the demo daemon.
+demo-agent *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Build the CLI once so the agent (and its sub-second poll) never pays a cold compile.
+    cargo build -q -p deckard-mcp
+    # --once smoke: pin the baseline to 0 so the just-deposited ETH IS the delta this one
+    # iteration shields+broadcasts (CI can then assert the broadcast). On a LIVE read the deposit
+    # would already BE the baseline (delta 0 → nothing shields). The normal loop reads live.
+    case " {{args}} " in
+        *" --once "*) export DECKARD_AGENT_BASELINE_WEI="${DECKARD_AGENT_BASELINE_WEI:-0}" ;;
+    esac
+    DECKARD_SOCKET_PATH="{{demo_socket}}" \
+    DECKARD_CONFIG_DIR="{{demo_dir}}" \
+    DECKARD_CHAIN_ID="{{demo_chain_id}}" \
+    DECKARD_MCP_BIN="${DECKARD_MCP_BIN:-{{justfile_directory()}}/target/debug/deckard-mcp}" \
+        bash "{{justfile_directory()}}/scripts/demo-agent.sh" {{args}}
 
 # Exit codes: 0 ready · 10 foundry missing · 11 RPC_URL_SEPOLIA · 12 local anvil · 13 signerd
 # build · 14 app not running/unlocked · 15 chain-identity mismatch · 16 policy drift.

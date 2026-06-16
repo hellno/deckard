@@ -120,6 +120,15 @@ struct PendingReq {
     /// Which fence this proposal breached, recomputed off the verdict path at propose time so
     /// the feed cites the actual cap hit. `None` for a within-cap auto-allow or guardrail hold.
     breached: BreachedLimit,
+    /// True once this record's only on-chain broadcast was an `invalidateOrder` CANCEL (a STOP
+    /// pass or an explicit `cancel_order`), not a successful execute. Keeps the feed from reading
+    /// a cancelled swap as `Executed` — a cancel is the opposite of the order going through.
+    cancelled: bool,
+    /// True ONLY when this record was auto-allowed hands-free at propose time (within cap, off
+    /// mainnet). A mainnet-guardrail hold and an over-cap card are both `false` (a human is in the
+    /// loop) even though neither breached a cap — so the feed can say "auto-approved within cap"
+    /// vs "you approved" HONESTLY, instead of inferring it from the (absent) breach reason.
+    auto_allowed: bool,
 }
 
 /// Upper bound on a single broadcast round-trip. A hung/blackholed RPC fails after this
@@ -600,9 +609,19 @@ impl Daemon {
             }
         };
         // Cite the breached fence for the feed (display-only; recomputed off the verdict path).
-        // `None` for a within-cap auto-allow, a guardrail-downgraded hold, or the value-0
-        // shaped-approve card.
-        let breached = breach_for(intent, &self.policy);
+        // `None` for a within-cap auto-allow or a guardrail-downgraded hold. The shaped-approve
+        // card (`always_needs_card`) cites NO cap: its `intent.to` is the ERC-20 token, which the
+        // value-transfer `allow_to` does not gate, so running `breach_for` on it would mis-cite
+        // OffAllowlist — match the swap order record, which also stores `None`.
+        let breached = if always_needs_card {
+            BreachedLimit::None
+        } else {
+            breach_for(intent, &self.policy)
+        };
+        // Hands-free ONLY when the genuine within-cap auto-allow stored `Allowed` (the mainnet
+        // guardrail and over-cap both store `Pending`, the shaped-approve card forces `Pending`),
+        // so a later human `Resolve` to `Allowed` never flips this true.
+        let auto_allowed = status == ApprovalStatus::Allowed;
         let seq = self.next_seq();
         self.requests.insert(
             id,
@@ -617,6 +636,8 @@ impl Daemon {
                 created_ms: now_ms(),
                 seq,
                 breached,
+                cancelled: false,
+                auto_allowed,
             },
         );
 
@@ -743,6 +764,9 @@ impl Daemon {
                         // A swap card cites no spend cap (orders gate on token/receiver/validity,
                         // not the ETH per-tx/daily caps), so the feed shows no breached-limit line.
                         breached: BreachedLimit::None,
+                        cancelled: false,
+                        // Swaps never auto-allow in v1 — always a human card.
+                        auto_allowed: false,
                     },
                 );
                 Decision::NeedsApproval { request_id: id }
@@ -938,9 +962,12 @@ impl Daemon {
             }
         };
 
-        // Record the cancel tx hash (pins the record; a second cancel/execute is refused).
+        // Record the cancel tx hash (pins the record; a second cancel/execute is refused). Mark
+        // it `cancelled` so the activity feed reads this as a STOP/cancel, NOT a successful
+        // execute — the cancel hash is an `invalidateOrder`, the opposite of the order landing.
         if let Some(req) = self.requests.get_mut(&request_id) {
             req.broadcast = Some(tx_hash);
+            req.cancelled = true;
         }
         ExecuteResult::Broadcast { tx_hash }
     }
@@ -1179,9 +1206,10 @@ impl Daemon {
                 origin: req.origin,
                 payload: payload_view(&req.payload),
                 timestamp_ms: req.created_ms,
-                tx_hash: req.broadcast,
+                tx_hash: if req.cancelled { None } else { req.broadcast },
                 lifecycle: activity_lifecycle(req),
                 reason: req.breached,
+                auto_allowed: req.auto_allowed,
             })
             .collect()
     }
@@ -1395,6 +1423,12 @@ fn breach_for(intent: &Intent, policy: &Policy) -> BreachedLimit {
 /// feed shows it as closed, while the Approvals queue still carries the precise `Expired`
 /// status. This keeps `ActivityLifecycle` at three states (no fifth `ApprovalStatus` ripple).
 fn activity_lifecycle(req: &PendingReq) -> ActivityLifecycle {
+    // A cancelled order's only broadcast was an `invalidateOrder` — the order did NOT go through,
+    // so read it as a non-approval (stopped), never `Executed`. Check this BEFORE the broadcast
+    // branch (a cancel sets `broadcast`).
+    if req.cancelled {
+        return ActivityLifecycle::Decided { approved: false };
+    }
     if req.broadcast.is_some() {
         return ActivityLifecycle::Executed;
     }

@@ -26,8 +26,8 @@ pub struct Ranked {
     pub positions: Vec<usize>, // char positions to bold in the TITLE (empty when an alias matched)
 }
 
-/// The static registry. Dynamic display labels for mask/theme/agent are applied
-/// by palette.rs at render time; ranking always uses these static titles + aliases,
+/// The static registry. Dynamic display labels for mask/theme are applied by
+/// palette.rs at render time; ranking always uses these static titles + aliases,
 /// so the alternate sense (e.g. "show" for the masked state) stays reachable via
 /// aliases regardless of current state.
 pub const COMMANDS: &[Command] = &[
@@ -97,21 +97,6 @@ pub const COMMANDS: &[Command] = &[
         icon: Some(IconName::EyeOff), // palette.rs swaps Eye/EyeOff + label live
     },
     Command {
-        id: "agent",
-        title: "Simulate agent activity (demo)",
-        // "stop agent activity" = the live label while acting, so a phrase query matches it too.
-        aliases: &[
-            "demo",
-            "atlas",
-            "pause",
-            "stop",
-            "agent",
-            "stop agent activity",
-        ],
-        shortcut: None,
-        icon: None, // palette.rs draws the cyan squircle
-    },
-    Command {
         id: "lock",
         title: "Lock wallet",
         aliases: &["lock", "logout", "sign out"],
@@ -119,16 +104,26 @@ pub const COMMANDS: &[Command] = &[
         icon: None, // no lock glyph in the bundled subset
     },
     Command {
+        // The Approvals surface collapsed into the Activity feed's "NEEDS YOU" triage band, so
+        // this id now opens Activity. Kept reachable under its old name + queue/approve synonyms so
+        // an operator who types "approvals" still lands on the triage queue.
         id: "approvals",
-        title: "Approvals",
-        aliases: &["queue", "pending", "approve", "review"],
+        title: "Approvals (needs you)",
+        aliases: &[
+            "approvals",
+            "queue",
+            "pending",
+            "approve",
+            "review",
+            "needs you",
+        ],
         shortcut: Some("⌘⇧A"),
         icon: None, // no inbox glyph in the bundled subset
     },
     Command {
         id: "activity",
         title: "Activity",
-        aliases: &["history", "log", "feed", "timeline"],
+        aliases: &["history", "log", "feed", "timeline", "needs you"],
         shortcut: None,
         icon: None,
     },

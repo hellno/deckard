@@ -8,7 +8,6 @@
 //! bundle identifier, swap `assets/icon.png`, then start editing the views.
 
 mod activity_view;
-mod approvals_view;
 mod capture;
 mod money;
 mod onboarding;

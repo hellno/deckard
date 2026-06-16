@@ -1,18 +1,30 @@
-//! Activity — the **see-and-stop feed** (#60): what the agent + you *did*, not only what is
-//! pending (DESIGN §Components → Activity row, §Trust & safety affordances).
+//! Activity — the **see-and-stop feed** (#60), shaped as a Superhuman-style **inbox + log**: a
+//! "NEEDS YOU" triage band on top, then a settled LOG below (DESIGN §Components → Activity row,
+//! §Trust & safety affordances). This is the SINGLE agent-oversight surface: the NEEDS YOU band
+//! IS the triage queue (the former separate Approvals surface collapsed into it).
 //!
-//! Approvals is the focused triage queue (pending-only). Activity is the ledger: it reads the
-//! daemon's `ActivityFeed`, so it ALSO shows auto-allowed and executed actions that never wait
-//! in `PendingList` — the load-bearing point of #60 ("an auto-allowed within-cap shield executes
-//! immediately and never enters the queue, so the daemon must record what the agent *did*").
+//! Activity is the ledger: it reads the daemon's `ActivityFeed`, so it ALSO shows auto-allowed and
+//! executed actions that never wait in `PendingList` — the load-bearing point of #60 ("an auto-
+//! allowed within-cap shield executes immediately and never enters the queue, so the daemon must
+//! record what the agent *did*").
+//!
+//! **Inbox + log split.** Still-proposed rows (the things waiting on you) live ONLY in the NEEDS
+//! YOU band — the inbox you triage — and never duplicate into the log. Everything settled (auto-
+//! allowed, approved, denied, executed) falls to the day-grouped LOG. A pending row is selectable
+//! and inline-approvable (select + Enter opens the clear-signing review, ⌘Enter approves, `x`
+//! denies, all scoped to this surface's `key_context("Activity")`).
+//!
+//! **Two-signal fidelity (DESIGN §The actor model).** State is a small circular **glyph** that
+//! carries the color (green check = approved/executed, red x = denied/revoked); the outcome
+//! *label* stays `muted_foreground` so the log never floods green. The one exception is a row a
+//! **human acted on** (`!auto_allowed`, decided/executed) — its label tints amber, so "you acted
+//! here" reads warm against the cyan-glyph agent rows. An executed shield reads the *result*
+//! ("moved … ETH to your private balance"), the demo's payoff.
 //!
 //! Each row carries the two-actor chain (the cyan agent squircle for Atlas, neutral for a
-//! foreground app action), a lifecycle-driven outcome glyph, the real broadcast `tx_hash`, a
-//! relative timestamp, and — for an over-cap/over-scope proposal — the ACTUAL breached fence
-//! (per-tx vs daily, never a hardcoded cite). Proposed rows are inline-approvable: select +
-//! ⌘Enter opens the clear-signing review, ⌘Enter approves, `x` denies (the same gestures as the
-//! Approvals queue, scoped to this surface's `key_context`). A header STOP control is the
-//! always-reachable panic brake.
+//! foreground app action), the lifecycle glyph, the real broadcast `tx_hash`, a relative
+//! timestamp, and — for an over-cap/over-scope proposal — the ACTUAL breached fence (per-tx vs
+//! daily, never a hardcoded cite). A header STOP control is the always-reachable panic brake.
 //!
 //! Render is `&self`; mutation flows through the `cx.listener` closures (open review / approve /
 //! deny / STOP arm+confirm). The surface reads `self.activity`, `self.activity_selected`,
@@ -41,8 +53,7 @@ use crate::shell_chrome::agent_squircle;
 use crate::theme;
 
 /// The displayed subject for an action's origin: the agent's name when an agent acted, "You"
-/// when the foreground app did. One agent in the demo scope (Atlas). Mirrors `approvals_view`'s
-/// private copy (the two surfaces stay decoupled by design); keep them in lockstep.
+/// when the foreground app did. One agent in the demo scope (Atlas).
 fn origin_subject(origin: ProposalOrigin) -> &'static str {
     match origin {
         ProposalOrigin::Agent => "Atlas",
@@ -121,8 +132,7 @@ fn masked_amount(raw: deckard_core::U256, mask: bool) -> String {
     crate::money::mask_money(mask, &deckard_core::format_amount(raw, 18, 6))
 }
 
-/// A one-line "verb + object" summary of an action's payload, for the dense row. Mirrors
-/// `approvals_view::payload_summary` so the two surfaces read as siblings.
+/// A one-line "verb + object" summary of an action's payload, for the dense feed row.
 fn payload_summary(payload: &PendingPayloadView, mask: bool) -> String {
     match payload {
         PendingPayloadView::Tx(intent) => tx_summary(intent, mask),
@@ -189,20 +199,28 @@ fn is_proposed(record: &ActivityRecord) -> bool {
     matches!(record.lifecycle, ActivityLifecycle::Proposed)
 }
 
-/// **The approvable subset** of the feed, in feed (newest-first) order. `activity_selected`
-/// indexes into this; the feed renders every row but only these are selectable/approvable.
+/// **The approvable subset** of the feed (the NEEDS YOU inbox), in feed (newest-first) order.
+/// `activity_selected` indexes into this; only these rows are selectable/approvable.
 pub(crate) fn activity_pending(records: &[ActivityRecord]) -> Vec<&ActivityRecord> {
     records.iter().filter(|r| is_proposed(r)).collect()
 }
 
-/// Group the feed's rows into day bands (newest band first). The records arrive newest-first, so
-/// consecutive rows sharing a `day_label` form one band. Pure: borrows the slice.
+/// **The settled subset** of the feed (the LOG), in feed (newest-first) order — every row that is
+/// no longer waiting on a human (auto-allowed, approved, denied, executed). A proposed row lives
+/// ONLY in `activity_pending`, so the two subsets partition the feed with no duplication.
+fn activity_settled(records: &[ActivityRecord]) -> Vec<&ActivityRecord> {
+    records.iter().filter(|r| !is_proposed(r)).collect()
+}
+
+/// Group settled (LOG) rows into day bands (newest band first). The records arrive newest-first,
+/// so consecutive rows sharing a `day_label` form one band. Pure: borrows the already-filtered
+/// settled slice (the NEEDS YOU band is rendered separately and never day-grouped).
 fn activity_feed_groups<'a>(
-    records: &'a [ActivityRecord],
+    records: &[&'a ActivityRecord],
     now: u64,
 ) -> Vec<(&'static str, Vec<&'a ActivityRecord>)> {
-    let mut groups: Vec<(&'static str, Vec<&ActivityRecord>)> = Vec::new();
-    for record in records {
+    let mut groups: Vec<(&'static str, Vec<&'a ActivityRecord>)> = Vec::new();
+    for &record in records {
         let label = day_label(record.timestamp_ms, now);
         match groups.last_mut() {
             Some((existing, rows)) if *existing == label => rows.push(record),
@@ -251,20 +269,38 @@ impl Shell {
                 .child(format!("⚠ Can't reach the signer — {err}"))
                 .into_any_element()
         } else {
-            let groups = activity_feed_groups(&self.activity, now);
-            if groups.is_empty() {
+            let pending = activity_pending(&self.activity);
+            let settled = activity_settled(&self.activity);
+            if pending.is_empty() && settled.is_empty() {
+                // Empty: one calm muted line, no illustration (DESIGN §Required states → Empty).
                 div()
                     .text_sm()
                     .text_color(muted)
-                    .child("No activity yet")
+                    .child("All clear")
                     .into_any_element()
             } else {
-                let selected_id = activity_pending(&self.activity)
-                    .get(self.activity_selected)
-                    .map(|r| r.request_id);
-                let mut list = v_flex().w_full().gap_4();
-                for (label, rows) in groups {
-                    list = list.child(self.activity_group(label, &rows, selected_id, now, cx));
+                let selected_id = pending.get(self.activity_selected).map(|r| r.request_id);
+                let mut list = v_flex().w_full().gap_5();
+
+                // NEEDS YOU — the inbox you triage. Rendered FIRST, only the proposed rows, each
+                // selectable/inline-approvable. Its row index IS the pending-subset index, so the
+                // selected lift and the keyboard `activity_selected` line up.
+                if !pending.is_empty() {
+                    list = list.child(self.activity_needs_you(&pending, selected_id, now, cx));
+                } else {
+                    // Nothing waiting, but there is history: a quiet "you're caught up" line above
+                    // the log (no Needs-you band).
+                    list = list.child(
+                        div()
+                            .text_sm()
+                            .text_color(muted)
+                            .child("All clear — nothing needs you"),
+                    );
+                }
+
+                // LOG — settled rows, day-grouped, newest band first.
+                for (label, rows) in activity_feed_groups(&settled, now) {
+                    list = list.child(self.activity_group(label, &rows, None, now, cx));
                 }
                 list.into_any_element()
             }
@@ -275,8 +311,10 @@ impl Shell {
             .gap_4()
             .child(self.activity_heading(fg, muted, cx));
         // The post-STOP banner: the key is zeroized; the feed stays visible so the revoke is seen.
+        // (Use the Copy color locals, not `theme`, so its cx borrow doesn't outlive the cx-mutable
+        // `activity_heading`/`activity_group` calls above.)
         if self.activity_stopped {
-            header = header.child(stopped_banner(theme.danger, theme.secondary));
+            header = header.child(stopped_banner(danger, raise));
         }
         header = header.child(body);
 
@@ -318,8 +356,10 @@ impl Shell {
     }
 
     /// The STOP control — the always-reachable panic brake. Amber outline "STOP" when idle (a
-    /// human "where you are" action); a red filled "Confirm STOP" once armed. Two deliberate
-    /// clicks (or ⌘K → "STOP") fire it — never a single click, since it zeroizes the key.
+    /// human "where you are" action); a red outline "Confirm STOP — revoke & lock signing · Esc to
+    /// cancel" once armed. **Click-to-arm** (NOT hold): two deliberate clicks (or ⌘K → "STOP") fire
+    /// it — never a single click, since it zeroizes the key. Esc disarms (handled in
+    /// `on_activity_key`).
     fn activity_stop_control(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let amber = theme::amber(theme.is_dark());
@@ -340,7 +380,7 @@ impl Shell {
                 .text_sm()
                 .font_weight(FontWeight::SEMIBOLD)
                 .cursor_pointer()
-                .child("Confirm STOP — locks the wallet")
+                .child("Confirm STOP — revoke & lock signing · Esc to cancel")
                 .on_click(cx.listener(|this, _, _, cx| this.stop_button_clicked(cx)))
         } else {
             div()
@@ -360,7 +400,33 @@ impl Shell {
         }
     }
 
-    /// One day-band: a quiet uppercase header over its dense rows.
+    /// The **NEEDS YOU** band: the triage inbox of still-proposed rows over a quiet uppercase
+    /// header. The row index IS the pending-subset index, so the selected lift agrees with the
+    /// keyboard `activity_selected`; `selected_id` is the highlighted pending row.
+    fn activity_needs_you(
+        &self,
+        rows: &[&ActivityRecord],
+        selected_id: Option<RequestId>,
+        now: u64,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
+
+        let mut band = v_flex().w_full().gap_1();
+        for record in rows.iter() {
+            band = band.child(self.activity_row("needs-you-row", record, selected_id, now, cx));
+        }
+
+        v_flex()
+            .w_full()
+            .gap_1()
+            .child(section_label("Needs you", muted))
+            .child(band)
+    }
+
+    /// One day-band of the settled LOG: a quiet uppercase header over its dense (passive) rows.
+    /// Log rows are never proposed, so `selected_id` is always `None` here.
     fn activity_group(
         &self,
         label: &str,
@@ -373,37 +439,37 @@ impl Shell {
         let muted = theme.muted_foreground;
 
         let mut band = v_flex().w_full().gap_1();
-        for (i, record) in rows.iter().enumerate() {
-            band = band.child(self.activity_row(i, record, selected_id, now, cx));
+        for record in rows.iter() {
+            band = band.child(self.activity_row("log-row", record, selected_id, now, cx));
         }
 
         v_flex()
             .w_full()
             .gap_1()
-            .child(
-                div()
-                    .pb_1()
-                    .text_xs()
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(muted)
-                    .child(label.to_uppercase()),
-            )
+            .child(section_label(label, muted))
             .child(band)
     }
 
     /// One dense feed row — the two-actor chain + the outcome cluster.
     ///
     /// - **Agent, auto-allowed within cap** (no human in the loop): `[A] Atlas · shield 0.05 ETH
-    ///   · auto-approved within cap  ✓ 0x6ea…9f3c · 4m ago`.
-    /// - **Agent, needed a card** (over cap / mainnet): `[A] Atlas · … → You {approved|waiting}`,
-    ///   with the real breached-fence cite for a still-proposed row.
+    ///   · auto-approved within cap  ✓ 0x6ea…9f3c · 4m ago` (muted label, green glyph).
+    /// - **Agent, executed shield** (the demo payoff): `[A] Atlas · shield 0.05 ETH · moved
+    ///   0.05 ETH to your private balance  ✓ 0x6ea…9f3c · 4m ago`.
+    /// - **Agent, proposed (over cap / mainnet)** — lives in NEEDS YOU: `[A] Atlas · … → You
+    ///   waiting … over per-tx cap`, plus the `⌘⏎ · x` hint on the SELECTED row and a hover-only
+    ///   "Review →" for the mouse.
+    /// - **Agent, human-approved/denied** (`!auto_allowed`, settled): the outcome label tints
+    ///   amber — "you acted here" — against the muted auto-allowed rows.
     /// - **App** (you acted directly): `You · sent 0.5 ETH → 0x70…9C8  ✓`.
     ///
-    /// A still-proposed row is selectable (a brightness lift when highlighted) and opens its
-    /// inline review on click; settled rows are passive.
+    /// `id_ns` namespaces the row element id + hover group (NEEDS-YOU vs LOG); the id keys on the
+    /// record's unique `request_id`, so rows never collide across log day-groups. A still-proposed
+    /// row is selectable (a brightness lift when highlighted) and opens its inline review on click;
+    /// settled rows are passive.
     fn activity_row(
         &self,
-        index: usize,
+        id_ns: &'static str,
         record: &ActivityRecord,
         selected_id: Option<RequestId>,
         now: u64,
@@ -421,20 +487,17 @@ impl Shell {
         let is_agent = record.origin == ProposalOrigin::Agent;
         let proposed = is_proposed(record);
         let selected = proposed && selected_id == Some(record.request_id);
-        let needed_human = record.reason != BreachedLimit::None;
+        // A human is in the chain for anything that was NOT auto-allowed hands-free — an over-cap
+        // card, a mainnet-guardrail hold (within-cap but still your call), an approval, a denial.
+        // Driving this off `auto_allowed` (not the absent breach `reason`) is what keeps a
+        // mainnet-approved shield from masquerading as a hands-free auto-allow.
+        let needed_human = !record.auto_allowed;
         let summary = payload_summary(&record.payload, self.mask);
 
         // The lead glyph: the cyan agent squircle for an agent, a neutral identity square for an
-        // app action. Static (never the acting pulse) — a logged row is not mid-action.
+        // app action — both static.
         let lead = if is_agent {
-            agent_squircle(
-                px(20.0),
-                px(6.0),
-                false,
-                agent,
-                agent_tint,
-                "activity-agent",
-            )
+            agent_squircle(px(20.0), px(6.0), agent, agent_tint)
         } else {
             div()
                 .size(px(20.0))
@@ -466,7 +529,7 @@ impl Shell {
                 ActivityLifecycle::Decided { approved: true } | ActivityLifecycle::Executed => {
                     "approved"
                 }
-                ActivityLifecycle::Decided { approved: false } => "stopped it",
+                ActivityLifecycle::Decided { approved: false } => "declined",
             };
             chain = chain
                 .child(div().text_sm().text_color(muted).child("→"))
@@ -480,8 +543,30 @@ impl Shell {
                 .child(div().text_sm().text_color(muted).child(human_verb));
         }
 
+        // The trailing side: the outcome cluster, plus — for a proposed row — a hover-revealed
+        // "Review →" so a MOUSE user discovers the review card (the keyboard path is unchanged).
+        let mut trailing = h_flex()
+            .items_center()
+            .gap_3()
+            .flex_shrink_0()
+            .child(self.activity_outcome(record, selected, now, amber, cx));
+        // Key the row element id + hover group on the request_id (unique), NOT a per-band-local
+        // index — a log row's index repeats across day-groups and would collide.
+        let group = format!("{id_ns}-{:x}", record.request_id);
+        if proposed {
+            trailing = trailing.child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .opacity(0.0)
+                    .group_hover(group.clone(), |s| s.opacity(1.0))
+                    .child("Review →"),
+            );
+        }
+
         let mut row = h_flex()
-            .id(("activity-row", index))
+            .id(gpui::SharedString::from(group.clone()))
+            .group(group)
             .w_full()
             .items_center()
             .justify_between()
@@ -490,7 +575,7 @@ impl Shell {
             .py_2()
             .rounded(px(6.0))
             .child(chain)
-            .child(self.activity_outcome(record, now, amber, cx));
+            .child(trailing);
 
         // A still-proposed row is the live, actionable one: a click opens its inline review (the
         // queue's keyboard-first j/k/Enter also reach it). A settled row is inert by design.
@@ -507,12 +592,18 @@ impl Shell {
     }
 
     /// The trailing outcome cluster: for a **proposed** row, the amber breached-fence cite (the
-    /// real cap, never hardcoded) + an inline "⌘⏎ · x" hint when selected. For a **settled** row,
-    /// the auto-approved/approved/sent/not-approved label, the tx hash + relative time when
-    /// broadcast, and the status glyph.
+    /// real cap, never hardcoded) + an inline "⌘⏎ · x" hint when this row is `selected`. For a
+    /// **settled** row, the outcome label, the tx hash + relative time when broadcast, and the
+    /// small circular status glyph.
+    ///
+    /// **Two-signal discipline (DESIGN §The actor model):** only the GLYPH carries color (green
+    /// check approved/executed, red x denied/revoked). The label defaults to `muted_foreground` so
+    /// the log never floods green — EXCEPT a row a human acted on (`!auto_allowed`, decided/
+    /// executed), whose label tints amber to read "you acted here".
     fn activity_outcome(
         &self,
         record: &ActivityRecord,
+        selected: bool,
         now: u64,
         amber: gpui::Hsla,
         cx: &mut Context<Self>,
@@ -526,56 +617,58 @@ impl Shell {
         let cluster = h_flex().items_center().gap_2p5().flex_shrink_0();
 
         match record.lifecycle {
-            // Awaiting a human: cite the actual breached fence (amber caution), plus the key hint.
+            // Awaiting a human: cite the actual breached fence (amber caution); the key hint shows
+            // only on the SELECTED row (the others stay quiet — the hover "Review →" guides a mouse).
             ActivityLifecycle::Proposed => {
                 let cite = cite_phrase(record.reason).unwrap_or("held for approval");
-                cluster
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap_1()
-                            .child(Icon::new(IconName::TriangleAlert).text_color(amber).small())
-                            .child(div().text_xs().text_color(fg).child(cite)),
-                    )
-                    .child(
+                let mut c = cluster.child(
+                    h_flex()
+                        .items_center()
+                        .gap_1()
+                        .child(Icon::new(IconName::TriangleAlert).text_color(amber).small())
+                        .child(div().text_xs().text_color(fg).child(cite)),
+                );
+                if selected {
+                    c = c.child(
                         div()
                             .text_xs()
                             .text_color(muted)
                             .child("⌘⏎ approve · x deny"),
-                    )
+                    );
+                }
+                c
             }
             // Decided / executed: the outcome label + (when broadcast) the tx hash + time + glyph.
-            ActivityLifecycle::Decided { approved } | ActivityLifecycle::Executed => {
-                let executed = matches!(record.lifecycle, ActivityLifecycle::Executed);
-                let label = settled_label(record);
-                let (glyph, color): (gpui::AnyElement, gpui::Hsla) = if !approved {
-                    (
-                        Icon::new(IconName::CircleX)
-                            .text_color(danger)
-                            .small()
-                            .into_any_element(),
-                        danger,
-                    )
+            ActivityLifecycle::Decided { .. } | ActivityLifecycle::Executed => {
+                // Executed and Decided{approved:true} are both "approved"; only an explicit
+                // Decided{approved:false} (denied / revoked / lapsed) is a non-approval.
+                let approved = !matches!(
+                    record.lifecycle,
+                    ActivityLifecycle::Decided { approved: false }
+                );
+                let label = settled_outcome_label(record, self.mask);
+                // The glyph carries the color; the label is muted unless a human acted (amber).
+                let label_color = if !record.auto_allowed { amber } else { muted };
+                let glyph: gpui::AnyElement = if !approved {
+                    Icon::new(IconName::CircleX)
+                        .text_color(danger)
+                        .small()
+                        .into_any_element()
                 } else {
-                    (
-                        Icon::new(IconName::CircleCheck)
-                            .text_color(success)
-                            .small()
-                            .into_any_element(),
-                        success,
-                    )
+                    Icon::new(IconName::CircleCheck)
+                        .text_color(success)
+                        .small()
+                        .into_any_element()
                 };
-                let mut c = cluster.child(div().text_xs().text_color(color).child(label));
-                if executed {
-                    if let Some(hash) = record.tx_hash {
-                        c = c.child(
-                            div()
-                                .font_family(theme.mono_font_family.clone())
-                                .text_xs()
-                                .text_color(muted)
-                                .child(short_tx(&hash)),
-                        );
-                    }
+                let mut c = cluster.child(div().text_xs().text_color(label_color).child(label));
+                if let Some(hash) = record.tx_hash {
+                    c = c.child(
+                        div()
+                            .font_family(theme.mono_font_family.clone())
+                            .text_xs()
+                            .text_color(muted)
+                            .child(short_tx(&hash)),
+                    );
                 }
                 c.child(
                     div()
@@ -588,9 +681,9 @@ impl Shell {
         }
     }
 
-    /// The clear-signing review for a single proposed feed row — the shared trust card, mirroring
-    /// `approvals_view::render_approvals_review`, but with the REAL breached-fence cite from the
-    /// record (per-tx vs daily), never a hardcoded "per-transaction cap". Confirm is `⌘Enter`.
+    /// The clear-signing review for a single proposed feed row — the shared trust card, with the
+    /// REAL breached-fence cite from the record (per-tx vs daily), never a hardcoded
+    /// "per-transaction cap". Confirm is `⌘Enter`.
     pub fn render_activity_review(
         &self,
         record: &ActivityRecord,
@@ -612,14 +705,7 @@ impl Shell {
 
         let band = {
             let lead = if is_agent {
-                agent_squircle(
-                    px(24.0),
-                    px(7.0),
-                    false,
-                    agent,
-                    agent_tint,
-                    "activity-review-agent",
-                )
+                agent_squircle(px(24.0), px(7.0), agent, agent_tint)
             } else {
                 div()
                     .size(px(24.0))
@@ -682,7 +768,7 @@ impl Shell {
                         .border_1()
                         .border_color(border)
                         .bg(surface)
-                        .children(self.review_detail_rows(record, cx)),
+                        .children(self.activity_review_detail_rows(record, cx)),
                 )
                 .child(
                     h_flex()
@@ -720,8 +806,8 @@ impl Shell {
     }
 
     /// The canonical key/value rows for the review card, payload-specific, ending in the breached
-    /// fence (the real cap from the record). Mirrors `approvals_view::review_detail_rows`.
-    fn review_detail_rows(
+    /// fence (the real cap from the record).
+    fn activity_review_detail_rows(
         &self,
         record: &ActivityRecord,
         cx: &mut Context<Self>,
@@ -833,16 +919,20 @@ impl Shell {
     }
 }
 
-/// The settled-row outcome label, by lifecycle + whether a human was needed + actor.
-/// - auto-allowed within cap (no breach) → "auto-approved within cap"
-/// - over-cap, human-approved → "you approved" (agent) / "sent" (app)
+/// The settled-row outcome label, by lifecycle + whether it was auto-allowed hands-free + actor.
+/// - auto-allowed within cap (hands-free) → "auto-approved within cap"
+/// - human-involved (over-cap OR mainnet-guardrail hold), approved → "you approved" (agent)
 /// - denied / revoked / lapsed → "not approved"
+///
+/// Keys off `auto_allowed`, NOT the breach `reason`: a mainnet-guardrail hold breaches no cap
+/// (`reason == None`) yet still required a human, so it must read "you approved", not
+/// "auto-approved within cap".
 fn settled_label(record: &ActivityRecord) -> &'static str {
     let is_agent = record.origin == ProposalOrigin::Agent;
     match record.lifecycle {
         ActivityLifecycle::Decided { approved: false } => "not approved",
         ActivityLifecycle::Decided { approved: true } | ActivityLifecycle::Executed => {
-            if record.reason == BreachedLimit::None {
+            if record.auto_allowed {
                 if is_agent {
                     "auto-approved within cap"
                 } else {
@@ -857,6 +947,33 @@ fn settled_label(record: &ActivityRecord) -> &'static str {
         // Proposed never reaches here (handled before the call site).
         ActivityLifecycle::Proposed => "waiting on you",
     }
+}
+
+/// The shielded amount for an EXECUTED shield, if this record is exactly that — an executed
+/// `Tx` with `IntentKind::Shield`. The demo's payoff lives here: the row should read the RESULT
+/// ("moved … to your private balance"), not just "approved".
+fn executed_shield_amount(record: &ActivityRecord) -> Option<deckard_core::U256> {
+    if !matches!(record.lifecycle, ActivityLifecycle::Executed) {
+        return None;
+    }
+    match &record.payload {
+        PendingPayloadView::Tx(intent) if intent.kind == IntentKind::Shield => Some(intent.value),
+        _ => None,
+    }
+}
+
+/// The settled-row outcome label as a display `String`. An executed shield reads its RESULT —
+/// "moved {amount} ETH to your private balance" (honest + plain, mask-aware). Every other settled
+/// action keeps the static [`settled_label`] wording (auto-approved / you approved / sent / not
+/// approved).
+fn settled_outcome_label(record: &ActivityRecord, mask: bool) -> String {
+    if let Some(value) = executed_shield_amount(record) {
+        return format!(
+            "moved {} ETH to your private balance",
+            masked_amount(value, mask)
+        );
+    }
+    settled_label(record).to_string()
 }
 
 /// The danger line at the top of the review card — names the actual fence breached.
@@ -890,7 +1007,6 @@ fn stopped_banner(danger: gpui::Hsla, surface: gpui::Hsla) -> impl IntoElement {
 }
 
 /// A key/value row whose value is a mono-for-money amount (DESIGN §Typography), mask-aware.
-/// Duplicated from `approvals_view` per the two surfaces' deliberate decoupling.
 #[allow(clippy::too_many_arguments)]
 fn kv_money_row(
     label: &'static str,
@@ -942,6 +1058,17 @@ fn skeleton_row(raise: gpui::Hsla) -> impl IntoElement {
     div().w_full().h(px(40.0)).rounded(px(6.0)).bg(raise)
 }
 
+/// A quiet uppercase section band label (DESIGN §Spacing → tiny uppercase section labels +
+/// whitespace). Shared by the NEEDS YOU band and each LOG day-group header so they read alike.
+fn section_label(label: &str, muted: gpui::Hsla) -> impl IntoElement {
+    div()
+        .pb_1()
+        .text_xs()
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(muted)
+        .child(label.to_uppercase())
+}
+
 /// The review card's heading block (H1 + muted subtitle).
 fn activity_heading_block(
     title: &'static str,
@@ -979,7 +1106,12 @@ mod tests {
     use super::*;
     use alloy_primitives::{Address, Bytes, B256, U256};
 
-    fn record(id: u8, lifecycle: ActivityLifecycle, reason: BreachedLimit) -> ActivityRecord {
+    fn record(
+        id: u8,
+        lifecycle: ActivityLifecycle,
+        reason: BreachedLimit,
+        auto_allowed: bool,
+    ) -> ActivityRecord {
         ActivityRecord {
             request_id: B256::repeat_byte(id),
             origin: ProposalOrigin::Agent,
@@ -995,20 +1127,32 @@ mod tests {
             tx_hash: None,
             lifecycle,
             reason,
+            auto_allowed,
         }
     }
 
     #[test]
     fn activity_pending_keeps_only_proposed() {
         let records = vec![
-            record(0x01, ActivityLifecycle::Proposed, BreachedLimit::PerTxCap),
-            record(0x02, ActivityLifecycle::Executed, BreachedLimit::None),
+            record(
+                0x01,
+                ActivityLifecycle::Proposed,
+                BreachedLimit::PerTxCap,
+                false,
+            ),
+            record(0x02, ActivityLifecycle::Executed, BreachedLimit::None, true),
             record(
                 0x03,
                 ActivityLifecycle::Decided { approved: true },
                 BreachedLimit::None,
+                true,
             ),
-            record(0x04, ActivityLifecycle::Proposed, BreachedLimit::DailyCap),
+            record(
+                0x04,
+                ActivityLifecycle::Proposed,
+                BreachedLimit::DailyCap,
+                false,
+            ),
         ];
         let pending = activity_pending(&records);
         assert_eq!(pending.len(), 2, "only proposed rows are approvable");
@@ -1030,15 +1174,35 @@ mod tests {
 
     #[test]
     fn settled_label_distinguishes_auto_from_human_approval() {
-        // Within cap (no breach) → auto-approved; over cap (breach) → you approved.
-        let auto = record(0x01, ActivityLifecycle::Executed, BreachedLimit::None);
+        // Hands-free auto-allow → "auto-approved within cap".
+        let auto = record(0x01, ActivityLifecycle::Executed, BreachedLimit::None, true);
         assert_eq!(settled_label(&auto), "auto-approved within cap");
-        let human = record(0x02, ActivityLifecycle::Executed, BreachedLimit::PerTxCap);
+        // Over-cap, human-approved → "you approved".
+        let human = record(
+            0x02,
+            ActivityLifecycle::Executed,
+            BreachedLimit::PerTxCap,
+            false,
+        );
         assert_eq!(settled_label(&human), "you approved");
-        let denied = record(
+        // The codex #2 case: a MAINNET-GUARDRAIL hold breaches NO cap (reason None) but still
+        // required a human, so it must read "you approved", NOT "auto-approved within cap".
+        let guardrail = record(
             0x03,
+            ActivityLifecycle::Executed,
+            BreachedLimit::None,
+            false,
+        );
+        assert_eq!(
+            settled_label(&guardrail),
+            "you approved",
+            "a within-cap mainnet hold that a human approved must never read as hands-free"
+        );
+        let denied = record(
+            0x04,
             ActivityLifecycle::Decided { approved: false },
             BreachedLimit::PerTxCap,
+            false,
         );
         assert_eq!(settled_label(&denied), "not approved");
     }
@@ -1046,16 +1210,57 @@ mod tests {
     #[test]
     fn feed_groups_are_newest_first_under_one_session_band() {
         let now = 1_700_000_050_000;
+        // The LOG is built from the SETTLED subset only — `activity_settled` excludes the proposed
+        // row (which would live in the NEEDS YOU band), so the log groups just the two executed.
         let records = vec![
-            record(0x02, ActivityLifecycle::Executed, BreachedLimit::None),
-            record(0x01, ActivityLifecycle::Proposed, BreachedLimit::PerTxCap),
+            record(0x03, ActivityLifecycle::Executed, BreachedLimit::None, true),
+            record(0x02, ActivityLifecycle::Executed, BreachedLimit::None, true),
+            record(
+                0x01,
+                ActivityLifecycle::Proposed,
+                BreachedLimit::PerTxCap,
+                false,
+            ),
         ];
-        let groups = activity_feed_groups(&records, now);
+        let settled = activity_settled(&records);
+        assert_eq!(settled.len(), 2, "the proposed row is not in the log");
+        let groups = activity_feed_groups(&settled, now);
         assert_eq!(groups.len(), 1, "one session band (all today)");
         let (label, rows) = groups.first().expect("a group");
         assert_eq!(*label, "Today");
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].request_id, B256::repeat_byte(0x02), "newest first");
+        assert_eq!(rows[0].request_id, B256::repeat_byte(0x03), "newest first");
+    }
+
+    #[test]
+    fn pending_and_settled_partition_the_feed() {
+        // A proposed row appears ONLY in NEEDS YOU (pending); never duplicated into the LOG.
+        let records = vec![
+            record(
+                0x01,
+                ActivityLifecycle::Proposed,
+                BreachedLimit::PerTxCap,
+                false,
+            ),
+            record(0x02, ActivityLifecycle::Executed, BreachedLimit::None, true),
+            record(
+                0x03,
+                ActivityLifecycle::Decided { approved: false },
+                BreachedLimit::PerTxCap,
+                false,
+            ),
+        ];
+        let pending = activity_pending(&records);
+        let settled = activity_settled(&records);
+        assert_eq!(pending.len(), 1, "only the proposed row needs you");
+        assert_eq!(settled.len(), 2, "the rest fall to the log");
+        // No request_id appears in both subsets.
+        for p in &pending {
+            assert!(
+                !settled.iter().any(|s| s.request_id == p.request_id),
+                "a pending row must never duplicate into the log"
+            );
+        }
     }
 
     #[test]
@@ -1069,6 +1274,93 @@ mod tests {
 
     #[test]
     fn empty_feed_has_no_groups() {
-        assert!(activity_feed_groups(&[], 1_700_000_000_000).is_empty());
+        let empty: [&ActivityRecord; 0] = [];
+        assert!(activity_feed_groups(&empty, 1_700_000_000_000).is_empty());
+    }
+
+    #[test]
+    fn human_acted_rows_are_distinguished_from_auto_allowed() {
+        // The two-signal fidelity hinge: a row a human acted on (`auto_allowed == false`, settled)
+        // is "human-acted" — its outcome label tints amber. An auto-allowed agent row is not.
+        let auto = record(0x01, ActivityLifecycle::Executed, BreachedLimit::None, true);
+        assert!(
+            auto.auto_allowed,
+            "an auto-allowed within-cap action is hands-free"
+        );
+
+        // Human-APPROVED (auto_allowed == false): a human acted, so it must read as human-acted.
+        let human_approved = record(
+            0x02,
+            ActivityLifecycle::Executed,
+            BreachedLimit::PerTxCap,
+            false,
+        );
+        assert!(
+            !human_approved.auto_allowed,
+            "an over-cap row a human approved is human-acted (label tints amber, not muted)"
+        );
+
+        // A denial is also human-acted.
+        let denied = record(
+            0x03,
+            ActivityLifecycle::Decided { approved: false },
+            BreachedLimit::PerTxCap,
+            false,
+        );
+        assert!(!denied.auto_allowed, "a denial is a human action");
+    }
+
+    #[test]
+    fn executed_shield_reads_the_private_balance_payoff() {
+        // An EXECUTED shield reads the RESULT — the demo's payoff — not just "approved".
+        let mut shield = record(0x01, ActivityLifecycle::Executed, BreachedLimit::None, true);
+        // 0.05 ETH, so the rendered amount is meaningful (the helper's 1-wei default is dust).
+        shield.payload = PendingPayloadView::Tx(Intent {
+            chain_id: 1,
+            to: Address::repeat_byte(0x22),
+            token: None,
+            value: U256::from(50_000_000_000_000_000u64),
+            calldata: Bytes::new(),
+            kind: IntentKind::Shield,
+        });
+        assert_eq!(
+            settled_outcome_label(&shield, false),
+            "moved 0.05 ETH to your private balance",
+            "an executed shield surfaces the private-balance payoff"
+        );
+        // Mask-aware: a masked shield hides the amount with the fixed bullets.
+        assert_eq!(
+            settled_outcome_label(&shield, true),
+            format!(
+                "moved {} ETH to your private balance",
+                crate::money::MASK_BULLETS
+            ),
+        );
+
+        // A NON-shield executed action keeps the existing wording (no payoff hijack). A native
+        // send the agent ran hands-free reads "auto-approved within cap".
+        let mut send = record(0x02, ActivityLifecycle::Executed, BreachedLimit::None, true);
+        send.payload = PendingPayloadView::Tx(Intent {
+            chain_id: 1,
+            to: Address::repeat_byte(0x33),
+            token: None,
+            value: U256::from(5_u64),
+            calldata: Bytes::new(),
+            kind: IntentKind::Send,
+        });
+        assert_eq!(
+            settled_outcome_label(&send, false),
+            "auto-approved within cap",
+            "a non-shield executed action keeps its plain settled label"
+        );
+
+        // A PROPOSED shield is not executed, so it never reads the payoff.
+        let proposed_shield = record(
+            0x03,
+            ActivityLifecycle::Proposed,
+            BreachedLimit::PerTxCap,
+            false,
+        );
+        assert!(executed_shield_amount(&proposed_shield).is_none());
     }
 }

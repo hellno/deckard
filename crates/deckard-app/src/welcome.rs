@@ -268,6 +268,11 @@ impl Shell {
                     )
                     // Holdings, or a state.
                     .child(self.render_holdings(first_sync, has_tokens, holdings, cx))
+                    // "What Atlas may do" — the agent policy fence. Atlas is key-less automation
+                    // ON this same wallet (same EOA), not a separate account, so its limits live
+                    // here in the wallet cockpit. The rows are the daemon's LIVE policy (the same
+                    // fence `deckard_policy_get` shows an MCP client), never invented.
+                    .child(self.render_agent_fence(cx))
                     // Keyboard hints — the Superhuman/Linear signal.
                     .child(
                         h_flex()
@@ -278,6 +283,94 @@ impl Shell {
                             .child(chip(format!("{MOD},"), "Settings".into())),
                     ),
             )
+    }
+
+    /// The agent policy fence card ("What Atlas may do") for the wallet home. Atlas is key-less
+    /// automation on the SAME wallet EOA — not a separate account — so its limits belong here in
+    /// the wallet cockpit, not on a standalone page. The card shows the daemon's LIVE policy fence
+    /// (per-tx cap, daily budget, spent-today, recipients, auto-shield minimum, approval mode, the
+    /// STOP brake) via `agent_policy_rows` — the same numbers `deckard_policy_get` returns to an
+    /// MCP client, never invented. `None` until the first `PolicyGet` lands → a quiet "loading…".
+    /// The cyan squircle is the static two-signal identity marker (no pulse).
+    fn render_agent_fence(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let fg = theme.foreground;
+        let muted = theme.muted_foreground;
+        let border = theme.border;
+        let surface = theme.secondary;
+        let mono: SharedString = theme.mono_font_family.clone();
+        let is_dark = theme.is_dark();
+        let agent = theme::agent(is_dark);
+        let agent_tint = theme::agent_tint(is_dark);
+
+        // One policy row: label left (muted), value right (mono, primary). No per-row hairline —
+        // grouping is whitespace.
+        let mono_for_row = mono.clone();
+        let policy_row = move |label: &'static str, value: String| {
+            h_flex()
+                .w_full()
+                .justify_between()
+                .items_center()
+                .py_1p5()
+                .child(div().text_sm().text_color(muted).child(label))
+                .child(
+                    div()
+                        .font_family(mono_for_row.clone())
+                        .text_sm()
+                        .text_color(fg)
+                        .child(value),
+                )
+        };
+
+        v_flex()
+            .w_full()
+            .gap_3()
+            // Section header: the cyan squircle (the ONLY cyan here — static identity, no pulse)
+            // + a plain title. The agent name H1 (text.primary, NEVER cyan) sits beside it.
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(agent_squircle(px(20.0), px(5.0), agent, agent_tint))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(fg)
+                            .child("What Atlas may do"),
+                    ),
+            )
+            // Policy card: one faint frame, no interior grid lines. The rows are the daemon's live
+            // fence; until the first fetch lands the card says so instead of showing invented numbers.
+            .child(
+                v_flex()
+                    .w_full()
+                    .gap_0()
+                    .p_4()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(border)
+                    .bg(surface)
+                    .map(|card| match self.agent_policy.as_ref() {
+                        Some(p) => card.children(
+                            agent_policy_rows(p, self.mask)
+                                .into_iter()
+                                .map(|(label, value)| policy_row(label, value)),
+                        ),
+                        None => card.child(
+                            div()
+                                .text_sm()
+                                .text_color(muted)
+                                .child("Reading the signer's policy…"),
+                        ),
+                    }),
+            )
+            // The fence is read-only here; it's enforced by the signer, edited via policy.json.
+            .child(div().text_xs().text_color(muted).child(
+                "Atlas acts through the key-less deckard-mcp sidecar, signing from this same \
+                     wallet. The signer checks every move against this fence — edit policy.json in \
+                     the Deckard config dir to change it.",
+            ))
     }
 
     /// The merged Total hero (Wave 2 T10): `Total = public + private` when both are known, a
@@ -594,134 +687,6 @@ impl Shell {
                             .text_color(muted)
                             .child("1 wallet · 1 agent"),
                     ),
-            )
-    }
-
-    /// Agent home — the policy card (DESIGN §Policy card): 2-column label/value pairs
-    /// grouped by whitespace in one faint frame, no interior grid lines. The values are
-    /// the daemon's LIVE policy (fetched via `PolicyGet` — the same fence
-    /// `deckard_policy_get` shows an MCP client), never invented: rows DESIGN sketches
-    /// for features that don't exist yet (session-key expiry, an autonomy line) are
-    /// omitted rather than faked. The agent identity (cyan) lives only on the squircle
-    /// glyph.
-    pub fn render_agent_home(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let fg = theme.foreground;
-        let muted = theme.muted_foreground;
-        let border = theme.border;
-        let surface = theme.secondary;
-        let mono: SharedString = theme.mono_font_family.clone();
-        let is_dark = theme.is_dark();
-        let agent = theme::agent(is_dark);
-        let agent_tint = theme::agent_tint(is_dark);
-
-        // One policy row: label left (muted), value right (mono, primary). No
-        // per-row hairline — grouping is whitespace.
-        let mono_for_row = mono.clone();
-        let policy_row = move |label: &'static str, value: String| {
-            h_flex()
-                .w_full()
-                .justify_between()
-                .items_center()
-                .py_1p5()
-                .child(div().text_sm().text_color(muted).child(label))
-                .child(
-                    div()
-                        .font_family(mono_for_row.clone())
-                        .text_sm()
-                        .text_color(fg)
-                        .child(value),
-                )
-        };
-
-        div()
-            .size_full()
-            .p_8()
-            // TODO(scroll): restore a scrollable main pane via a Stateful
-            // `div().id(..).overflow_y_scroll()` (the agent draft mis-ordered
-            // gpui-component's `overflow_y_scrollbar`). Content is short for now.
-            .child(
-                v_flex()
-                    .items_start()
-                    .max_w(px(680.0))
-                    .gap_6()
-                    // Header: cyan squircle monogram (the ONLY cyan on the surface,
-                    // breathing while Atlas acts) + agent name H1 (text.primary, NEVER cyan).
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap_3()
-                            .child(agent_squircle(
-                                px(28.0),
-                                px(6.0),
-                                self.agent_acting,
-                                agent,
-                                agent_tint,
-                                "agent-pulse-home",
-                            ))
-                            .child(
-                                v_flex()
-                                    .gap_0p5()
-                                    .child(
-                                        div()
-                                            .text_xl()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(fg)
-                                            .child("Atlas"),
-                                    )
-                                    .child(div().text_xs().text_color(muted).child(
-                                        if self.agent_acting {
-                                            "Delegated agent · acting now"
-                                        } else {
-                                            "Delegated agent · idle"
-                                        },
-                                    )),
-                            ),
-                    )
-                    // Policy card: one faint frame, no interior grid lines. The rows are
-                    // the daemon's live fence; until the first fetch lands the card says
-                    // so instead of showing invented numbers.
-                    .child(
-                        v_flex()
-                            .w_full()
-                            .gap_0()
-                            .p_4()
-                            .rounded_lg()
-                            .border_1()
-                            .border_color(border)
-                            .bg(surface)
-                            .map(|card| match self.agent_policy.as_ref() {
-                                Some(p) => card.children(
-                                    agent_policy_rows(p, self.mask)
-                                        .into_iter()
-                                        .map(|(label, value)| policy_row(label, value)),
-                                ),
-                                None => card.child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(muted)
-                                        .child("Reading the signer's policy…"),
-                                ),
-                            }),
-                    )
-                    // Demo control: narrate Atlas "acting" to show the one ambient motion
-                    // (the breathing squircle). A real activity feed needs a daemon-side
-                    // event stream — still to come; the policy above is already live.
-                    .child(
-                        Button::new("toggle-agent-acting")
-                            .ghost()
-                            .label(if self.agent_acting {
-                                "Stop activity (demo)"
-                            } else {
-                                "Simulate activity (demo)"
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| this.toggle_agent_acting(cx))),
-                    )
-                    .child(div().text_xs().text_color(muted).child(
-                        "Atlas acts through the key-less deckard-mcp sidecar. The signer \
-                         checks every move against this policy — edit policy.json in the \
-                         Deckard config dir to change the fence.",
-                    )),
             )
     }
 }

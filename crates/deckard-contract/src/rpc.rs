@@ -265,4 +265,11 @@ pub struct ActivityRecord {
     pub lifecycle: ActivityLifecycle,
     /// The breached fence (display-only; `None` for a within-cap auto-allow / guardrail hold).
     pub reason: BreachedLimit,
+    /// `true` only when the daemon auto-allowed this hands-free at propose (within cap, off
+    /// mainnet). A mainnet-guardrail hold and an over-cap card are both `false` even though
+    /// neither breached a cap, so the feed can honestly say "auto-approved within cap" vs
+    /// "you approved" instead of inferring it from the absent breach `reason`. `#[serde(default)]`
+    /// keeps an older producer (no field) decoding to the safe `false` (= a human was involved).
+    #[serde(default)]
+    pub auto_allowed: bool,
 }

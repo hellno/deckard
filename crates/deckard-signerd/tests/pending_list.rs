@@ -211,6 +211,10 @@ async fn activity_feed_pending_carries_reason_and_timestamp() {
         ActivityLifecycle::Proposed,
         "still awaiting a human"
     );
+    assert!(
+        !rec.auto_allowed,
+        "an over-cap card was NOT auto-allowed hands-free — a human is in the loop"
+    );
     assert_eq!(rec.tx_hash, None, "nothing broadcast yet");
     assert_eq!(
         rec.reason,
@@ -255,6 +259,10 @@ async fn activity_feed_within_cap_auto_allow_is_decided() {
     let feed = client.activity_feed().await.unwrap();
     let rec = feed.iter().find(|r| r.request_id == id).unwrap();
     assert_eq!(rec.lifecycle, ActivityLifecycle::Decided { approved: true });
+    assert!(
+        rec.auto_allowed,
+        "a within-cap auto-allow off mainnet is hands-free (auto_allowed) — the feed must say so"
+    );
     assert_eq!(
         rec.reason,
         BreachedLimit::None,

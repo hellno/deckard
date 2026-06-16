@@ -23,11 +23,14 @@ pub struct Config {
     pub config_dir: PathBuf,
     pub socket_path: PathBuf,
     /// True when the operator explicitly disarmed the chain-1 guardrail via the override
-    /// env var (documented only in THREAT-MODEL.md). Default false: on mainnet, every
-    /// auto-Allow is converted to `NeedsApproval` so no hands-free agent spend exists
-    /// while no approval surface ships. The variable's NAME must never be echoed into a
-    /// reason string or tool response — a guardrail with printed instructions is a speed
-    /// bump, not a control.
+    /// env var (documented only in THREAT-MODEL.md). Default false: on `chain_id == 1`
+    /// (mainnet) every auto-Allow is downgraded to `NeedsApproval`, so no hands-free agent
+    /// spend exists THERE — a human must approve each write in the Deckard app's Approvals
+    /// queue / activity feed (#60). Off mainnet (a fork/testnet) within-cap auto-allow is
+    /// deliberately hands-free, so the demo can run and be watched-and-stopped; the limits are
+    /// software-enforced, not chain-enforced (ADR-0002, THREAT-MODEL.md). The variable's NAME
+    /// must never be echoed into a reason string or tool response — a guardrail with printed
+    /// instructions is a speed bump, not a control.
     pub mainnet_override: bool,
 }
 
@@ -44,6 +47,13 @@ impl Config {
                 .map_err(|_| anyhow::anyhow!("DECKARD_CHAIN_ID must be a u64, got {s:?}"))?,
             Err(_) => 1,
         };
+        // Never run on chain 0: an EIP-155 signature over chain_id 0 is malformed/replayable, and
+        // the spec's hard rule is "never sign chain_id == 0". Refuse it at config time so the
+        // daemon can't even start mis-wired, rather than relying on a propose-time equality check.
+        anyhow::ensure!(
+            chain_id != 0,
+            "DECKARD_CHAIN_ID must not be 0 (an unsigned-replayable chain id)"
+        );
 
         // An empty `DECKARD_CONFIG_DIR=` is treated as unset (parity with `deckard_core::config_dir`),
         // so it falls through to the platform dir instead of resolving the vault CWD-relative.
