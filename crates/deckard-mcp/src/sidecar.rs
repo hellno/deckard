@@ -1,7 +1,8 @@
 //! The key-less core both surfaces (CLI + MCP tools) share: one [`SignerClient`] to the
-//! daemon socket, the expected chain, and the six operations. **No key material ever enters
-//! this process** — writes are `Intent`s proposed to `deckard-signerd`, which enforces
-//! policy and signs. The one secret this sidecar transiently handles is the Railgun
+//! daemon socket, the expected chain, and the nine operations. **No key material ever enters
+//! this process** — writes are `Intent`s (or shaped CoW `SwapOrder`s) proposed to
+//! `deckard-signerd`, which enforces policy and signs. The one secret this sidecar transiently
+//! handles is the Railgun
 //! *viewing* key (it rides alongside the wallet's own 0zk address in `RailgunViewGrant`);
 //! it is moved into `Zeroizing` on receipt, never logged, and never put in any response.
 
@@ -13,8 +14,12 @@ use serde_json::json;
 use zeroize::Zeroizing;
 
 use deckard_contract::{
-    deny_reasons, ApprovalMode, Decision, ExecuteResult, Intent, IntentKind, Policy, ReadStatus,
-    SignerRequest, SignerResponse,
+    deny_reasons, ApprovalMode, Decision, ExecuteResult, Intent, IntentKind, PendingPayloadView,
+    Policy, ReadStatus, SignOrderResult, SignerRequest, SignerResponse, SwapOrder,
+};
+use deckard_core::{
+    cow_api_base, swap_order_from_quote, CowError, CowOrderbook, OrderCreation, QuoteRequest,
+    APP_DATA_DOC, DEFAULT_SLIPPAGE_BPS,
 };
 use deckard_signerd::SignerClient;
 
@@ -36,6 +41,11 @@ pub struct Sidecar {
     /// Set once the connect-time chain probe has conclusively confirmed the daemon signs
     /// for [`Self::chain_id`] (so the probe runs at most once per process).
     chain_checked: AtomicBool,
+    /// The CoW orderbook client the swap tools quote/submit through. It owns its own
+    /// `reqwest::Client` (no key material) and routes through the demo-fork stub when
+    /// `DECKARD_DEMO_SWAP_STUB` is set — see [`CowOrderbook::is_simulated`]. Built once
+    /// (no network at construction).
+    orderbook: CowOrderbook,
 }
 
 impl Sidecar {
@@ -59,6 +69,7 @@ impl Sidecar {
             chain_id,
             config_dir,
             chain_checked: AtomicBool::new(false),
+            orderbook: CowOrderbook::new(),
         })
     }
 
@@ -69,6 +80,7 @@ impl Sidecar {
             chain_id,
             config_dir,
             chain_checked: AtomicBool::new(false),
+            orderbook: CowOrderbook::new(),
         }
     }
 
@@ -339,6 +351,196 @@ impl Sidecar {
             other => Err(unexpected("RevokeAll", &other)),
         }
     }
+
+    /// The wallet's public address as a raw `Address` (the swap binding needs it before the
+    /// order is hashed). Same `Address` round-trip as [`Self::wallet_address`], minus the JSON.
+    async fn wallet_addr(&self) -> Result<Address, Failure> {
+        match self.request(&SignerRequest::Address).await? {
+            SignerResponse::Address(addr) => Ok(addr),
+            SignerResponse::Decision(Decision::Deny { reason }) => {
+                Err(failure::from_deny_reason(&reason, self.config_dir()))
+            }
+            other => Err(unexpected("Address", &other)),
+        }
+    }
+
+    /// The orderbook `base` URL for this chain, or an actionable Failure on an unsupported chain.
+    fn cow_base(&self) -> Result<&'static str, Failure> {
+        cow_api_base(self.chain_id).ok_or_else(|| {
+            Failure::new(
+                "this chain has no CoW orderbook",
+                "swaps are supported on mainnet + Sepolia only",
+                "use a supported DECKARD_CHAIN_ID (1 or 11155111)",
+            )
+        })
+    }
+
+    /// `deckard_swap_quote` / `deckard-mcp swap-quote`. Read-only: prices a CoW sell order and
+    /// returns the request_id the BOUND order WOULD get — no daemon write, no approval. The id
+    /// is advisory (re-derived from the bound order); `deckard_swap` returns the authoritative one.
+    pub async fn swap_quote(
+        &self,
+        sell_token: &str,
+        buy_token: &str,
+        sell_amount_eth: &str,
+    ) -> OpResult {
+        self.ensure_chain().await?;
+        let base = self.cow_base()?;
+        let (sell, buy, sell_wei) = parse_swap_args(sell_token, buy_token, sell_amount_eth)?;
+        let wallet = self.wallet_addr().await?;
+        let req = QuoteRequest::sell(sell, buy, wallet, sell_wei, 1800);
+        let quote = self
+            .orderbook
+            .quote(base, &req)
+            .await
+            .map_err(|e| deny_from_cow_failure(&e))?;
+        // Bind owner == receiver == wallet BEFORE deriving the id (the daemon binds the same
+        // fields before hashing), so the advisory id matches the order the daemon would store.
+        let order =
+            swap_order_from_quote(&quote, self.chain_id, wallet, wallet, DEFAULT_SLIPPAGE_BPS);
+        let id = SignerClient::request_id_for_swap_order(&order);
+        let simulated = self.orderbook.is_simulated();
+        Ok(json!({
+            "sell_token": format!("{sell:#x}"),
+            "buy_token": format!("{buy:#x}"),
+            "sell_amount": order.sell_amount.to_string(),
+            "buy_amount_min": order.buy_amount_min.to_string(),
+            "fee_amount": quote.quote.fee_amount.to_string(),
+            "valid_to": order.valid_to,
+            "request_id": format!("{id:#x}"),
+            "simulated": simulated,
+            "note": if simulated {
+                "simulated quote — demo fork (no live solver); the authoritative request_id \
+                 comes from deckard_swap"
+            } else {
+                "indicative price; re-quoted at deckard_swap time, which returns the \
+                 authoritative request_id"
+            },
+            "next": "call deckard_swap with the same tokens + amount to propose it (a human \
+                     approves in the Deckard app)",
+        }))
+    }
+
+    /// `deckard_swap` / `deckard-mcp swap`. Shaped propose: re-quotes, builds the BOUND
+    /// `SwapOrder`, and proposes it. A v1 swap ALWAYS comes back `needs_approval` + request_id —
+    /// it signs nothing and broadcasts nothing.
+    pub async fn swap(&self, sell_token: &str, buy_token: &str, sell_amount_eth: &str) -> OpResult {
+        self.ensure_chain().await?;
+        let base = self.cow_base()?;
+        let (sell, buy, sell_wei) = parse_swap_args(sell_token, buy_token, sell_amount_eth)?;
+        let wallet = self.wallet_addr().await?;
+        let req = QuoteRequest::sell(sell, buy, wallet, sell_wei, 1800);
+        let quote = self
+            .orderbook
+            .quote(base, &req)
+            .await
+            .map_err(|e| deny_from_cow_failure(&e))?;
+        let order =
+            swap_order_from_quote(&quote, self.chain_id, wallet, wallet, DEFAULT_SLIPPAGE_BPS);
+        match self
+            .client
+            .propose_order(&order)
+            .await
+            .map_err(|_| failure::socket_missing(self.client.path()))?
+        {
+            Decision::NeedsApproval { request_id } => Ok(json!({
+                "decision": "needs_approval",
+                "request_id": format!("{request_id:#x}"),
+                "sell_amount": order.sell_amount.to_string(),
+                "buy_amount_min": order.buy_amount_min.to_string(),
+                "next": "a human must approve this swap in the Deckard app, then call \
+                         deckard_submit_order with this request_id; the approval UI is not in \
+                         this alpha (a human approves via hold-to-confirm)",
+                "simulated": self.orderbook.is_simulated(),
+            })),
+            Decision::Allow => Err(Failure::new(
+                "the signer did not gate this swap behind approval",
+                "v1 swaps must always require a human approval",
+                "re-run deckard_swap",
+            )),
+            Decision::Deny { reason } => Err(failure::from_deny_reason(&reason, self.config_dir())),
+        }
+    }
+
+    /// `deckard_submit_order` / `deckard-mcp submit-order`. Signs a human-approved order (the
+    /// daemon refuses with `not_approved` until a human approves it in the app), then submits it
+    /// to the CoW orderbook (or simulates the fill on the demo fork).
+    pub async fn submit_order(&self, request_id_hex: &str) -> OpResult {
+        let request_id: B256 = request_id_hex.trim().parse().map_err(|_| {
+            Failure::new(
+                format!("could not parse request_id {request_id_hex:?}"),
+                "a request_id is the 32-byte 0x-hex string returned by deckard_swap",
+                "pass the request_id exactly as returned",
+            )
+        })?;
+        self.ensure_chain().await?;
+        let base = self.cow_base()?;
+        // (A2) Fetch the bound order via PendingList BEFORE signing — a clean pre-sign error if
+        // the id is unknown, and no dependence on post-sign record retention.
+        let order = self.pending_order(request_id).await?;
+        // The control-channel approval is NOT ours: if no human has approved this order yet, the
+        // daemon returns `not_approved` here (the honest no-self-approve refusal).
+        let signature = match self
+            .client
+            .sign_order(request_id)
+            .await
+            .map_err(|_| failure::socket_missing(self.client.path()))?
+        {
+            SignOrderResult::Signed { signature } => signature,
+            SignOrderResult::Denied { reason } => {
+                return Err(failure::from_deny_reason(&reason, self.config_dir()))
+            }
+        };
+        // (A2) quote_id = None: the daemon never stores the quote id, and the submit path does
+        // not require it (it is a diagnostic link, not a validation key).
+        let creation = OrderCreation::from_signed_order(&order, signature, None);
+        if let Err(e) = self.orderbook.put_app_data(base, APP_DATA_DOC).await {
+            return Err(deny_from_cow_failure(&e));
+        }
+        match self.orderbook.submit(base, &creation).await {
+            Ok(uid) => {
+                let simulated = self.orderbook.is_simulated();
+                Ok(json!({
+                    "status": "submitted",
+                    "uid": uid,
+                    "simulated": simulated,
+                    "note": if simulated {
+                        "simulated fill on the demo fork — the live CoW orderbook can't accept a \
+                         fork order; balances are credited where the demo token set is known"
+                    } else {
+                        "order accepted by the CoW orderbook; track it in the Deckard app"
+                    },
+                }))
+            }
+            Err(e) => Err(deny_from_cow_failure(&e)),
+        }
+    }
+
+    /// Find a stored swap order by request_id via PendingList. (`sign_order` leaves the record
+    /// in place, so fetching before OR after sign both work; we fetch before — see
+    /// [`Self::submit_order`].)
+    async fn pending_order(&self, request_id: B256) -> Result<SwapOrder, Failure> {
+        let records = self
+            .client
+            .pending_list()
+            .await
+            .map_err(|_| failure::socket_missing(self.client.path()))?;
+        records
+            .into_iter()
+            .find(|r| r.request_id == request_id)
+            .and_then(|r| match r.payload {
+                PendingPayloadView::Order(o) => Some(o),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                Failure::new(
+                    "no pending swap order for this request_id",
+                    "the daemon has no swap order under this id (it may have expired, been \
+                     signed already in a closed session, or the id is from a different flow)",
+                    "re-run deckard_swap to get a fresh request_id",
+                )
+            })
+    }
 }
 
 /// Render the daemon's trust label for a read.
@@ -382,4 +584,114 @@ fn unexpected(what: &str, _resp: &SignerResponse) -> Failure {
         "rebuild both from the same checkout (`cargo build -p deckard-signerd -p \
          deckard-mcp`) and restart the app",
     )
+}
+
+/// Parse the swap tools' arguments: two 0x-hex token addresses + a decimal ETH-string amount
+/// (in the sell token's own units, parsed exactly through [`parse_eth_to_wei`]).
+fn parse_swap_args(
+    sell_token: &str,
+    buy_token: &str,
+    sell_amount_eth: &str,
+) -> Result<(Address, Address, U256), Failure> {
+    let sell: Address = sell_token.trim().parse().map_err(|_| {
+        Failure::new(
+            format!("could not parse sell_token {sell_token:?}"),
+            "sell_token must be a 0x-hex Ethereum address",
+            "pass the token's 0x-hex contract address (e.g. WETH on this chain)",
+        )
+    })?;
+    let buy: Address = buy_token.trim().parse().map_err(|_| {
+        Failure::new(
+            format!("could not parse buy_token {buy_token:?}"),
+            "buy_token must be a 0x-hex Ethereum address",
+            "pass the token's 0x-hex contract address",
+        )
+    })?;
+    let sell_wei = parse_eth_to_wei(sell_amount_eth).map_err(|msg| {
+        Failure::new(
+            format!("could not parse sell_amount_eth {sell_amount_eth:?}"),
+            msg,
+            "pass a decimal amount string like \"0.05\" (the sell token's own units)",
+        )
+    })?;
+    if sell_wei == U256::ZERO {
+        return Err(Failure::new(
+            "sell_amount_eth is zero",
+            "a zero-amount swap has nothing to sell",
+            "pass an amount greater than zero, e.g. \"0.05\"",
+        ));
+    }
+    Ok((sell, buy, sell_wei))
+}
+
+/// Turn an `anyhow`-wrapped orderbook error into a three-part [`Failure`]. Downcasts to the
+/// typed [`CowError`] so the well-known `errorType`s read honestly (mirrors the app's
+/// `humanize_cow_api`); an un-typed transport/decode error falls back to calm generic copy.
+fn deny_from_cow_failure(e: &anyhow::Error) -> Failure {
+    match e.downcast_ref::<CowError>() {
+        Some(CowError::Api {
+            error_type,
+            description,
+        }) => humanize_cow_api(error_type, description),
+        Some(CowError::Http { status, .. }) => Failure::new(
+            format!("the CoW orderbook returned HTTP {status}"),
+            "the orderbook rejected the request with a non-structured error",
+            "re-run the swap flow from deckard_swap_quote; if it persists, check the Deckard app",
+        ),
+        Some(CowError::Decode(_)) => Failure::new(
+            "the CoW orderbook sent an unexpected response",
+            "the success body did not decode into the expected shape (a backend/version skew)",
+            "re-run the swap flow from deckard_swap_quote; if it recurs, report it",
+        ),
+        Some(CowError::Transport(_)) | None => Failure::new(
+            "could not reach the CoW orderbook",
+            "the request to the orderbook failed at the network layer (DNS/TLS/connect/timeout)",
+            "check the network and re-run the swap flow from deckard_swap_quote",
+        ),
+    }
+}
+
+/// Map a CoW orderbook `errorType` to a three-part [`Failure`] (mirrors the app's
+/// `humanize_cow_api`). The well-known rejection types each get distinct, actionable copy;
+/// an unrecognised type falls through with its raw tag so a new orderbook error isn't swallowed.
+fn humanize_cow_api(error_type: &str, description: &str) -> Failure {
+    match error_type {
+        "OrderExpired" | "Expired" | "EXPIRED" => Failure::new(
+            "the price quote expired before the order was placed",
+            "the quote/order lapsed between pricing and submit",
+            "re-run the swap flow from deckard_swap_quote to get a fresh quote",
+        ),
+        "NoLiquidity" => Failure::new(
+            "there's no route to swap these tokens right now",
+            "no solver could price this pair/size at any rate",
+            "try a different pair or amount",
+        ),
+        "InsufficientBalance" => Failure::new(
+            "the wallet doesn't hold enough of the sell token for this swap",
+            "the orderbook's balance check failed against the wallet's holdings",
+            "lower the amount, or fund the wallet with the sell token first",
+        ),
+        "InvalidSignature" => Failure::new(
+            "the order signature didn't validate",
+            "usually a stale quote — the signed order no longer matches a live price",
+            "re-run the swap flow from deckard_swap_quote and submit again promptly",
+        ),
+        "InsufficientAllowance" => Failure::new(
+            "the CoW vault relayer isn't approved to move enough of the sell token",
+            "the exact-gross relayer approval is a separate human-approved step that the \
+             key-less sidecar cannot perform",
+            "approve the sell token in the Deckard app first, then retry deckard_submit_order",
+        ),
+        "DuplicatedOrder" => Failure::new(
+            "this exact order is already on the orderbook",
+            "an identical order was already submitted",
+            "do not resubmit; track the existing order in the Deckard app",
+        ),
+        other => Failure::new(
+            format!("the CoW orderbook rejected the order ({other})"),
+            format!("the orderbook returned: {description}"),
+            "re-run the swap flow from deckard_swap_quote; if the reason is unclear, check the \
+             Deckard app",
+        ),
+    }
 }

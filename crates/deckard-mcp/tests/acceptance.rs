@@ -27,10 +27,10 @@ async fn session(
     (dir, state, child)
 }
 
-/// T1 — `list_tools` is exactly the 6-tool launch profile, every description non-empty and
+/// T1 — `list_tools` is exactly the 9-tool launch profile, every description non-empty and
 /// keyword-bearing (the descriptions ARE the agent's documentation).
 #[tokio::test]
-async fn t1_list_tools_is_the_six_tool_launch_profile() {
+async fn t1_list_tools_is_the_nine_tool_launch_profile() {
     let (_dir, _state, mut child) = session(&[]).await;
     let tools = child.list_tools().await;
 
@@ -46,10 +46,13 @@ async fn t1_list_tools_is_the_six_tool_launch_profile() {
             "deckard_policy_get",
             "deckard_revoke_all",
             "deckard_shield",
+            "deckard_submit_order",
+            "deckard_swap",
+            "deckard_swap_quote",
             "deckard_wallet_address",
             "deckard_wallet_balance",
         ],
-        "the launch surface is FINAL at these 6 deckard_-prefixed tools"
+        "the launch surface is FINAL at these 9 deckard_-prefixed tools"
     );
 
     // Keyword-bearing descriptions: units, preconditions, sequencing, safety notes.
@@ -74,6 +77,15 @@ async fn t1_list_tools_is_the_six_tool_launch_profile() {
             &["tx_hash", "do NOT retry", "already_executed"],
         ),
         ("deckard_revoke_all", &["STOP", "unlock", "Irreversible"]),
+        (
+            "deckard_swap_quote",
+            &["buy_amount_min", "request_id", "deckard_swap"],
+        ),
+        (
+            "deckard_swap",
+            &["needs_approval", "deckard_submit_order", "Deckard app"],
+        ),
+        ("deckard_submit_order", &["uid", "not_approved", "CoW"]),
     ];
     for (name, keywords) in keyword_map {
         let tool = tools
@@ -311,6 +323,111 @@ async fn t8_stop_then_execute_is_denied() {
     child.shutdown().await;
 }
 
+/// The Sepolia demo token pair the swap acceptance tests trade (WETH → COW). With the stub on,
+/// the quote/submit never touch the live orderbook, so these stay hermetic.
+const SEPOLIA_WETH: &str = "0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14";
+const SEPOLIA_COW: &str = "0x0625aFB445C3B6B7B929342a04A22599fD5dBB59";
+
+/// `DECKARD_DEMO_SWAP_STUB=1` engages the in-fork stub → quote/submit route through the fixture,
+/// so the acceptance child never reaches `api.cow.fi` (hermetic, no network). No fill RPC is set,
+/// so the stub's submit returns a synthetic uid with the balance left un-credited — fine here.
+const SWAP_STUB_ENV: &[(&str, &str)] = &[
+    ("DECKARD_DEMO_SWAP_STUB", "1"),
+    ("DECKARD_CHAIN_ID", "11155111"),
+];
+
+/// `deckard_swap_quote` prices a swap read-only and returns the request_id the order WOULD get,
+/// with `simulated:true` on the demo fork. No daemon write, no approval.
+#[tokio::test]
+async fn swap_quote_prices_and_returns_request_id() {
+    let (_dir, _state, mut child) = session(SWAP_STUB_ENV).await;
+
+    let (err, text, _) = child
+        .call_tool(
+            "deckard_swap_quote",
+            serde_json::json!({
+                "sell_token": SEPOLIA_WETH,
+                "buy_token": SEPOLIA_COW,
+                "sell_amount_eth": "0.05",
+            }),
+        )
+        .await;
+    assert!(
+        !err,
+        "a stubbed quote is read-only and must succeed: {text}"
+    );
+    let v: serde_json::Value = serde_json::from_str(&text).expect("quote JSON");
+
+    let request_id = v["request_id"].as_str().expect("request_id");
+    assert!(
+        request_id.starts_with("0x") && request_id.len() > 2,
+        "request_id must be a 0x-hex string: {request_id:?}"
+    );
+    let buy_amount_min = v["buy_amount_min"].as_str().expect("buy_amount_min");
+    assert!(
+        !buy_amount_min.is_empty(),
+        "the min-receive must be present: {text}"
+    );
+    assert_eq!(
+        v["simulated"], true,
+        "a quote on the demo fork must be honestly labelled simulated: {text}"
+    );
+
+    child.shutdown().await;
+}
+
+/// `deckard_swap` ALWAYS comes back `needs_approval` + a request_id (it signs/broadcasts
+/// nothing), and `deckard_submit_order` on that id WITHOUT a human approval is refused with
+/// `not_approved`. The acceptance harness has no control channel to `Resolve`, so this proves
+/// the no-self-approve property: an agent cannot push its own swap through unapproved.
+#[tokio::test]
+async fn swap_proposes_needs_approval_then_submit_requires_approval() {
+    let (_dir, _state, mut child) = session(SWAP_STUB_ENV).await;
+
+    let (err, text, _) = child
+        .call_tool(
+            "deckard_swap",
+            serde_json::json!({
+                "sell_token": SEPOLIA_WETH,
+                "buy_token": SEPOLIA_COW,
+                "sell_amount_eth": "0.05",
+            }),
+        )
+        .await;
+    assert!(
+        !err,
+        "a proposal is a decision, not a transport error: {text}"
+    );
+    let v: serde_json::Value = serde_json::from_str(&text).expect("swap JSON");
+    assert_eq!(
+        v["decision"], "needs_approval",
+        "a v1 swap must always require a human approval, never allow"
+    );
+    let request_id = v["request_id"].as_str().expect("request_id").to_string();
+
+    // Submit WITHOUT approving (the harness has no control channel to Resolve) → not_approved.
+    let (err, text, _) = child
+        .call_tool(
+            "deckard_submit_order",
+            serde_json::json!({ "request_id": request_id }),
+        )
+        .await;
+    assert!(
+        err,
+        "submitting an unapproved order must be refused: {text}"
+    );
+    let v: serde_json::Value = serde_json::from_str(&text).expect("error JSON");
+    assert!(
+        v["error"]["problem"]
+            .as_str()
+            .expect("problem")
+            .contains("approval"),
+        "the refusal must point at the missing human approval: {text}"
+    );
+
+    child.shutdown().await;
+}
+
 /// The connect-time chain probe: a sidecar configured for the wrong chain gets an
 /// actionable install-pointing error instead of a confusing late deny.
 #[tokio::test]
@@ -346,7 +463,13 @@ async fn wrong_chain_daemon_yields_actionable_error() {
 async fn t9_full_session_transcript_is_secret_free() {
     const ENV_CANARY: &str = "EnvCanary12345678901234567890XYZ";
     let poisoned_rpc = format!("https://user:{ENV_CANARY}@rpc.example.com/v3/{ENV_CANARY}");
-    let (_dir, state, mut child) = session(&[("DECKARD_RPC_URL", poisoned_rpc.as_str())]).await;
+    // The swap stub keeps the swap legs hermetic (no live api.cow.fi); the poisoned RPC URL is
+    // the env-leak canary the structural walk must not surface.
+    let (_dir, state, mut child) = session(&[
+        ("DECKARD_RPC_URL", poisoned_rpc.as_str()),
+        ("DECKARD_DEMO_SWAP_STUB", "1"),
+    ])
+    .await;
 
     // A representative full session (T1..T8 shapes in one transcript).
     let _ = child.list_tools().await;
@@ -386,6 +509,28 @@ async fn t9_full_session_transcript_is_secret_free() {
     let _ = child
         .call_tool("deckard_execute", serde_json::json!({ "request_id": &id }))
         .await; // replay deny
+                // A swap leg (stubbed, hermetic): propose → needs_approval, then submit without approval →
+                // not_approved. Both responses ride into the transcript so the secret walk covers them too.
+    let (_, swap_text, _) = child
+        .call_tool(
+            "deckard_swap",
+            serde_json::json!({
+                "sell_token": SEPOLIA_WETH,
+                "buy_token": SEPOLIA_COW,
+                "sell_amount_eth": "0.05",
+            }),
+        )
+        .await;
+    if let Ok(swap) = serde_json::from_str::<serde_json::Value>(&swap_text) {
+        if let Some(order_id) = swap.get("request_id").and_then(|v| v.as_str()) {
+            let _ = child
+                .call_tool(
+                    "deckard_submit_order",
+                    serde_json::json!({ "request_id": order_id }),
+                )
+                .await;
+        }
+    }
     let _ = child
         .call_tool("deckard_revoke_all", serde_json::json!({}))
         .await;

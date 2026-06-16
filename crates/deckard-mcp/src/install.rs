@@ -8,8 +8,10 @@
 //!
 //! `--demo` adds the env block that points BOTH the sidecar and (via `just demo`) the
 //! daemon at the isolated demo world: dedicated config dir + socket under `~/.deckard/demo`,
-//! Sepolia chain id, local anvil RPC. Key-less by construction — no secret ever enters
-//! Claude's config file.
+//! Sepolia chain id, local anvil RPC, and the demo swap stub (so the sidecar's CoW orderbook
+//! returns a fixture quote + simulated fill instead of hitting the live orderbook, which
+//! can't accept a fork order). Key-less by construction — no secret ever enters Claude's
+//! config file.
 
 use std::io::BufRead;
 use std::path::PathBuf;
@@ -37,6 +39,10 @@ pub fn server_entry(binary: &std::path::Path, demo: bool) -> anyhow::Result<Valu
             "DECKARD_CONFIG_DIR": dir_str,
             "DECKARD_CHAIN_ID": "11155111",
             "DECKARD_RPC_URL": "http://127.0.0.1:8545",
+            // Demo-only swap stub (ON/OFF flag): flips the CoW orderbook to the fixture quote +
+            // simulated fill, because a real CoW order can't be accepted from a local fork. The
+            // fill credits balances on DECKARD_RPC_URL (the local anvil above) — separate knob.
+            "DECKARD_DEMO_SWAP_STUB": "1",
         });
     }
     Ok(entry)
@@ -161,8 +167,10 @@ mod tests {
             .as_str()
             .unwrap()
             .ends_with(".deckard/demo"));
-        // Key-less contract: exactly these four env keys, nothing secret-bearing.
-        assert_eq!(env.len(), 4);
+        // The demo swap stub is an on/off flag (fill RPC = DECKARD_RPC_URL above).
+        assert_eq!(env["DECKARD_DEMO_SWAP_STUB"], "1");
+        // Key-less contract: exactly these five env keys, nothing secret-bearing.
+        assert_eq!(env.len(), 5);
     }
 
     #[test]

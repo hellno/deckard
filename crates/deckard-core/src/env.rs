@@ -77,6 +77,44 @@ pub(crate) fn screen_capture_allowed_from(value: Option<&str>) -> bool {
     )
 }
 
+/// Whether the demo swap stub is engaged (`DECKARD_DEMO_SWAP_STUB`). **Default OFF — production
+/// never stubs.** A real CoW order can't be accepted+open from a local Sepolia fork (the live
+/// orderbook validates real-Sepolia balances), so `just demo` / `install --demo` turn this ON to
+/// route quote/submit through an HONEST in-fork stub instead. This is a pure ON/OFF FLAG: the fork
+/// RPC the stub credits balances on comes from [`demo_swap_fill_rpc`] (`DECKARD_RPC_URL`), NOT from
+/// this value — the flag and the URL are deliberately separate knobs. Recognizes `1` / `true` /
+/// `yes` / `on` (case-insensitive, trimmed); anything else (including unset/empty) leaves the real
+/// orderbook in place.
+pub fn demo_swap_stub() -> bool {
+    demo_swap_stub_from(std::env::var("DECKARD_DEMO_SWAP_STUB").ok().as_deref())
+}
+
+/// Pure core of [`demo_swap_stub`] — only an explicit truthy spelling enables the stub, so the
+/// production default (real orderbook) is fail-safe against typos and stray values.
+pub(crate) fn demo_swap_stub_from(value: Option<&str>) -> bool {
+    matches!(
+        value.map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
+/// The fork RPC URL the demo swap stub credits simulated buy-token balances on, sourced from the
+/// standard `DECKARD_RPC_URL` (in demo mode that is the local anvil fork at `http://127.0.0.1:8545`,
+/// which serves the `anvil_setStorageAt` cheatcode). Only consulted when [`demo_swap_stub`] is on; a
+/// blank/unset value is `None`, in which case the stub returns a synthetic uid with the buy balance
+/// left UN-credited (honest — never a fabricated fill).
+pub fn demo_swap_fill_rpc() -> Option<String> {
+    demo_swap_fill_rpc_from(std::env::var("DECKARD_RPC_URL").ok().as_deref())
+}
+
+/// Pure core of [`demo_swap_fill_rpc`] — trims and treats blank/unset as `None`.
+pub(crate) fn demo_swap_fill_rpc_from(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,6 +159,48 @@ mod tests {
             assert!(
                 screen_capture_allowed_from(Some(on)),
                 "{on:?} should allow screen capture"
+            );
+        }
+    }
+
+    #[test]
+    fn demo_swap_stub_defaults_off_and_parses_truthy_values() {
+        // Unset / blank / falsey / non-truthy → no stub (the real CoW orderbook is used). A bare
+        // URL is NOT truthy: the flag and the fill URL are separate knobs now.
+        for off in [
+            None,
+            Some(""),
+            Some("   "),
+            Some("0"),
+            Some("http://127.0.0.1:8545"),
+        ] {
+            assert!(
+                !demo_swap_stub_from(off),
+                "{off:?} should leave the real orderbook in place"
+            );
+        }
+        // Only the documented truthy spellings, case/whitespace-insensitive, enable it.
+        for on in ["1", "true", "yes", "on", " ON ", "True", "Yes"] {
+            assert!(
+                demo_swap_stub_from(Some(on)),
+                "{on:?} should enable the stub"
+            );
+        }
+    }
+
+    #[test]
+    fn demo_swap_fill_rpc_trims_and_treats_blank_as_unset() {
+        for none in [None, Some(""), Some("   ")] {
+            assert_eq!(
+                demo_swap_fill_rpc_from(none),
+                None,
+                "{none:?} → no fill RPC"
+            );
+        }
+        for url in ["http://127.0.0.1:8545", "  http://127.0.0.1:8545 "] {
+            assert_eq!(
+                demo_swap_fill_rpc_from(Some(url)),
+                Some("http://127.0.0.1:8545".to_string())
             );
         }
     }

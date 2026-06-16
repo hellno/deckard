@@ -15,17 +15,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, Bytes, B256, U256};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::process::{Child, ChildStdin, Command};
 
 use deckard_contract::{
-    evaluate, ApprovalMode, ApprovalStatus, Decision, ExecuteResult, Intent, Policy,
-    RailgunViewGrant, ReadStatus, RequestId, SignOrderResult, SignerRequest, SignerResponse,
-    UnlockOutcome,
+    evaluate, ApprovalMode, ApprovalStatus, Decision, ExecuteResult, Intent, PendingPayloadView,
+    PendingRecord, Policy, RailgunViewGrant, ReadStatus, RequestId, SignOrderResult, SignerRequest,
+    SignerResponse, SwapOrder, UnlockOutcome,
 };
-use deckard_signerd::{frame, request_id_for};
+use deckard_signerd::{frame, request_id_for, request_id_for_order};
 
 /// Hard ceiling for any single read from the child (CI requirement: no hangs).
 pub const IO_TIMEOUT: Duration = Duration::from_secs(20);
@@ -79,6 +79,10 @@ pub struct MockState {
     pub policy: Policy,
     pub locked: bool,
     requests: HashMap<RequestId, MockReq>,
+    /// Swap orders, kept parallel to `requests` (the daemon stores both under one map keyed by a
+    /// `PendingPayload` enum; the mock keeps a separate map so the existing Tx path is untouched).
+    /// Drives the #26 MCP swap flow: `ProposeOrder` → `SignOrder` → `PendingList`.
+    orders: HashMap<RequestId, MockOrder>,
     /// When set, `Execute` fails with exactly this reason — UNREDACTED. Used to prove the
     /// T9 scanner catches a daemon that leaks (the real daemon's redaction is pinned in
     /// deckard-signerd's own tests).
@@ -94,6 +98,14 @@ struct MockReq {
     status: ApprovalStatus,
     approved: bool,
     broadcast: bool,
+}
+
+/// A stored swap order, mirroring the daemon's `PendingPayload::Order` record. `order` is the
+/// owner-BOUND order (owner == `mock_address()`); `signature` is set once on a successful sign.
+struct MockOrder {
+    order: SwapOrder,
+    status: ApprovalStatus,
+    signature: Option<Bytes>,
 }
 
 pub fn demo_policy() -> Policy {
@@ -122,6 +134,7 @@ impl MockState {
             policy: demo_policy(),
             locked: false, // the mock plays an already-unlocked daemon
             requests: HashMap::new(),
+            orders: HashMap::new(),
             force_broadcast_error: None,
             grant: mock_grant(),
             balance_wei: U256::from(1_000_000_000_000_000_000u128), // 1 ETH funded
@@ -134,6 +147,7 @@ impl MockState {
                 self.locked = false;
                 self.policy.revoked = false;
                 self.requests.clear();
+                self.orders.clear();
                 SignerResponse::Unlock(UnlockOutcome::Unlocked {
                     address: mock_address(),
                 })
@@ -146,6 +160,16 @@ impl MockState {
                         && matches!(r.status, ApprovalStatus::Pending | ApprovalStatus::Allowed)
                     {
                         r.status = ApprovalStatus::Denied {
+                            reason: "revoked".into(),
+                        };
+                    }
+                }
+                // Unsigned orders flip to revoked too (mirrors the daemon's STOP pass).
+                for o in self.orders.values_mut() {
+                    if o.signature.is_none()
+                        && matches!(o.status, ApprovalStatus::Pending | ApprovalStatus::Allowed)
+                    {
+                        o.status = ApprovalStatus::Denied {
                             reason: "revoked".into(),
                         };
                     }
@@ -166,6 +190,19 @@ impl MockState {
                                 reason: "user_denied".into(),
                             };
                         }
+                    }
+                }
+                // A Resolve also flips the matching swap order Pending → Allowed/Denied (the
+                // control channel the public MCP client deliberately cannot reach — see #26).
+                if let Some(o) = self.orders.get_mut(&request_id) {
+                    if o.status == ApprovalStatus::Pending {
+                        o.status = if approved {
+                            ApprovalStatus::Allowed
+                        } else {
+                            ApprovalStatus::Denied {
+                                reason: "user_denied".into(),
+                            }
+                        };
                     }
                 }
                 SignerResponse::Ack
@@ -211,19 +248,21 @@ impl MockState {
                     })
                 }
             }
-            // Swap (CoW) requests are exercised by the dedicated swap-trust-path + MCP-swap
-            // children (#24/#26); this MCP acceptance mock predates them and only needs to stay
-            // exhaustive. It answers honestly: it does not implement the swap path.
-            SignerRequest::ProposeOrder { .. } => SignerResponse::Decision(Decision::Deny {
-                reason: "swap_unsupported_in_mock".into(),
-            }),
-            SignerRequest::SignOrder { .. } => SignerResponse::SignOrder(SignOrderResult::Denied {
-                reason: "swap_unsupported_in_mock".into(),
-            }),
+            // Swap (CoW) path for the #26 MCP swap tools: ProposeOrder → SignOrder, plus the
+            // order records surfaced through PendingList. Mirrors deckard-signerd's order
+            // handlers so the sidecar sees the same wire it would in production.
+            SignerRequest::ProposeOrder { order } => {
+                SignerResponse::Decision(self.propose_order(&order))
+            }
+            SignerRequest::SignOrder { request_id } => {
+                SignerResponse::SignOrder(self.sign_order(request_id))
+            }
+            // CancelOrder is not reachable from any #26 MCP tool, so it stays unimplemented (the
+            // honest deny mirrors the pre-#26 mock; nothing exercises it).
             SignerRequest::CancelOrder { .. } => SignerResponse::Execute(ExecuteResult::Denied {
                 reason: "swap_unsupported_in_mock".into(),
             }),
-            SignerRequest::PendingList => SignerResponse::Pending(Vec::new()),
+            SignerRequest::PendingList => SignerResponse::Pending(self.pending_list()),
         }
     }
 
@@ -326,6 +365,121 @@ impl MockState {
             tx_hash: mock_tx_hash(),
         }
     }
+
+    /// A SIMPLIFIED stand-in for `deckard-signerd::Daemon::propose_order`, covering only what the
+    /// MCP acceptance suite exercises: chain-check (key-less), then locked-check, then BIND owner to
+    /// the mock wallet before hashing, then store a Pending order under its `request_id_for_order`.
+    /// A swap never auto-allows — it always comes back NeedsApproval; a re-propose of the same bound
+    /// order returns the existing record's decision (idempotent). It deliberately SKIPS the real
+    /// daemon's `evaluate_order` policy gate (receiver/zero-amount/allow_swap_tokens/valid_to
+    /// horizon) — that gate is unit-tested in `deckard-contract::policy`, not here.
+    fn propose_order(&mut self, order: &SwapOrder) -> Decision {
+        if order.chain_id != MOCK_CHAIN {
+            return Decision::Deny {
+                reason: "chain_mismatch".into(),
+            };
+        }
+        if self.locked {
+            return Decision::Deny {
+                reason: "locked".into(),
+            };
+        }
+        // Never trust the client's owner — bind it to the unlocked wallet, then hash.
+        let mut bound = order.clone();
+        bound.owner = mock_address();
+        let id = request_id_for_order(&bound);
+        if let Some(existing) = self.orders.get(&id) {
+            return match &existing.status {
+                _ if existing.signature.is_some() => Decision::Deny {
+                    reason: "already_signed".into(),
+                },
+                ApprovalStatus::Pending => Decision::NeedsApproval { request_id: id },
+                ApprovalStatus::Allowed => Decision::Allow,
+                ApprovalStatus::Denied { reason } => Decision::Deny {
+                    reason: reason.clone(),
+                },
+                ApprovalStatus::Expired => Decision::Deny {
+                    reason: "expired".into(),
+                },
+            };
+        }
+        self.orders.insert(
+            id,
+            MockOrder {
+                order: bound,
+                status: ApprovalStatus::Pending,
+                signature: None,
+            },
+        );
+        Decision::NeedsApproval { request_id: id }
+    }
+
+    /// Mirror `deckard-signerd::Daemon::sign_order`: only an Allowed, unsigned order signs (to a
+    /// deterministic mock signature); a still-Pending order is `not_approved`; a re-sign is
+    /// `already_signed`; an unknown id / locked / revoked record refuses with the matching reason.
+    fn sign_order(&mut self, request_id: RequestId) -> SignOrderResult {
+        if self.locked || self.policy.revoked {
+            // STOP/lock refuses even a previously-approved order (TOCTOU re-check).
+            if let Some(o) = self.orders.get(&request_id) {
+                if o.signature.is_none() {
+                    return SignOrderResult::Denied {
+                        reason: "revoked".into(),
+                    };
+                }
+            }
+        }
+        let order = match self.orders.get_mut(&request_id) {
+            None => {
+                return SignOrderResult::Denied {
+                    reason: "unknown_request".into(),
+                }
+            }
+            Some(o) => o,
+        };
+        if order.signature.is_some() {
+            return SignOrderResult::Denied {
+                reason: "already_signed".into(),
+            };
+        }
+        match order.status.clone() {
+            ApprovalStatus::Allowed => {
+                // A deterministic 65-byte mock signature (r||s||v) — never key-derived here.
+                let sig = Bytes::from(vec![0xCDu8; 65]);
+                order.signature = Some(sig.clone());
+                SignOrderResult::Signed { signature: sig }
+            }
+            ApprovalStatus::Pending => SignOrderResult::Denied {
+                reason: "not_approved".into(),
+            },
+            ApprovalStatus::Denied { reason } => SignOrderResult::Denied { reason },
+            ApprovalStatus::Expired => SignOrderResult::Denied {
+                reason: "expired".into(),
+            },
+        }
+    }
+
+    /// Mirror `deckard-signerd::Daemon::pending_list`: every in-flight Tx record AND every swap
+    /// order record, each with its full payload (the sidecar finds an order here by request_id).
+    fn pending_list(&self) -> Vec<PendingRecord> {
+        let txs = self.requests.iter().map(|(id, r)| PendingRecord {
+            request_id: *id,
+            status: r.status.clone(),
+            payload: payload_view(&r.intent),
+        });
+        let orders = self.orders.iter().map(|(id, o)| PendingRecord {
+            request_id: *id,
+            status: o.status.clone(),
+            payload: PendingPayloadView::Order(o.order.clone()),
+        });
+        txs.chain(orders).collect()
+    }
+}
+
+/// Map a stored `Intent` to its wire `PendingPayloadView`. The mock only ever stores plain `Tx`
+/// intents (the daemon additionally collapses an ERC-20 approve into `PendingPayloadView::Approve`,
+/// which no acceptance test exercises), so this is a thin `Tx` wrapper.
+fn payload_view(intent: &Intent) -> PendingPayloadView {
+    PendingPayloadView::Tx(intent.clone())
 }
 
 /// Spawn the mock daemon on `socket`. Returns a handle to its shared state (tests mutate it
@@ -517,9 +671,12 @@ impl McpChild {
 
 // --- the T9 structural allowlist scanner -------------------------------------------------
 
-/// Fields whose values are ALLOWED to be 32-byte hex (the known schema fields, permitted on
-/// both the request and response side).
-const HEX_ALLOWED_FIELDS: &[&str] = &["tx_hash", "request_id"];
+/// Fields whose values are ALLOWED to be hex (the known schema fields, permitted on both the
+/// request and response side): the 32-byte ids/hashes, plus the public swap schema fields —
+/// `sell_token`/`buy_token` (20-byte ERC-20 contract addresses the caller supplied) and `uid`
+/// (the 56-byte CoW order id). These are public, never secret; only key/passphrase shapes in
+/// OTHER fields are findings.
+const HEX_ALLOWED_FIELDS: &[&str] = &["tx_hash", "request_id", "sell_token", "buy_token", "uid"];
 
 /// Scan one free-text string for secret-shaped material. Returns findings (empty = clean).
 pub fn scan_text(field: &str, text: &str, findings: &mut Vec<String>) {

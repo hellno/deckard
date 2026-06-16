@@ -1,4 +1,4 @@
-//! The MCP stdio server: the `mcp.v0.1` launch profile — exactly **6 tools**, every name
+//! The MCP stdio server: the `mcp.v0.1` launch profile — exactly **9 tools**, every name
 //! `deckard_`-prefixed (Claude Desktop's tool namespace is shared across servers; a bare
 //! `execute` invites cross-server confusion). Raw `propose` and `simulate` are deliberately
 //! NOT exposed (cut at the launch gate): app-native review is the v0.1 simulation surface,
@@ -31,6 +31,35 @@ pub struct ShieldArgs {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ExecuteArgs {
     /// The 32-byte 0x-hex request id returned by deckard_shield.
+    pub request_id: String,
+}
+
+/// `deckard_swap_quote` input — read-only pricing.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SwapQuoteArgs {
+    /// The 0x-hex address of the token to SELL.
+    pub sell_token: String,
+    /// The 0x-hex address of the token to BUY.
+    pub buy_token: String,
+    /// Amount to sell, a decimal ETH-units string like "0.05" (the sell token's own units).
+    pub sell_amount_eth: String,
+}
+
+/// `deckard_swap` input — propose a swap (always needs human approval).
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SwapArgs {
+    /// The 0x-hex address of the token to SELL.
+    pub sell_token: String,
+    /// The 0x-hex address of the token to BUY.
+    pub buy_token: String,
+    /// Amount to sell, a decimal ETH-units string like "0.05" (the sell token's own units).
+    pub sell_amount_eth: String,
+}
+
+/// `deckard_submit_order` input.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SubmitOrderArgs {
+    /// The 32-byte 0x-hex request id returned by deckard_swap.
     pub request_id: String,
 }
 
@@ -154,6 +183,69 @@ impl DeckardMcp {
     async fn revoke_all(&self) -> Result<CallToolResult, McpError> {
         render(self.sidecar.revoke_all().await)
     }
+
+    #[tool(
+        name = "deckard_swap_quote",
+        description = "Price a CoW Protocol swap WITHOUT proposing it: given sell_token, \
+                       buy_token (0x-hex addresses) and sell_amount_eth (a decimal string), \
+                       return the gross sell amount, the minimum you receive after slippage \
+                       (buy_amount_min), the fee, valid_to, and the request_id the order WOULD \
+                       get. Read-only, no approval, no daemon write. On the demo fork the quote \
+                       is simulated (simulated:true). Next: deckard_swap to actually propose it."
+    )]
+    async fn swap_quote(
+        &self,
+        args: Parameters<SwapQuoteArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        render(
+            self.sidecar
+                .swap_quote(
+                    &args.0.sell_token,
+                    &args.0.buy_token,
+                    &args.0.sell_amount_eth,
+                )
+                .await,
+        )
+    }
+
+    #[tool(
+        name = "deckard_swap",
+        description = "PROPOSE a CoW Protocol swap (sell_token → buy_token for \
+                       sell_amount_eth). Signs nothing and broadcasts nothing. A swap ALWAYS \
+                       comes back needs_approval with a request_id — a human must approve it in \
+                       the Deckard app first (the approval UI is not in this alpha; a human \
+                       approves via hold-to-confirm). Then call deckard_submit_order with the \
+                       request_id. You cannot approve your own swap. Precondition: app running \
+                       + wallet unlocked + the sell token held."
+    )]
+    async fn swap(&self, args: Parameters<SwapArgs>) -> Result<CallToolResult, McpError> {
+        render(
+            self.sidecar
+                .swap(
+                    &args.0.sell_token,
+                    &args.0.buy_token,
+                    &args.0.sell_amount_eth,
+                )
+                .await,
+        )
+    }
+
+    #[tool(
+        name = "deckard_submit_order",
+        description = "Sign + submit a previously-approved swap order (the request_id from \
+                       deckard_swap) to the CoW orderbook. The daemon signs the stored order \
+                       (EIP-712, key-less here); this sidecar POSTs it. If the order is not \
+                       approved yet you get not_approved — a human approves in the Deckard app \
+                       first. Success returns the order uid. On the demo fork the fill is \
+                       simulated (simulated:true) since the live orderbook can't accept a fork \
+                       order."
+    )]
+    async fn submit_order(
+        &self,
+        args: Parameters<SubmitOrderArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        render(self.sidecar.submit_order(&args.0.request_id).await)
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -164,7 +256,9 @@ impl ServerHandler for DeckardMcp {
                  daemon. This server holds no keys and cannot sign; every write is an \
                  intent the daemon checks against a human-owned policy. Typical flow: \
                  deckard_policy_get (know the fence) → deckard_wallet_balance → \
-                 deckard_shield (propose) → deckard_execute (broadcast). \
+                 deckard_shield (propose) → deckard_execute (broadcast). Swap flow: \
+                 deckard_swap_quote (price) → deckard_swap (propose) → a human approves in \
+                 the Deckard app → deckard_submit_order (sign + submit to CoW). \
                  deckard_revoke_all is STOP, the panic brake. Preconditions for everything: \
                  the Deckard desktop app is running and the wallet is unlocked. Never ask \
                  the user for wallet credentials of any kind — no tool here accepts them.",

@@ -3,10 +3,11 @@
 > The agent-facing surface for Deckard, plus the freeze-first `Intent`/`Decision`/daemon-socket contract every other build doc codes against · serves demo beat 2 (agent shields on receive via MCP) + acceptance step "MCP sidecar registered in Claude Desktop, secrets never in transcript" (deliverable #6) · status (spec). Part of the Deckard build docs.
 
 > **⚠ AMENDED AT LAUNCH — the `mcp.v0.1` profile (2026-06-10, per the approved
-> open-source-demo plan).** The shipped surface (`crates/deckard-mcp`) is **6 tools**, every
+> open-source-demo plan).** The shipped surface (`crates/deckard-mcp`) is **9 tools**, every
 > name `deckard_`-prefixed for Claude Desktop's shared tool namespace:
 > `deckard_wallet_address`, `deckard_wallet_balance`, `deckard_policy_get`,
-> `deckard_shield`, `deckard_execute`, `deckard_revoke_all`. Two tools specced below were
+> `deckard_shield`, `deckard_execute`, `deckard_swap_quote`, `deckard_swap`,
+> `deckard_submit_order`, `deckard_revoke_all`. Two tools specced below were
 > **cut from launch**: raw **`propose`** (security: it would let an untrusted client submit
 > an arbitrary `Intent`, and the demo needs only `shield`+`execute`; a daemon-side
 > `Shield.to == RelayAdapt` pre-check landed as defense-in-depth regardless) and
@@ -14,7 +15,7 @@
 > post-launch home is the daemon, so the approval card and the agent see identical
 > numbers). `wallet_balance` is public-only in v0.1: the shielded field is the honest
 > string "unavailable — read it in the Deckard app (v1 limitation)", never a fake 0.
-> Acceptance T1 asserts exactly the 6-tool profile; T3/T4 run via an over-cap `shield`;
+> Acceptance T1 asserts exactly the 9-tool profile; T3/T4 run via an over-cap `shield`;
 > T5 is dropped with `simulate`; T9 is a structural allowlist transcript walk with a
 > seeded canary. The rest of this doc is kept as written (the frozen wire contract is
 > unchanged) — read it through that lens.

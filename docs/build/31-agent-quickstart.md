@@ -57,7 +57,7 @@ config format. There is nothing Claude-specific about it:
 - **env (demo mode only):** `DECKARD_SOCKET_PATH`, `DECKARD_CONFIG_DIR`, `DECKARD_CHAIN_ID`,
   `DECKARD_RPC_URL` — exactly as printed by `install --demo`; no secrets.
 
-## The 6 tools
+## The 9 tools
 
 This is the complete `mcp.v0.1` surface. There is deliberately no raw "propose" and no
 "approve" tool — you cannot submit an arbitrary transaction or approve your own request.
@@ -69,6 +69,9 @@ This is the complete `mcp.v0.1` surface. There is deliberately no raw "propose" 
 | `deckard_policy_get` | Read the policy fence (fields below). **Call this first.** | none |
 | `deckard_shield` | **Propose** shielding `amount_eth` (a decimal ETH **string**, e.g. `"0.02"`) to the wallet's own private address. Signs nothing. | creates a pending request |
 | `deckard_execute` | Sign + broadcast a previously allowed `request_id`. Policy is re-checked at sign time. | broadcasts a transaction |
+| `deckard_swap_quote` | **Price** a swap (sell_token → buy_token for sell_amount_eth) without proposing it; returns the price, min-receive, and the request_id it would get. | none |
+| `deckard_swap` | **Propose** a swap. Always returns `needs_approval` + a request_id; a human approves in the Deckard app. Signs nothing. | creates a pending order |
+| `deckard_submit_order` | Sign + submit an **approved** swap order (the request_id from `deckard_swap`) to the CoW orderbook. | submits an order |
 | `deckard_revoke_all` | **STOP — the panic brake.** Zeroizes the signing key, locks the daemon, denies every in-flight request. | irreversible for the session |
 
 Semantics that matter:
@@ -93,6 +96,18 @@ The happy path, in order:
 deckard_policy_get  →  deckard_wallet_balance  →  deckard_shield("0.02")  →  deckard_execute(request_id)
    know the fence        know the funds            decision: allow            status: broadcast + tx_hash
 ```
+
+The swap flow has a human step in the middle — you cannot approve your own swap:
+
+```
+deckard_swap_quote  →  deckard_swap  →  (human approves in app)  →  deckard_submit_order
+   price + min-receive    needs_approval     hold-to-confirm            uid (submitted)
+```
+
+`deckard_swap` always comes back `needs_approval` with a `request_id`. A human approves it
+in the Deckard app (hold-to-confirm) over the private channel the sidecar cannot reach; only
+then does `deckard_submit_order` sign and submit. On the demo fork the price and the fill are
+a labelled simulation (`simulated: true`) — the live CoW orderbook can't accept a fork order.
 
 ## The policy fields you will see
 

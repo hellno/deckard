@@ -179,7 +179,11 @@ demo:
     DECKARD_RPC_URL="{{demo_rpc_url}}" \
     DECKARD_VERIFIED_READS=0 \
     DECKARD_DEMO_FORK_BLOCK="${FORK_BLOCK}" \
+    DECKARD_DEMO_SWAP_STUB=1 \
         cargo run
+    # DECKARD_DEMO_SWAP_STUB=1 (on/off flag): a live CoW order can't be accepted from a fork, so
+    # the app's swap flow uses the fixture quote + simulated fill. The fill credits balances on
+    # DECKARD_RPC_URL above (this same anvil) via anvil_setStorageAt.
     # On `cargo run` exit (app closed), the EXIT trap stops anvil.
 
 # No arg: asks the demo daemon for the onboarded wallet's address (needs `just demo` running +
@@ -374,6 +378,24 @@ demo-check:
         echo "demo-check: NOT READY (exit ${RC}) — fix the ✗ items above."
     fi
     exit $RC
+
+# Live-ish swap E2E on a fresh anvil Sepolia fork. A real CoW order can't be accepted from a fork
+# (the live orderbook validates real-Sepolia balances), so this drives the on-fork swap TRUST
+# PATH: propose_order -> human approve (control channel) -> real exact-gross relayer approve
+# broadcast -> sign_order (recovers to the wallet) -> a simulated buy-token fill. The full order
+# submission is the deckard-core stub (used by the app/MCP), not the daemon. Needs anvil + an
+# archive RPC_URL_SEPOLIA (same as `just demo`). Runs the #[ignore]d signerd test; it spawns its
+# own fork, so no DECKARD_DEMO_SWAP_STUB is needed here.
+swap-e2e:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -z "${RPC_URL_SEPOLIA:-}" ]]; then
+        echo "error: RPC_URL_SEPOLIA is not set." >&2
+        echo "  swap-e2e forks Sepolia at block {{demo_fork_block}}; set a free archive endpoint:" >&2
+        echo "    export RPC_URL_SEPOLIA=https://eth-sepolia.g.alchemy.com/v2/<your-key>" >&2
+        exit 1
+    fi
+    cargo test -p deckard-signerd --test swap_e2e -- --ignored --nocapture
 
 # Format + lint the whole workspace (both feature configurations of the app).
 fmt:
