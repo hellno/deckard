@@ -1,29 +1,20 @@
-//! Shield — the privacy hero's trigger flow (T5). Three states over one centered card:
-//! **compose** (amount + 0zk recipient) → **review** (a clear-signing card: amount /
-//! recipient / 0.25% fee + the three honesty lines + a deliberate hold-to-confirm) →
-//! **done** (the deposit is broadcast and on its way to a private note).
+//! Shield — the privacy hero's trigger flow (T5)'s [`CommitView`] descriptor. The actual
+//! compose → review → done rendering lives in `commit_view.rs` (the generic renderer shared with
+//! Send); this file is now just the byte-for-byte table of Shield's copy, button ids, the heading
+//! glyph, the fee/net money rows, the 3-way conditional compose hint, and the handler hooks.
 //!
-//! The honesty + deliberate-hold model is DESIGN's clear-signing engine (plain language,
-//! exact mono figures, danger early, confirm is a hold never a tap). The hold-to-confirm is
-//! hand-built (no existing widget): `on_mouse_down`/`up` drive an epoch-guarded timer in
-//! `shell.rs`, and an amber `theme::amber_tint` fill-sweep animates over the same
-//! `SHIELD_HOLD` span so the bar fills exactly as the deposit signs.
+//! A shield carries a Railgun fee and a private side — so `extra_rows` holds the 0.25% fee row +
+//! the net "you'll receive (private)" line, the compose hint is the 3-way conditional line (own
+//! 0zk address vs double-check vs enter), and the honesty surface has three lines. The heading
+//! glyph is the neutral low-chroma "shield / private" tone (privacy sits off the cyan/agent +
+//! amber/human actor axis; the human signal lives on the amber hold-to-confirm, not the heading).
 
-use gpui::{
-    div, px, relative, Animation, AnimationExt, ClipboardItem, Context, FontWeight,
-    InteractiveElement, IntoElement, MouseButton, ParentElement, Styled,
-};
-use gpui_component::{
-    button::{Button, ButtonVariants},
-    h_flex,
-    input::Input,
-    v_flex, ActiveTheme, Disableable, Icon, IconName,
-};
+use gpui::Context;
 
 use deckard_core::U256;
 
-use crate::money::money;
-use crate::shell::{Shell, ShieldProposal, Surface, SHIELD_HOLD};
+use crate::commit_view::{CommitView, HonestyLine, MoneyRow};
+use crate::shell::{Shell, Surface};
 use crate::theme;
 
 /// The Railgun shield fee, 25 bps (0.25%) — matches `deckard_core::shield`'s on-chain
@@ -32,454 +23,120 @@ fn shield_fee(value: U256) -> U256 {
     value * U256::from(25u64) / U256::from(10_000u64)
 }
 
-/// Middle-truncate a long address (0zk… / 0x…) for a tight row.
-fn short_mid(s: &str) -> String {
-    if s.len() >= 16 {
-        format!("{}…{}", &s[..10], &s[s.len() - 6..])
+/// The net the recipient receives after the Railgun fee (gross − fee). Mirrors the old
+/// `render_shield_review`'s `gross.saturating_sub(fee)`.
+fn shield_net(value: U256) -> U256 {
+    value.saturating_sub(shield_fee(value))
+}
+
+/// The Shield surface descriptor. Reproduces the shipped Shield flow (T5) EXACTLY: same strings,
+/// button ids, layout, the fee + net rows, the three honesty lines, the 3-way compose hint, and
+/// the amber hold-to-confirm. Routed from `Shell::render` via `render_commit(&SHIELD_VIEW, cx)`.
+pub static SHIELD_VIEW: CommitView = CommitView {
+    // The shield flow's live state + the neutral "shield / private" heading glyph.
+    flow: shield_flow,
+    glyph_tone: theme::shield,
+
+    // --- compose ---
+    compose_title: "Shield to private",
+    compose_subtitle:
+        "Move public ETH into a Railgun private balance. The deposit itself is visible on Ethereum; the balance after is not.",
+    recipient_label: "Recipient (your 0zk address)",
+    review_button_id: "shield-review",
+    review_label: "Review deposit",
+    cancel_button_id: "shield-cancel",
+    // The hint is conditional (3-way), driven by `shield_compose_hint`; no static line.
+    compose_hint: None,
+    compose_hint_dynamic: Some(shield_compose_hint),
+
+    // --- review ---
+    review_title: "Review deposit",
+    review_subtitle: "Confirm what leaves, where it goes, and the fee. Hold to shield.",
+    // The Railgun fee + the net private receipt, computed from the proposal's gross value.
+    extra_rows: &[
+        MoneyRow {
+            label: "Railgun fee · 0.25%",
+            compute: shield_fee,
+        },
+        MoneyRow {
+            label: "You'll receive (private)",
+            compute: shield_net,
+        },
+    ],
+    honesty: &[
+        HonestyLine {
+            text: "This deposit is public on Ethereum.",
+            emphasized: true,
+        },
+        HonestyLine {
+            text: "Avoid round or unusual amounts.",
+            emphasized: true,
+        },
+        HonestyLine {
+            text: "A 0.25% Railgun fee is deducted; your private balance will read slightly less.",
+            emphasized: false,
+        },
+    ],
+    hold_id: "shield-hold",
+    hold_fill_id: "shield-fill",
+    hold_label_idle: "Hold to shield",
+    hold_label_holding: "Keep holding…",
+    hold_label_busy: "Shielding…",
+    edit_button_id: "shield-edit",
+
+    // --- done ---
+    done_title: "Deposit broadcast",
+    done_body:
+        "Your deposit is on its way to a private balance. It becomes spendable after on-chain confirmation and a private sync.",
+    copy_button_id: "shield-copy-tx",
+    done_button_id: "shield-done",
+
+    // --- handlers (the existing `impl Shell` shield methods) ---
+    on_review: review_shield,
+    on_edit: open_shield,
+    on_cancel: open_home,
+    on_done: open_home,
+    on_hold_start: shield_hold_start,
+    on_hold_cancel: shield_hold_cancel,
+};
+
+/// Re-acquire the shield flow's state from the shell (the descriptor's `flow` selector).
+fn shield_flow(shell: &Shell) -> &crate::commit_flow::CommitFlow {
+    &shell.shield
+}
+
+/// The 3-way conditional compose hint: only call the recipient "your own 0zk address" when it
+/// actually matches the wallet's auto-filled address — a user-typed/edited recipient gets neutral
+/// copy so the line never misrepresents where the deposit is going. Mirrors the old
+/// `render_shield_compose`'s inline block exactly. `recipient_raw` is the recipient text the
+/// renderer already read from the input.
+fn shield_compose_hint(shell: &Shell, recipient_raw: &str) -> &'static str {
+    let recipient = recipient_raw.trim();
+    let is_own_address = shell.railgun_address.as_deref().map(str::trim) == Some(recipient);
+    if recipient.is_empty() {
+        "Enter the 0zk address that will receive the private balance."
+    } else if is_own_address {
+        "Pre-filled with your own 0zk address — edit it to shield to a different recipient."
     } else {
-        s.to_string()
+        "Shielding to the 0zk address above — double-check it before you continue."
     }
 }
 
-impl Shell {
-    /// Dispatch to the active shield state: done (broadcast) → review (proposed) → compose.
-    pub fn render_shield(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        if let Some(tx) = self.shield_tx {
-            return self
-                .render_shield_done(tx.to_string(), cx)
-                .into_any_element();
-        }
-        if let Some(proposal) = self.shield_proposal.clone() {
-            return self.render_shield_review(proposal, cx).into_any_element();
-        }
-        self.render_shield_compose(cx).into_any_element()
-    }
-
-    /// Compose: amount (ETH) + 0zk recipient, then Review. The shield glyph is a neutral,
-    /// low-chroma mark (DESIGN: private ≠ cyan/agent and ≠ amber/human — it stays off the
-    /// actor axis).
-    fn render_shield_compose(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let muted = theme.muted_foreground;
-        let busy = self.shield_busy;
-
-        // Validity drives the Review button's disabled state (DESIGN: disable a primary
-        // action on incomplete/invalid input). Re-evaluated live via the input subscriptions.
-        let amount_raw = self.shield_amount.read(cx).value().to_string();
-        let recipient_raw = self.shield_recipient.read(cx).value().to_string();
-        let can_review = crate::signer::parse_eth_to_wei(&amount_raw)
-            .map(|w| w > U256::ZERO)
-            .unwrap_or(false)
-            && !recipient_raw.trim().is_empty();
-
-        self.shield_shell(
-            v_flex()
-                .w_full()
-                .gap_5()
-                .child(self.shield_heading(
-                    "Shield to private",
-                    "Move public ETH into a Railgun private balance. The deposit itself is visible on Ethereum; the balance after is not.",
-                    cx,
-                ))
-                .child(
-                    v_flex()
-                        .w_full()
-                        .gap_2()
-                        .child(field_label("Amount", muted))
-                        .child(Input::new(&self.shield_amount).w_full()),
-                )
-                .child(
-                    v_flex()
-                        .w_full()
-                        .gap_2()
-                        .child(field_label("Recipient (your 0zk address)", muted))
-                        .child(Input::new(&self.shield_recipient).w_full()),
-                )
-                .children(self.shield_error.as_ref().map(|e| error_line(e, cx)))
-                .child(
-                    h_flex()
-                        .w_full()
-                        .gap_2()
-                        .child(
-                            Button::new("shield-review")
-                                .primary()
-                                .label(if busy { "Reviewing…" } else { "Review deposit" })
-                                .disabled(busy || !can_review)
-                                .on_click(cx.listener(|this, _, _, cx| this.review_shield(cx))),
-                        )
-                        .child(
-                            Button::new("shield-cancel")
-                                .ghost()
-                                .label("Cancel")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.open(Surface::Home, cx)
-                                })),
-                        ),
-                )
-                .child(
-                    // Only call the recipient "your own 0zk address" when it actually matches the
-                    // wallet's auto-filled address — a user-typed/edited recipient gets neutral copy
-                    // so the line never misrepresents where the deposit is going.
-                    div().text_xs().text_color(muted).child({
-                        let recipient = recipient_raw.trim();
-                        let is_own_address =
-                            self.railgun_address.as_deref().map(str::trim) == Some(recipient);
-                        if recipient.is_empty() {
-                            "Enter the 0zk address that will receive the private balance."
-                        } else if is_own_address {
-                            "Pre-filled with your own 0zk address — edit it to shield to a different recipient."
-                        } else {
-                            "Shielding to the 0zk address above — double-check it before you continue."
-                        }
-                    }),
-                )
-                .into_any_element(),
-        )
-    }
-
-    /// Review: the clear-signing card (amount / recipient / fee / net) + the three honesty
-    /// lines + a deliberate hold-to-confirm. `intent` carries the gross (pre-fee) value.
-    fn render_shield_review(
-        &self,
-        proposal: ShieldProposal,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let theme = cx.theme();
-        let fg = theme.foreground;
-        let muted = theme.muted_foreground;
-        let border = theme.border;
-        let surface = theme.secondary;
-        let mono = theme.mono_font_family.clone();
-
-        // Render from the proposal SNAPSHOT — the amount + recipient that are actually inside
-        // the signed intent — never the live input (which the user could have since edited).
-        let gross = proposal.intent.value;
-        let fee = shield_fee(gross);
-        let net = gross.saturating_sub(fee);
-        let recipient = proposal.recipient.clone();
-
-        // One key/value row: label left (muted), value right (mono-for-money or mono text).
-        let kv_money = |label: &'static str, wei: U256| {
-            h_flex()
-                .w_full()
-                .justify_between()
-                .items_center()
-                .py_1p5()
-                .child(div().text_sm().text_color(muted).child(label))
-                .child(div().text_sm().child(money(
-                    wei,
-                    18,
-                    6,
-                    Some("ETH"),
-                    false,
-                    mono.clone(),
-                    fg,
-                    muted,
-                )))
-        };
-
-        self.shield_shell(
-            v_flex()
-                .w_full()
-                .gap_4()
-                .child(self.shield_heading(
-                    "Review deposit",
-                    "Confirm what leaves, where it goes, and the fee. Hold to shield.",
-                    cx,
-                ))
-                // The clear-signing card: one frame, no interior grid lines.
-                .child(
-                    v_flex()
-                        .w_full()
-                        .p_4()
-                        .rounded_lg()
-                        .border_1()
-                        .border_color(border)
-                        .bg(surface)
-                        .child(kv_money("Amount", gross))
-                        .child(
-                            h_flex()
-                                .w_full()
-                                .justify_between()
-                                .items_center()
-                                .py_1p5()
-                                .child(div().text_sm().text_color(muted).child("To"))
-                                .child(
-                                    div()
-                                        .font_family(mono.clone())
-                                        .text_sm()
-                                        .text_color(fg)
-                                        .child(short_mid(recipient.trim())),
-                                ),
-                        )
-                        .child(kv_money("Railgun fee · 0.25%", fee))
-                        .child(kv_money("You'll receive (private)", net)),
-                )
-                .child(self.shield_honesty(cx))
-                .children(self.shield_error.as_ref().map(|e| error_line(e, cx)))
-                .child(self.hold_to_confirm(cx))
-                .child(
-                    Button::new("shield-edit")
-                        .ghost()
-                        .w_full()
-                        .label("Edit")
-                        .on_click(cx.listener(|this, _, _, cx| this.open_shield(cx))),
-                )
-                .into_any_element(),
-        )
-    }
-
-    /// Done: the deposit broadcast — on its way to a private note (reassurance copy mirrors
-    /// `ShieldStatus`). The full lifecycle drive lands in Wave 2.
-    fn render_shield_done(&self, tx: String, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let fg = theme.foreground;
-        let muted = theme.muted_foreground;
-        let border = theme.border;
-        let surface = theme.secondary;
-        let success = theme.success;
-        let mono = theme.mono_font_family.clone();
-
-        self.shield_shell(
-            v_flex()
-                .w_full()
-                .items_center()
-                .gap_4()
-                .child(
-                    Icon::new(IconName::CircleCheck)
-                        .text_color(success)
-                        .flex_shrink_0(),
-                )
-                .child(
-                    div()
-                        .text_lg()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(fg)
-                        .child("Deposit broadcast"),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(muted)
-                        .text_center()
-                        .child("Your deposit is on its way to a private balance. It becomes spendable after on-chain confirmation and a private sync."),
-                )
-                .child(
-                    div()
-                        .w_full()
-                        .px_3()
-                        .py_2()
-                        .rounded_lg()
-                        .border_1()
-                        .border_color(border)
-                        .bg(surface)
-                        .font_family(mono)
-                        .text_xs()
-                        .text_color(muted)
-                        .child(short_mid(&tx)),
-                )
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(
-                            Button::new("shield-copy-tx")
-                                .ghost()
-                                .label("Copy tx hash")
-                                .on_click(cx.listener(move |_, _, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(tx.clone()));
-                                })),
-                        )
-                        .child(
-                            Button::new("shield-done")
-                                .primary()
-                                .label("Done")
-                                .on_click(cx.listener(|this, _, _, cx| this.open(Surface::Home, cx))),
-                        ),
-                )
-                .into_any_element(),
-        )
-    }
-
-    /// The three honesty lines in a calm neutral surface (no keyline).
-    fn shield_honesty(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let fg = theme.foreground;
-        let muted = theme.muted_foreground;
-        let surface = theme.secondary;
-
-        v_flex()
-            .w_full()
-            .gap_1p5()
-            .px_3()
-            .py_2p5()
-            .rounded_lg()
-            .bg(surface)
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(fg)
-                    .child("This deposit is public on Ethereum."),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(fg)
-                    .child("Avoid round or unusual amounts."),
-            )
-            .child(div().text_xs().text_color(muted).child(
-                "A 0.25% Railgun fee is deducted; your private balance will read slightly less.",
-            ))
-    }
-
-    /// The hand-built hold-to-confirm: an amber fill sweeps the button width over
-    /// [`SHIELD_HOLD`] while held; completing the hold fires `confirm_shield`, releasing
-    /// early resets it. The label sits above the sweep.
-    fn hold_to_confirm(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let fg = theme.foreground;
-        let border = theme.border;
-        let surface = theme.secondary;
-        let amber_tint = theme::amber_tint(theme.is_dark());
-        let holding = self.shield_holding;
-        let busy = self.shield_busy;
-
-        let label = if busy {
-            "Shielding…"
-        } else if holding {
-            "Keep holding…"
-        } else {
-            "Hold to shield"
-        };
-
-        // The amber fill: 0→full width over SHIELD_HOLD while holding; empty otherwise.
-        let fill = if holding {
-            div()
-                .absolute()
-                .left_0()
-                .top_0()
-                .h_full()
-                .bg(amber_tint)
-                .with_animation("shield-fill", Animation::new(SHIELD_HOLD), |el, delta| {
-                    el.w(relative(delta))
-                })
-                .into_any_element()
-        } else {
-            div()
-                .absolute()
-                .left_0()
-                .top_0()
-                .h_full()
-                .w(relative(0.0))
-                .into_any_element()
-        };
-
-        div()
-            .id("shield-hold")
-            .relative()
-            .overflow_hidden()
-            .w_full()
-            .h(px(44.0))
-            .rounded_md()
-            .border_1()
-            .border_color(border)
-            .bg(surface)
-            .cursor_pointer()
-            .child(fill)
-            .child(
-                div()
-                    .relative()
-                    .size_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_sm()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(fg)
-                    .child(label),
-            )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| this.shield_hold_start(cx)),
-            )
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| this.shield_hold_cancel(cx)),
-            )
-            .on_mouse_up_out(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| this.shield_hold_cancel(cx)),
-            )
-    }
-
-    /// The shared centered shell for every shield state (mirrors `render_receive`'s layout).
-    fn shield_shell(&self, inner: gpui::AnyElement) -> impl IntoElement {
-        div()
-            .flex_1()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .p_8()
-            .child(v_flex().w(px(460.0)).items_start().child(inner))
-    }
-
-    /// The shield heading: a neutral low-chroma shield glyph + H1 + muted subtitle. The
-    /// glyph is deliberately NOT cyan/amber — privacy sits off the actor axis (DESIGN).
-    fn shield_heading(
-        &self,
-        title: &str,
-        subtitle: &str,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let theme = cx.theme();
-        let fg = theme.foreground;
-        let muted = theme.muted_foreground;
-        let shield_tone = theme::shield(theme.is_dark());
-
-        h_flex()
-            .w_full()
-            .items_start()
-            .gap_3()
-            // A small neutral shield mark (no shield icon ships in the kit): a rounded
-            // square in the low-chroma shield tone.
-            .child(
-                div()
-                    .size(px(28.0))
-                    .rounded(px(6.0))
-                    .bg(shield_tone)
-                    .flex_shrink_0(),
-            )
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_xl()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(fg)
-                            .child(title.to_string()),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(muted)
-                            .child(subtitle.to_string()),
-                    ),
-            )
-    }
+// Thin free-function adapters so the descriptor's `fn(&mut Shell, &mut Context<Shell>)` slots can
+// name the surface's handlers (a `&'static` descriptor can't hold a closure, and the methods take
+// `&mut self`). Each is a one-line forward to the existing handler.
+fn review_shield(shell: &mut Shell, cx: &mut Context<Shell>) {
+    shell.review_shield(cx);
 }
-
-/// A tiny uppercase field label (matches the sidebar/section label treatment).
-fn field_label(text: &'static str, muted: gpui::Hsla) -> impl IntoElement {
-    div().text_xs().text_color(muted).child(text)
+fn open_shield(shell: &mut Shell, cx: &mut Context<Shell>) {
+    shell.open_shield(cx);
 }
-
-/// A one-line shield error, in `danger`.
-fn error_line(msg: &str, cx: &mut Context<Shell>) -> impl IntoElement {
-    div()
-        .text_sm()
-        .text_color(cx.theme().danger)
-        .child(format!("⚠ {msg}"))
+fn open_home(shell: &mut Shell, cx: &mut Context<Shell>) {
+    shell.open(Surface::Home, cx);
+}
+fn shield_hold_start(shell: &mut Shell, cx: &mut Context<Shell>) {
+    shell.shield_hold_start(cx);
+}
+fn shield_hold_cancel(shell: &mut Shell, cx: &mut Context<Shell>) {
+    shell.shield_hold_cancel(cx);
 }

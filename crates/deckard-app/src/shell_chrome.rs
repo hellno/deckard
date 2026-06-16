@@ -71,6 +71,7 @@ impl Shell {
             Surface::Send => "Send",
             Surface::Shield => "Shield",
             Surface::Activity => "Activity",
+            Surface::Swap => "Swap",
             Surface::Home => match self.selection {
                 Selection::Project => "Personal",
                 Selection::Wallet => "Wallet",

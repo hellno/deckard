@@ -461,6 +461,96 @@ pub async fn get_account_orders(
 }
 
 // ---------------------------------------------------------------------------
+// CowOrderbook — a thin handle that OWNS a `reqwest::Client` so the app can drive the
+// orderbook WITHOUT naming `reqwest` itself. Each method takes high-level args plus the
+// orderbook `base` URL and delegates to the free functions above (which the tests still use
+// directly). Additive: the free functions are unchanged.
+// ---------------------------------------------------------------------------
+
+/// A reusable CoW orderbook client. Builds one `reqwest::Client` (connection-pool reuse across
+/// calls) and exposes the orderbook operations the app needs, taking only high-level arguments
+/// and the orderbook `base` URL — so callers never depend on `reqwest` directly.
+#[derive(Clone, Debug)]
+pub struct CowOrderbook {
+    client: reqwest::Client,
+}
+
+impl Default for CowOrderbook {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CowOrderbook {
+    /// Build a new orderbook handle with a default `reqwest::Client`.
+    pub fn new() -> Self {
+        Self {
+            client: reqwest::Client::new(),
+        }
+    }
+
+    /// `POST {base}/api/v1/quote` → priced order parameters.
+    pub async fn quote(&self, base: &str, req: &QuoteRequest) -> anyhow::Result<QuoteResponse> {
+        post_quote(&self.client, base, req).await
+    }
+
+    /// `PUT {base}/api/v1/app_data` — register the full app-data doc (idempotent on the backend).
+    pub async fn put_app_data(&self, base: &str, doc: &str) -> anyhow::Result<()> {
+        put_app_data(&self.client, base, doc).await
+    }
+
+    /// `POST {base}/api/v1/orders` → the created order's uid (0x-hex string).
+    pub async fn submit(&self, base: &str, order: &OrderCreation) -> anyhow::Result<String> {
+        post_order(&self.client, base, order).await
+    }
+
+    /// `GET {base}/api/v1/orders/{uid}/status` → the lifecycle status.
+    pub async fn status(&self, base: &str, uid: &str) -> anyhow::Result<OrderStatusResponse> {
+        get_order_status(&self.client, base, uid).await
+    }
+
+    /// `GET {base}/api/v1/account/{owner}/orders` → the account's recent orders.
+    pub async fn account_orders(
+        &self,
+        base: &str,
+        owner: Address,
+    ) -> anyhow::Result<Vec<AccountOrder>> {
+        get_account_orders(&self.client, base, owner).await
+    }
+
+    /// Blocking [`Self::quote`] for callers without a tokio reactor (the GPUI app runs on its own
+    /// executor; reqwest/hickory require a tokio runtime). Bridges through a dedicated current-thread
+    /// runtime — see [`block_on_orderbook`].
+    pub fn quote_blocking(&self, base: &str, req: &QuoteRequest) -> anyhow::Result<QuoteResponse> {
+        block_on_orderbook(self.quote(base, req))
+    }
+
+    /// Blocking [`Self::put_app_data`] — see [`Self::quote_blocking`].
+    pub fn put_app_data_blocking(&self, base: &str, doc: &str) -> anyhow::Result<()> {
+        block_on_orderbook(self.put_app_data(base, doc))
+    }
+
+    /// Blocking [`Self::submit`] — see [`Self::quote_blocking`].
+    pub fn submit_blocking(&self, base: &str, order: &OrderCreation) -> anyhow::Result<String> {
+        block_on_orderbook(self.submit(base, order))
+    }
+}
+
+/// Drive a CoW orderbook future to completion on a dedicated current-thread tokio runtime. The CoW
+/// HTTP client (reqwest/hickory DNS) requires a tokio reactor; callers on a non-tokio executor (the
+/// GPUI app, whose worker model keeps the UI off tokio — see `eth.rs`) use the `*_blocking` methods,
+/// which bridge through here. Returns an error (never panics) if the runtime can't be built. CoW
+/// calls are user-initiated and infrequent, so a fresh current-thread runtime per call is fine.
+fn block_on_orderbook<T, F: std::future::Future<Output = anyhow::Result<T>>>(
+    fut: F,
+) -> anyhow::Result<T> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(fut)
+}
+
+// ---------------------------------------------------------------------------
 // U256 decimal-string (de)serialization. TokenAmount on the CoW wire is a decimal string
 // (NOT 0x-hex), so alloy's default U256 serde (which is 0x-hex) is wrong here.
 // ---------------------------------------------------------------------------
@@ -748,6 +838,15 @@ mod tests {
             parse_order_uid("0xdeadbeef"),
             Err(CowError::Decode(_))
         ));
+    }
+
+    /// The owning `CowOrderbook` handle constructs via `new`/`Default` without a network call,
+    /// so the app can build one cheaply and hold it. (Round-trips are covered by the live
+    /// `#[ignore]`d test and Package D's helper tests.)
+    #[test]
+    fn cow_orderbook_constructs() {
+        let _ob = CowOrderbook::new();
+        let _default = CowOrderbook::default();
     }
 
     /// QuoteRequest serializes amounts as decimal strings (TokenAmount), not 0x-hex.

@@ -9,6 +9,9 @@
 
 mod activity_view;
 mod capture;
+mod commit_flow;
+mod commit_view;
+mod errors;
 mod money;
 mod onboarding;
 mod palette;
@@ -22,6 +25,8 @@ mod shell;
 mod shell_chrome;
 mod shield_view;
 mod signer;
+mod swap;
+mod swap_view;
 mod theme;
 #[cfg(feature = "tray")]
 mod tray;

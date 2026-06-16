@@ -6,7 +6,8 @@
 use deckard_core::{format_amount, EthProvider, DEFAULT_RPC};
 
 fn main() {
-    let eth = EthProvider::spawn(DEFAULT_RPC);
+    // DEFAULT_RPC is a public mainnet endpoint, so read against mainnet (chain 1).
+    let eth = EthProvider::spawn(DEFAULT_RPC, 1);
 
     let name = "vitalik.eth";
     let addr = match eth.resolve_name(name).recv() {
