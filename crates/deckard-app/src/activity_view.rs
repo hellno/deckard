@@ -39,7 +39,9 @@ use gpui::{
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
-    h_flex, v_flex, ActiveTheme, Icon, IconName, Sizable,
+    h_flex,
+    scroll::ScrollableElement,
+    v_flex, ActiveTheme, Icon, IconName, Sizable,
 };
 
 use deckard_contract::{
@@ -306,19 +308,37 @@ impl Shell {
             }
         };
 
-        let mut header = v_flex()
-            .w_full()
-            .gap_4()
-            .child(self.activity_heading(fg, muted, cx));
-        // The post-STOP banner: the key is zeroized; the feed stays visible so the revoke is seen.
-        // (Use the Copy color locals, not `theme`, so its cx borrow doesn't outlive the cx-mutable
-        // `activity_heading`/`activity_group` calls above.)
+        // The heading (with the STOP control) is PINNED — it lives OUTSIDE the scroll region, so
+        // the panic brake is always on screen no matter how far the log scrolls. Only the post-STOP
+        // banner + the feed body scroll beneath it. (Use the Copy color locals, not `theme`, so its
+        // cx borrow doesn't outlive the cx-mutable `activity_heading`/`activity_group` calls above.)
+        let heading = self.activity_heading(fg, muted, cx);
+        let mut scroll_body = v_flex().w_full().gap_4();
         if self.activity_stopped {
-            header = header.child(stopped_banner(danger, raise));
+            scroll_body = scroll_body.child(stopped_banner(danger, raise));
         }
-        header = header.child(body);
+        scroll_body = scroll_body.child(body);
 
-        activity_shell(header.into_any_element())
+        div().flex_1().flex().flex_col().items_center().p_8().child(
+            v_flex()
+                .w(px(760.0))
+                .h_full()
+                .min_h_0()
+                .items_start()
+                .gap_4()
+                .child(heading)
+                .child(
+                    // The scroll lives here (one call site — gpui-component keys the
+                    // ScrollHandle by call site), so the pinned heading never scrolls away.
+                    div()
+                        .id("scroll-activity-body")
+                        .w_full()
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scrollbar()
+                        .child(scroll_body),
+                ),
+        )
     }
 
     /// The page heading row: H1 + a persistent session-scope sub-line on the left, the STOP

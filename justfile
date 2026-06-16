@@ -266,6 +266,18 @@ demo-deposit amount='0.02':
         exit 1
     fi
 
+    # The demo wallet is anvil's PUBLIC account-0 key. On the forked Sepolia it carries an
+    # inherited EIP-7702 delegation (its on-chain code is `0xef0100<delegate>`, set by someone on
+    # real Sepolia using that public key). A plain ETH transfer to a 7702-delegated account runs
+    # the DELEGATE contract instead of crediting the EOA — so the balance never rises and the
+    # agent's "did a deposit arrive?" delta-detector never fires (shields, which only SIGN, still
+    # work). Clear the delegation back to a plain EOA so deposits land. Local-fork only — guarded
+    # by the chain-id≠1 refusal above; `anvil_setCode` is an anvil cheatcode, not a real tx.
+    if [[ -n "$(cast code "${WALLET}" --rpc-url "{{demo_rpc_url}}" 2>/dev/null | sed 's/^0x//')" ]]; then
+        echo "→ clearing an inherited EIP-7702 delegation on ${WALLET} (so the deposit credits the EOA)…"
+        cast rpc anvil_setCode "${WALLET}" 0x --rpc-url "{{demo_rpc_url}}" >/dev/null 2>&1
+    fi
+
     WEI="$(cast to-wei "{{amount}}" ether)"
     echo "→ sending {{amount}} ETH (${WEI} wei) to ${WALLET} on the demo fork (chain ${CHAIN_ID})…"
     cast send "${WALLET}" --value "${WEI}" --private-key "${FUNDER_KEY}" --rpc-url "{{demo_rpc_url}}" >/dev/null

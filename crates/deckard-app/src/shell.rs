@@ -2442,10 +2442,12 @@ impl Render for Shell {
                 // The feed owns the keyboard while it's the active surface: track its focus +
                 // scope j/k/x/Enter/⌘Enter/Esc to `key_context("Activity")` so they never leak to
                 // a global binding behind it.
-                (_, Surface::Activity) => div()
-                    .id("scroll-activity")
+                // Activity owns its OWN scroll INSIDE the feed body (so the heading + STOP stay
+                // pinned — the panic brake must never scroll off screen); this outer just holds the
+                // focus + the j/k/x/Enter/⌘Enter key handling.
+                (_, Surface::Activity) => v_flex()
+                    .id("activity-surface")
                     .size_full()
-                    .overflow_y_scrollbar()
                     .track_focus(&self.activity_focus)
                     .key_context("Activity")
                     .on_key_down(cx.listener(Self::on_activity_key))
