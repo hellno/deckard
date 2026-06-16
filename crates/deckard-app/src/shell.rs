@@ -39,6 +39,9 @@ use crate::{
     ToggleTheme, APP_NAME,
 };
 
+/// Auto-refresh the public wallet balance every this many seconds while the home view is open.
+const BALANCE_POLL_SECS: u64 = 20;
+
 /// How long the user must hold the shield confirm before it signs — the deliberate-gesture
 /// duration (DESIGN: confirm is a hold, never a tap). The amber fill-sweep (`shield_view`)
 /// runs for the same span so the bar fills exactly as the action fires.
@@ -289,6 +292,8 @@ pub struct Shell {
     pub read_status: Option<ReadStatus>,
     /// Latest block height — a liveness/sync indicator for the status line.
     pub synced_block: Option<u64>,
+    /// Handle to the running balance auto-refresh loop; dropped on lock to cancel it.
+    poll_task: Option<gpui::Task<()>>,
     /// Bumped on every `retarget`; a slow ENS resolution checks it before applying so a
     /// stale reply for a since-changed target can't clobber the current view.
     view_epoch: u64,
@@ -609,6 +614,7 @@ impl Shell {
             portfolio_error: None,
             read_status: None,
             synced_block: None,
+            poll_task: None,
             view_epoch: 0,
             current_rpc,
             chain_id,
@@ -659,6 +665,8 @@ impl Shell {
         .detach();
         self.wallet_address = None;
         self.portfolio = None;
+        // Dropping the task cancels the balance auto-refresh loop.
+        self.poll_task = None;
         // Dropping the handle closes its channel → the sync worker thread exits.
         self.shielded = None;
         self.railgun_address = None;
@@ -972,6 +980,7 @@ impl Shell {
         self.retarget(cx);
         self.kick_railgun_grant(cx);
         self.kick_agent_policy(cx);
+        self.start_balance_poll(cx);
     }
 
     /// Fetch the daemon's live policy for the agent home (off the UI thread). Key-less:
@@ -1195,6 +1204,38 @@ impl Shell {
             self.watch_shielded_sync(false, cx);
         }
         cx.notify();
+    }
+
+    /// Auto-refresh the PUBLIC balance while the wallet home is open, so funds that arrive
+    /// out-of-band (a faucet top-up, an incoming transfer) appear without a manual refresh.
+    /// Deliberately lightweight: re-reads ONLY the public balance + block height — the heavier
+    /// shielded resync stays on the explicit refresh (header button / ⌘K command). Stored in
+    /// `poll_task`; dropping it (on lock / re-unlock) cancels the loop. Epoch-fenced as
+    /// belt-and-suspenders against a stale tick after a fast re-unlock.
+    fn start_balance_poll(&mut self, cx: &mut Context<Self>) {
+        let epoch = self.auth_epoch;
+        self.poll_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_secs(BALANCE_POLL_SECS))
+                    .await;
+                let keep = this.update(cx, |this, cx| {
+                    // End the loop once this unlocked session is over (lock / re-unlock bumps the epoch).
+                    if this.auth != AuthStep::Ready || this.auth_epoch != epoch {
+                        return false;
+                    }
+                    // Only while the wallet home is showing, and never stacked on the first load.
+                    if matches!(this.surface, Surface::Home) && !this.portfolio_loading {
+                        Self::kick_portfolio(&this.eth, this.display_address, cx);
+                        Self::kick_block_number(&this.eth, cx);
+                    }
+                    true
+                });
+                if !matches!(keep, Ok(true)) {
+                    break;
+                }
+            }
+        }));
     }
 
     /// Point the portfolio at the wallet, a raw address, or an ENS name (per settings).
@@ -2250,6 +2291,7 @@ impl Shell {
                 self.select(Selection::Wallet, cx);
                 self.open(Surface::Home, cx);
             }
+            "refresh" => self.refresh_portfolio(cx),
             "send" => self.open_send(cx),
             "receive" => self.open(Surface::Receive, cx),
             "shield" => self.open_shield(cx),
