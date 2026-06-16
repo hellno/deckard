@@ -4006,6 +4006,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "deckard-browser-bridge"
+version = "0.0.1-alpha"
+dependencies = [
+ "anyhow",
+ "clap",
+ "deckard-wallet-client",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "deckard-contract"
 version = "0.0.1-alpha"
 dependencies = [
@@ -4052,6 +4064,7 @@ dependencies = [
  "deckard-contract",
  "deckard-core",
  "deckard-signerd",
+ "deckard-wallet-client",
  "rmcp",
  "serde",
  "serde_json",
@@ -4077,6 +4090,19 @@ dependencies = [
  "serde_json",
  "tokio",
  "zeroize",
+]
+
+[[package]]
+name = "deckard-wallet-client"
+version = "0.0.1-alpha"
+dependencies = [
+ "alloy-primitives",
+ "anyhow",
+ "deckard-contract",
+ "deckard-core",
+ "deckard-signerd",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

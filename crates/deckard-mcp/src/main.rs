@@ -3,7 +3,6 @@
 //! key-less [`deckard_mcp::Sidecar`], so nothing is reachable only via Claude.
 
 use clap::{Parser, Subcommand};
-
 use deckard_mcp::{install, secrets, server, Sidecar};
 
 #[derive(Parser)]

@@ -19,7 +19,7 @@
 //! - **STOP is always available:** `deckard_revoke_all` / `deckard-mcp stop`.
 
 pub mod amount;
-pub mod failure;
+pub use deckard_wallet_client::failure;
 pub mod install;
 pub mod secrets;
 pub mod server;
