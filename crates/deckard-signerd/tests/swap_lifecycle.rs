@@ -24,7 +24,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use alloy_primitives::{Address, Signature, B256, U256};
 use deckard_contract::{
-    ApprovalStatus, Decision, RequestId, SignOrderResult, SignerRequest, SignerResponse, SwapOrder,
+    ApprovalStatus, Decision, ProposalOrigin, RequestId, SignOrderResult, SignerRequest,
+    SignerResponse, SwapOrder,
 };
 use deckard_core::{order_digest, APP_DATA_HASH};
 use deckard_signerd::SignerClient;
@@ -77,6 +78,7 @@ async fn propose_order(client: &SignerClient, order: &SwapOrder) -> Decision {
     match client
         .request(&SignerRequest::ProposeOrder {
             order: order.clone(),
+            origin: ProposalOrigin::App,
         })
         .await
         .unwrap()

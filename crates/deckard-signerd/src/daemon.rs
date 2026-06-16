@@ -328,8 +328,8 @@ impl Daemon {
             SignerRequest::RailgunViewGrant { chain_id, index } => {
                 self.railgun_view_grant(chain_id, index)
             }
-            SignerRequest::ProposeOrder { order } => {
-                SignerResponse::Decision(self.propose_order(&order))
+            SignerRequest::ProposeOrder { order, origin } => {
+                SignerResponse::Decision(self.propose_order(&order, origin))
             }
             SignerRequest::SignOrder { request_id } => {
                 SignerResponse::SignOrder(self.sign_order(request_id).await)
@@ -697,7 +697,11 @@ impl Daemon {
     /// never trusted (a client-supplied owner could otherwise make the daemon sign an order
     /// that pays out to someone else). A valid order is ALWAYS `NeedsApproval` (swaps never
     /// auto-allow in v1). The record is stored `Pending` under [`request_id_for_order`].
-    fn propose_order(&mut self, order: &SwapOrder) -> Decision {
+    ///
+    /// `origin` records WHO proposed (a foreground human GUI swap vs an agent) for the inbox/feed
+    /// display only — it never affects the verdict. A user-driven GUI swap passes `App` so the
+    /// order row reads "You", not "Atlas".
+    fn propose_order(&mut self, order: &SwapOrder, origin: ProposalOrigin) -> Decision {
         self.rollover();
         self.expire_stale();
 
@@ -757,8 +761,9 @@ impl Daemon {
                         broadcast: None,
                         signature: None,
                         approved: false,
-                        // Swaps are agent-only in v1, so an order is always agent-proposed.
-                        origin: ProposalOrigin::Agent,
+                        // WHO proposed (display-only). A GUI swap is App-origin → the feed reads
+                        // "You", not "Atlas"; an agent-driven order (future sidecar path) passes Agent.
+                        origin,
                         created_ms: now_ms(),
                         seq,
                         // A swap card cites no spend cap (orders gate on token/receiver/validity,

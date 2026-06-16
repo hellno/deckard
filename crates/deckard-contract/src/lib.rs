@@ -209,6 +209,11 @@ mod roundtrip_tests {
         });
         roundtrip(&SignerRequest::ProposeOrder {
             order: sample_swap_order(),
+            origin: ProposalOrigin::App,
+        });
+        roundtrip(&SignerRequest::ProposeOrder {
+            order: sample_swap_order(),
+            origin: ProposalOrigin::Agent,
         });
         roundtrip(&SignerRequest::SignOrder {
             request_id: B256::repeat_byte(0x06),

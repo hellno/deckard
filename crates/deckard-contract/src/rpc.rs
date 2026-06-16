@@ -64,8 +64,14 @@ pub enum SignerRequest {
     /// sync → [`SignerResponse::RailgunView`]. The daemon refuses unless it's unlocked AND the
     /// derivation known-answer test passes (no grant from an unverified derivation).
     RailgunViewGrant { chain_id: u64, index: u32 },
-    /// Propose a swap order (policy check only, NO signing) → [`Decision`].
-    ProposeOrder { order: SwapOrder },
+    /// Propose a swap order (policy check only, NO signing) → [`Decision`]. `origin` records WHO
+    /// proposed (a foreground human GUI swap vs an autonomous agent), mirroring [`Propose`]'s
+    /// origin — display-only (drives the feed's two-actor chain), never affects the verdict. A
+    /// user-driven GUI swap MUST pass `App` so the order row doesn't masquerade as the agent.
+    ProposeOrder {
+        order: SwapOrder,
+        origin: ProposalOrigin,
+    },
     /// Sign a stored, approved order's EIP-712 digest → [`SignOrderResult`]. No HTTP.
     SignOrder { request_id: RequestId },
     /// Broadcast an `invalidateOrder` cancel for a stored order → [`ExecuteResult`].

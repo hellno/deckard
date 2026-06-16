@@ -80,7 +80,10 @@ async fn shaped_approve_admission_matrix() {
     ord.valid_to = (now + 3_600) as u32;
     assert!(
         matches!(
-            client.propose_order(&ord).await.unwrap(),
+            client
+                .propose_order(&ord, deckard_contract::ProposalOrigin::App)
+                .await
+                .unwrap(),
             Decision::NeedsApproval { .. }
         ),
         "a well-formed order should be NeedsApproval"

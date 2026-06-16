@@ -176,8 +176,9 @@ pub fn confirm_swap_blocking(
     let gross = gross_sell_amount(&order);
 
     // (3) Propose the order FIRST. A valid order is always NeedsApproval; a Deny is terminal. The
-    //     pending order is also what admits the exact-gross approve in step 4.
-    match client.propose_order_blocking(&order)? {
+    //     pending order is also what admits the exact-gross approve in step 4. App-origin: this is
+    //     the user's foreground GUI swap, so the feed labels it "You", not "Atlas".
+    match client.propose_order_blocking(&order, deckard_contract::ProposalOrigin::App)? {
         Decision::NeedsApproval { .. } => {}
         Decision::Allow => {
             // v1 swaps never auto-allow; treat an unexpected Allow as a refusal rather than signing

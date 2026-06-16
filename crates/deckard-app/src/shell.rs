@@ -2001,8 +2001,10 @@ impl Shell {
         cx.notify();
         let client = self.signer.client();
         let order_for_task = order.clone();
-        let task =
-            cx.background_spawn(async move { client.propose_order_blocking(&order_for_task) });
+        // App-origin: the user's foreground GUI swap → the feed labels the order "You", not "Atlas".
+        let task = cx.background_spawn(async move {
+            client.propose_order_blocking(&order_for_task, deckard_contract::ProposalOrigin::App)
+        });
         cx.spawn(async move |this, cx| {
             let res = task.await;
             this.update(cx, |this, cx| {

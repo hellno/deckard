@@ -217,10 +217,15 @@ impl SignerClient {
     /// never auto-allow in v1). The daemon binds the order's owner/receiver to the unlocked
     /// wallet, so the returned id is for the BOUND order — derive it locally via
     /// [`request_id_for_swap_order`](Self::request_id_for_swap_order) only after binding.
-    pub async fn propose_order(&self, order: &SwapOrder) -> anyhow::Result<Decision> {
+    pub async fn propose_order(
+        &self,
+        order: &SwapOrder,
+        origin: ProposalOrigin,
+    ) -> anyhow::Result<Decision> {
         match self
             .request(&SignerRequest::ProposeOrder {
                 order: order.clone(),
+                origin,
             })
             .await?
         {
@@ -229,10 +234,16 @@ impl SignerClient {
         }
     }
 
-    /// Blocking [`propose_order`](Self::propose_order).
-    pub fn propose_order_blocking(&self, order: &SwapOrder) -> anyhow::Result<Decision> {
+    /// Blocking [`propose_order`](Self::propose_order). `origin` records WHO proposed (a
+    /// foreground GUI swap is `App`); it never affects the verdict, only the feed's two-actor chain.
+    pub fn propose_order_blocking(
+        &self,
+        order: &SwapOrder,
+        origin: ProposalOrigin,
+    ) -> anyhow::Result<Decision> {
         match self.request_blocking(&SignerRequest::ProposeOrder {
             order: order.clone(),
+            origin,
         })? {
             SignerResponse::Decision(d) => Ok(d),
             other => Err(unexpected("ProposeOrder", other)),
