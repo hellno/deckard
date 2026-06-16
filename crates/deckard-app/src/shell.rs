@@ -17,17 +17,19 @@ use gpui_component::{
     v_flex, ActiveTheme, TitleBar,
 };
 
-use alloy_primitives::B256;
 use deckard_contract::{
-    Decision, ExecuteResult, Intent, Policy, RequestId, ShieldStatus, SignerRequest, SignerResponse,
+    Decision, ExecuteResult, Intent, Policy, ShieldStatus, SignerRequest, SignerResponse,
 };
 use deckard_core::{
-    Address, EthProvider, KdfParams, Portfolio, ReadStatus, ShieldedHandle, Vault, WordCount, U256,
+    tokens_for, Address, CowOrderbook, EthProvider, KdfParams, Portfolio, QuoteResponse,
+    ReadStatus, ShieldedHandle, Vault, WordCount, U256,
 };
 use zeroize::Zeroizing;
 
 use deckard_signerd::SignerClient;
 
+use crate::commit_flow::CommitFlow;
+use crate::errors::{humanize_deny, humanize_swap_deny, is_session_ended, short_err};
 use crate::settings::{Settings, ThemeModePref};
 use crate::signer::{self, AppSigner};
 use crate::theme;
@@ -41,56 +43,6 @@ use crate::{
 /// duration (DESIGN: confirm is a hold, never a tap). The amber fill-sweep (`shield_view`)
 /// runs for the same span so the bar fills exactly as the action fires.
 pub(crate) const SHIELD_HOLD: Duration = Duration::from_millis(900);
-
-/// Trim a noisy provider error down to one short line for the UI.
-fn short_err(e: impl std::fmt::Display) -> String {
-    let line = e.to_string();
-    let line = line.lines().next().unwrap_or("").trim();
-    line.chars().take(140).collect()
-}
-
-/// Map a daemon deny/`reason` tag to a calm, user-facing line (the wire tags are terse +
-/// machine-readable; the UI shouldn't show `chain_mismatch` raw).
-fn humanize_deny(reason: &str) -> String {
-    // The broadcast error carries a variable RPC suffix, so match it by prefix.
-    if reason.starts_with("broadcast_failed") {
-        return "the deposit couldn't be broadcast — check your network, then review again".into();
-    }
-    match reason {
-        "locked" => "unlock your wallet first".into(),
-        "revoked" => "the signer is paused (STOP is active)".into(),
-        "chain_mismatch" => {
-            "the signer is on a different chain than this deposit — reconcile the chain first"
-                .into()
-        }
-        "over_cap" | "cap_exceeded" => "it exceeds the agent's spending cap".into(),
-        "off_allowlist" => "the recipient isn't on the allowlist".into(),
-        "undecodable" => "the deposit calldata didn't validate".into(),
-        "shield_to_mismatch" => {
-            "the deposit doesn't target the Railgun contract for this chain".into()
-        }
-        "not_approved" => "this deposit hasn't been approved yet — review it again".into(),
-        "unknown_request" => {
-            "the signer session was reset — review the deposit again".into()
-        }
-        "erc20_unsupported_v1" => "only native-ETH shields are supported in v1".into(),
-        "unsupported_v1" => "that action isn't supported in v1".into(),
-        "broadcast_timeout" => {
-            "the network didn't confirm in time — your deposit may already be in flight, so check your activity before retrying"
-                .into()
-        }
-        "already_executed" => "this deposit was already submitted".into(),
-        other => other.to_string(),
-    }
-}
-
-/// True for a daemon `reason` that means the unlock **session ended** — the key was zeroized
-/// by a STOP (an external `RevokeAll` from an MCP client, or the daemon is otherwise `Locked`).
-/// The app must return to the unlock gate, not just show an inline error: a propose against a
-/// locked daemon answers `locked`; an execute of a prior request answers `revoked`.
-fn is_session_ended(reason: &str) -> bool {
-    matches!(reason, "locked" | "revoked")
-}
 
 /// Run `prework` (which seals + writes the keystore for create/import/migrate, or is a no-op
 /// for a plain unlock), then unlock OVER THE DAEMON SOCKET — the key is decrypted in the
@@ -128,37 +80,32 @@ pub enum Surface {
     Send,
     /// The shield trigger flow (T5): compose a deposit → review card → hold-to-confirm.
     Shield,
+    /// The CoW swap flow (#25): compose (sell amount + token pickers) → get a quote → review the
+    /// priced order → hold-to-confirm (propose + approve + resolve + sign + submit). The daemon
+    /// signs the EIP-712 order; the app posts it to the orderbook. The app holds no key.
+    Swap,
     Settings,
 }
 
 /// A reviewed-and-allowed shield, ready to sign. Carries a **recipient snapshot** taken at
 /// review time so the clear-signing card always shows the recipient that is actually inside
 /// `intent` — never a value the user edited in the input after `propose` landed.
-#[derive(Clone)]
-pub struct ShieldProposal {
-    pub intent: Intent,
-    pub request_id: RequestId,
-    pub recipient: String,
-    /// True when the daemon answered `NeedsApproval` (over-cap, or the mainnet guardrail
-    /// downgrading an auto-allow). The completed hold-to-confirm IS the human approval —
-    /// the app is the wire contract's designated resolver — so confirm sends
-    /// `Resolve{approved: true}` before `Execute`.
-    pub needs_resolve: bool,
-}
+///
+/// Now the shared [`crate::commit_flow::Proposal`] (Shield + Send were field-identical and
+/// collapsed in Step 0); the alias keeps every `ShieldProposal { .. }` construction site unchanged.
+pub type ShieldProposal = crate::commit_flow::Proposal;
 
 /// A reviewed-and-allowed native send, ready to sign. Carries a **recipient snapshot** (the
 /// resolved, checksummed destination address that is actually inside `intent.to`) so the
 /// clear-signing card always shows where the ETH is going — never the raw `0x…`/ENS text the
-/// user could have since edited. The `needs_resolve` flag mirrors [`ShieldProposal`]: an
-/// over-cap (or `Always`-approval) send returns `NeedsApproval`, and the completed
-/// hold-to-confirm IS that human approval, so confirm sends `Resolve{approved: true}` first.
-#[derive(Clone)]
-pub struct SendProposal {
-    pub intent: Intent,
-    pub request_id: RequestId,
-    pub recipient: String,
-    pub needs_resolve: bool,
-}
+/// user could have since edited. The `needs_resolve` flag: an over-cap (or `Always`-approval)
+/// send returns `NeedsApproval`, and the completed hold-to-confirm IS that human approval, so
+/// confirm sends `Resolve{approved: true}` first.
+///
+/// The same shared [`crate::commit_flow::Proposal`] as [`ShieldProposal`] — the two flows were
+/// field-identical and collapsed in Step 0; the alias keeps every `SendProposal { .. }` site
+/// unchanged.
+pub type SendProposal = crate::commit_flow::Proposal;
 
 /// The auth gate that wraps the whole app. Until it reaches `Ready`, the portfolio and
 /// every funds-touching surface are hidden behind onboarding or the unlock screen.
@@ -236,48 +183,47 @@ pub struct Shell {
     pub allow_screen_capture: bool,
 
     // --- shield trigger flow (T5) ---
-    /// Deposit amount (ETH, free text) and the `0zk…` recipient. Free-text recipient is v1;
-    /// auto-filling the user's OWN railgun address is Wave 2.
-    pub shield_amount: Entity<InputState>,
-    pub shield_recipient: Entity<InputState>,
-    /// Set once `propose` returns `Allow`. `Some` means the review card + hold-to-confirm are
-    /// live; it carries a recipient snapshot so the card can't show a since-edited address.
-    pub shield_proposal: Option<ShieldProposal>,
-    /// Bumped on each `review_shield` (and on reset) so a slow propose reply for a
-    /// since-cancelled/re-issued review can't install a stale proposal.
-    shield_review_epoch: u64,
-    /// True while a `propose`/`execute` round-trip runs on a background thread.
-    pub shield_busy: bool,
-    /// One-line, user-facing shield error (parse / build / deny / broadcast).
-    pub shield_error: Option<String>,
-    /// Set on a successful `execute` broadcast — the demo's "deposit is moving private" state.
-    pub shield_tx: Option<B256>,
-    /// True while the confirm button is being held; drives the amber fill-sweep.
-    pub shield_holding: bool,
-    /// Bumped on each hold-start so a stale hold timer can't fire a later confirm.
-    shield_hold_epoch: u64,
+    /// The shield trigger flow's state machine: the amount + `0zk…` recipient inputs (the
+    /// recipient auto-fills the wallet's own 0zk address; free-text edit is allowed), the reviewed
+    /// proposal, the busy/hold flags, the surfaced error/broadcast, and the review/hold epochs that
+    /// fence stale background replies and stale hold timers. Migrated off the flat `shield_*` fields
+    /// onto [`CommitFlow`] (Step 2); access its state via deref (`self.shield.proposal`,
+    /// `self.shield.busy`, …). The deposit's private-side broadcast wiring (`shield_status` /
+    /// resync / `watch_shielded_sync`) stays inline in `confirm_shield`.
+    pub shield: CommitFlow,
 
     // --- native-ETH send flow (mirrors the shield trigger flow above) ---
-    /// Send amount (ETH, free text) and the recipient (a `0x…` address or an ENS name, which
-    /// is forward-resolved at review time — reuse of the watch-address resolve path).
-    pub send_amount: Entity<InputState>,
-    pub send_recipient: Entity<InputState>,
-    /// Set once `propose` returns `Allow`/`NeedsApproval`; `Some` means the review card +
-    /// hold-to-confirm are live. Carries the resolved-recipient snapshot for the card.
-    pub send_proposal: Option<SendProposal>,
-    /// Bumped on each `review_send` (and on reset) so a slow propose/resolve reply for a
-    /// since-cancelled/re-issued review can't install a stale proposal.
-    send_review_epoch: u64,
-    /// True while a `resolve`/`propose`/`execute` round-trip runs on a background thread.
-    pub send_busy: bool,
-    /// One-line, user-facing send error (parse / resolve / deny / broadcast).
-    pub send_error: Option<String>,
-    /// Set on a successful `execute` broadcast — the send's "on its way" confirmation state.
-    pub send_tx: Option<B256>,
-    /// True while the confirm button is being held; drives the amber fill-sweep.
-    pub send_holding: bool,
-    /// Bumped on each hold-start so a stale hold timer can't fire a later confirm.
-    send_hold_epoch: u64,
+    /// The native-ETH send flow's state machine: the amount + recipient inputs (a `0x…` address
+    /// or an ENS name, forward-resolved at review time), the reviewed proposal, the busy/hold
+    /// flags, the surfaced error/broadcast, and the review/hold epochs that fence stale background
+    /// replies and stale hold timers. Migrated off the flat `send_*` fields onto [`CommitFlow`]
+    /// (Step 1); access its state via deref (`self.send.proposal`, `self.send.busy`, …).
+    pub send: CommitFlow,
+
+    // --- CoW swap flow (#25) ---
+    /// The swap flow's commit state machine. Reuses [`CommitFlow`]'s `amount` input (the sell
+    /// amount) + the proposal/busy/hold/error/tx core for the review→hold→sign lifecycle; the
+    /// `recipient` input is unused (a swap's receiver is always your own wallet). The bespoke
+    /// compose (token pickers, quote summary) and the bespoke review/done live in `swap_view.rs`;
+    /// the amber hold widget is shared via [`SWAP_VIEW`](crate::swap_view::SWAP_VIEW).
+    pub swap: CommitFlow,
+    /// The sell-side token, an address from [`tokens_for(chain_id)`](deckard_core::tokens_for).
+    /// `None` until a chain with a curated list is active (mainnet/Sepolia) and the picker seeds it.
+    pub swap_sell_token: Option<Address>,
+    /// The buy-side token (same source). Seeded distinct from `swap_sell_token`.
+    pub swap_buy_token: Option<Address>,
+    /// The last fetched quote (drives the quote summary + the bound order). Cleared on every
+    /// compose edit so a stale quote can't be signed against changed inputs.
+    pub swap_quote: Option<deckard_core::QuoteResponse>,
+    /// True while a `Get quote` round-trip runs on a background thread (the one allowed loading
+    /// state on compose; never a spinner-forever — it clears on reply/error).
+    pub swap_quoting: bool,
+    /// The created order's CoW uid, set on a successful submit — drives the bespoke done screen
+    /// (a swap produces a uid string, not a B256 tx hash, so it can't ride `CommitState.tx`).
+    pub swap_uid: Option<String>,
+    /// Bumped on every quote request (and on reset) so a slow quote reply for a since-changed
+    /// compose can't install a stale quote. Mirrors the review/hold epoch pattern.
+    swap_quote_epoch: u64,
 
     // --- shielded balance (Wave 2: T9 sync + T10 lifecycle) ---
     /// The read-only Railgun sync actor (None until the view grant is fetched post-unlock,
@@ -438,7 +384,8 @@ impl Shell {
             InputState::new(window, cx).placeholder("12 / 24-word phrase, or a 0x private key")
         });
 
-        // Shield flow inputs (T5): amount in ETH + the 0zk recipient (free text in v1).
+        // Shield flow inputs (T5): amount in ETH + the 0zk recipient (auto-filled with the wallet's
+        // own 0zk address; free-text edit is allowed).
         let shield_amount =
             cx.new(|cx| InputState::new(window, cx).placeholder("Amount in ETH, e.g. 0.05"));
         let shield_recipient =
@@ -460,6 +407,10 @@ impl Shell {
             },
         )
         .detach();
+        // The subscriptions above reference the entities (Enter-to-review / live-validity); now
+        // move the two inputs into the shield flow's state machine (Step 2). The subscriptions keep
+        // firing — they hold their own entity handles, independent of where the inputs now live.
+        let shield = CommitFlow::new(shield_amount, shield_recipient);
 
         // Send flow inputs: amount in ETH + a `0x…`/ENS recipient. Same live-validity +
         // Enter-to-review wiring as the shield fields above.
@@ -482,6 +433,39 @@ impl Shell {
             },
         )
         .detach();
+        // The subscriptions above reference the entities (Enter-to-review / live-validity); now
+        // move the two inputs into the send flow's state machine (Step 1). The subscriptions keep
+        // firing — they hold their own entity handles, independent of where the inputs now live.
+        let send = CommitFlow::new(send_amount, send_recipient);
+
+        // Swap flow inputs (#25): the amount input doubles as the sell amount; the recipient input
+        // is a throwaway (a swap's receiver is always your own wallet) — `CommitFlow::new` just
+        // needs two entities. On a sell-amount edit, clear any stale quote (a quote priced for an
+        // old amount must never survive into a confirm) and re-render; Enter gets a quote if there
+        // isn't one yet, else reviews the priced order (keyboard-first).
+        let swap_amount =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Amount to sell, e.g. 0.05"));
+        let swap_recipient = cx.new(|cx| InputState::new(window, cx));
+        cx.subscribe(
+            &swap_amount,
+            |this, _, event: &InputEvent, cx| match event {
+                InputEvent::Change => {
+                    // A stale quote must never outlive an amount edit (codex must-do #4).
+                    this.invalidate_swap_quote();
+                    cx.notify();
+                }
+                InputEvent::PressEnter { .. } => {
+                    if this.swap_quote.is_some() {
+                        this.review_swap(cx);
+                    } else {
+                        this.get_swap_quote(cx);
+                    }
+                }
+                _ => {}
+            },
+        )
+        .detach();
+        let swap = CommitFlow::new(swap_amount, swap_recipient);
 
         // Submit-on-Enter for each auth field (keyboard-first).
         cx.subscribe(&create_pass2, |this, _, event: &InputEvent, cx| {
@@ -525,7 +509,7 @@ impl Shell {
         // One resolved runtime chain id (env > settings > default), threaded to the daemon
         // launch, the shield builder, and the Railgun sync.
         let chain_id = settings.effective_chain_id();
-        let eth = EthProvider::spawn(current_rpc.clone());
+        let eth = EthProvider::spawn(current_rpc.clone(), chain_id);
 
         // Log the resolved runtime config once (the RPC is REDACTED to scheme://host — it may
         // carry an API key). Makes "which chain / RPC / mode am I on?" answerable from the log,
@@ -585,24 +569,15 @@ impl Shell {
             agent_policy: None,
             capture_applied: false,
             allow_screen_capture,
-            shield_amount,
-            shield_recipient,
-            shield_proposal: None,
-            shield_review_epoch: 0,
-            shield_busy: false,
-            shield_error: None,
-            shield_tx: None,
-            shield_holding: false,
-            shield_hold_epoch: 0,
-            send_amount,
-            send_recipient,
-            send_proposal: None,
-            send_review_epoch: 0,
-            send_busy: false,
-            send_error: None,
-            send_tx: None,
-            send_holding: false,
-            send_hold_epoch: 0,
+            shield,
+            send,
+            swap,
+            swap_sell_token: None,
+            swap_buy_token: None,
+            swap_quote: None,
+            swap_quoting: false,
+            swap_uid: None,
+            swap_quote_epoch: 0,
             shielded: None,
             railgun_address: None,
             recipient_autofilled: false,
@@ -692,8 +667,17 @@ impl Shell {
         // Invalidate any in-flight grant fetch and clear shield inputs on the next render.
         self.auth_epoch = self.auth_epoch.wrapping_add(1);
         self.pending_shield_clear = true;
-        self.reset_shield();
-        self.reset_send();
+        self.shield.reset();
+        self.send.reset();
+        // Clear the swap flow + its compose-only state (tokens / quote / uid) so a prior wallet's
+        // priced order can't linger into the next unlock.
+        self.swap.reset();
+        self.swap_sell_token = None;
+        self.swap_buy_token = None;
+        self.swap_quote = None;
+        self.swap_quoting = false;
+        self.swap_uid = None;
+        self.swap_quote_epoch = self.swap_quote_epoch.wrapping_add(1);
         self.auth = AuthStep::Unlock;
         self.palette_open = false;
         cx.notify();
@@ -1107,6 +1091,12 @@ impl Shell {
             .unwrap_or_default()
     }
 
+    /// The chain the daemon signs for (resolved once at startup). The swap surface reads it to
+    /// pick the curated token list, the orderbook base, and the per-chain swatch.
+    pub fn chain_id(&self) -> u64 {
+        self.chain_id
+    }
+
     /// Whether the app is pointed at a local development fork rather than a public network —
     /// drives the status-strip "DEMO FORK — not mainnet" caution (rendered in `shell_chrome`).
     pub(crate) fn fork_mode(&self) -> bool {
@@ -1276,7 +1266,7 @@ impl Shell {
             return;
         }
         self.current_rpc = url.clone();
-        self.eth = EthProvider::spawn(url);
+        self.eth = EthProvider::spawn(url, self.settings.effective_chain_id());
         self.retarget(cx);
         // Re-point the shielded sync at the new RPC too (drops the old worker, clears stale
         // private state) so public and private reads can't diverge across endpoints.
@@ -1302,15 +1292,18 @@ impl Shell {
     pub fn open(&mut self, surface: Surface, cx: &mut Context<Self>) {
         // Leaving Shield (back, palette, a nav click) cancels any in-progress hold so its
         // timer can't fire a confirm after the screen is gone.
-        if surface != Surface::Shield && self.shield_holding {
-            self.shield_holding = false;
-            self.shield_hold_epoch = self.shield_hold_epoch.wrapping_add(1);
+        if surface != Surface::Shield && self.shield.holding {
+            self.shield.cancel_hold();
         }
         // Same for the send hold: leaving the Send surface must cancel an in-progress hold so
         // its timer can't fire a confirm after the screen is gone.
-        if surface != Surface::Send && self.send_holding {
-            self.send_holding = false;
-            self.send_hold_epoch = self.send_hold_epoch.wrapping_add(1);
+        if surface != Surface::Send && self.send.holding {
+            self.send.cancel_hold();
+        }
+        // And the swap hold: leaving Swap cancels an in-progress hold so its timer can't fire a
+        // confirm after the screen is gone.
+        if surface != Surface::Swap && self.swap.holding {
+            self.swap.cancel_hold();
         }
         self.surface = surface;
         cx.notify();
@@ -1351,56 +1344,43 @@ impl Shell {
         if self.viewing_watch {
             return;
         }
-        self.reset_shield();
+        self.shield.reset();
         self.open(Surface::Shield, cx);
     }
 
-    /// Clear all transient shield state (proposal, error, broadcast, hold). Bumps the hold +
-    /// review epochs so any in-flight hold timer or propose reply lands as a no-op.
-    fn reset_shield(&mut self) {
-        self.shield_proposal = None;
-        self.shield_error = None;
-        self.shield_tx = None;
-        self.shield_busy = false;
-        self.shield_holding = false;
-        self.shield_hold_epoch = self.shield_hold_epoch.wrapping_add(1);
-        self.shield_review_epoch = self.shield_review_epoch.wrapping_add(1);
-    }
-
-    /// Build + `propose` the shield off-thread. On `Allow`, stash the proposal so the review
-    /// card + hold-to-confirm appear; on `NeedsApproval`/`Deny`/parse error, surface a clear
-    /// line. Mirrors `do_unlock` (build off-thread, fold the result on the UI thread).
+    /// Build + `propose` the shield off-thread. On `Allow`/`NeedsApproval`, stash the proposal so
+    /// the review card + hold-to-confirm appear; on a parse/`Deny` error, surface a clear line.
+    /// The recipient is validated SYNCHRONOUSLY (a non-empty 0zk string — no ENS resolution,
+    /// unlike Send); the review TAIL is shared via [`Shell::finish_review`].
     pub fn review_shield(&mut self, cx: &mut Context<Self>) {
-        if self.shield_busy {
+        if self.shield.busy {
             return;
         }
-        let amount = self.shield_amount.read(cx).value().to_string();
-        let recipient = self.shield_recipient.read(cx).value().to_string();
+        let amount = self.shield.amount.read(cx).value().to_string();
+        let recipient = self.shield.recipient.read(cx).value().to_string();
         let value_wei = match signer::parse_eth_to_wei(&amount) {
             Ok(w) if w > U256::ZERO => w,
             Ok(_) => {
-                self.shield_error = Some("Enter an amount greater than zero".into());
+                self.shield.error = Some("Enter an amount greater than zero".into());
                 cx.notify();
                 return;
             }
             Err(e) => {
-                self.shield_error = Some(e);
+                self.shield.error = Some(e);
                 cx.notify();
                 return;
             }
         };
         if recipient.trim().is_empty() {
-            self.shield_error = Some("Enter a 0zk recipient address".into());
+            self.shield.error = Some("Enter a 0zk recipient address".into());
             cx.notify();
             return;
         }
-        self.shield_error = None;
-        self.shield_proposal = None;
-        self.shield_busy = true;
-        // Each review supersedes the last; a slow reply for a since-cancelled/re-issued
-        // review checks this epoch before installing (and before touching `busy`).
-        self.shield_review_epoch = self.shield_review_epoch.wrapping_add(1);
-        let epoch = self.shield_review_epoch;
+        self.shield.error = None;
+        self.shield.proposal = None;
+        // begin_review bumps the epoch (each review supersedes the last) and sets `busy`; a slow
+        // reply for a since-cancelled/re-issued review checks this epoch before installing.
+        let epoch = self.shield.begin_review();
         let recipient_snapshot = recipient.clone();
         cx.notify();
         let client = self.signer.client();
@@ -1408,72 +1388,39 @@ impl Shell {
         let task = cx.background_spawn(async move {
             let intent = signer::build_shield_intent(chain_id, &recipient, value_wei)?;
             let decision = client.propose_blocking(&intent)?;
-            Ok::<(Intent, Decision), anyhow::Error>((intent, decision))
+            // The recipient SNAPSHOT inside the signed intent: the 0zk string the user reviewed —
+            // never a value they could have since edited in the input.
+            Ok::<(Intent, String, Decision), anyhow::Error>((intent, recipient_snapshot, decision))
         });
         cx.spawn(async move |this, cx| {
             let res = task.await;
             this.update(cx, |this, cx| {
-                // Guard FIRST: a stale review must not even clear `busy` (a newer review may
-                // own it now).
-                if this.shield_review_epoch != epoch {
-                    return;
-                }
-                this.shield_busy = false;
-                match res {
-                    Ok((intent, Decision::Allow)) => {
-                        let request_id = SignerClient::request_id_for_intent(&intent);
-                        this.shield_proposal = Some(ShieldProposal {
-                            intent,
-                            request_id,
-                            recipient: recipient_snapshot,
-                            needs_resolve: false,
-                        });
-                    }
-                    // NeedsApproval (over-cap, or the daemon's mainnet guardrail): the
-                    // review card + hold-to-confirm ARE the human approval surface — the
-                    // hold resolves the pending record, then executes.
-                    Ok((intent, Decision::NeedsApproval { request_id })) => {
-                        this.shield_proposal = Some(ShieldProposal {
-                            intent,
-                            request_id,
-                            recipient: recipient_snapshot,
-                            needs_resolve: true,
-                        });
-                    }
-                    Ok((_, Decision::Deny { reason })) => {
-                        // An external STOP/lock ends the session — bounce to the unlock gate.
-                        if is_session_ended(&reason) {
-                            this.handle_session_revoked(cx);
-                        } else {
-                            this.shield_error =
-                                Some(format!("Can't shield: {}", humanize_deny(&reason)));
-                        }
-                    }
-                    Err(e) => this.shield_error = Some(short_err(e)),
-                }
-                cx.notify();
+                this.finish_review(|s| &mut s.shield, epoch, res, "Can't shield: ", cx);
             })
             .ok();
         })
         .detach();
     }
 
-    /// Sign + broadcast the reviewed shield off-thread (the hold-to-confirm completed). On
-    /// success the deposit is on its way to a private note; surface the broadcast.
+    /// Sign + broadcast the reviewed shield off-thread (the hold-to-confirm completed). For a
+    /// `NeedsApproval` proposal the completed hold IS the approval (resolve, then execute); an
+    /// `Allow` goes straight to execute. On success the deposit is broadcast and on its way to a
+    /// private note — set `Sending`, re-sync the private balance, and start the settle watcher.
+    /// Mirrors `confirm_send` (plus the private-side broadcast wiring a send doesn't have).
     pub fn confirm_shield(&mut self, cx: &mut Context<Self>) {
         let Some(ShieldProposal {
             request_id,
             needs_resolve,
             ..
-        }) = self.shield_proposal.clone()
+        }) = self.shield.proposal.clone()
         else {
             return;
         };
-        if self.shield_busy {
+        if self.shield.busy {
             return;
         }
-        self.shield_busy = true;
-        self.shield_error = None;
+        self.shield.busy = true;
+        self.shield.error = None;
         cx.notify();
         let client = self.signer.client();
         let control = self.signer.control();
@@ -1486,14 +1433,14 @@ impl Shell {
         cx.spawn(async move |this, cx| {
             let res = task.await;
             this.update(cx, |this, cx| {
-                this.shield_busy = false;
+                this.shield.busy = false;
                 // Invalidate the proposal on EVERY execute attempt: a second hold must not be
                 // able to re-broadcast. On an ambiguous timeout the deposit may already be in
                 // flight, so retrying requires a fresh, deliberate review (new request id).
-                this.shield_proposal = None;
+                this.shield.proposal = None;
                 match res {
                     Ok(ExecuteResult::Broadcast { tx_hash }) => {
-                        this.shield_tx = Some(tx_hash);
+                        this.shield.tx = Some(tx_hash);
                         // Just broadcast — honestly `Sending` (we don't track confirmations).
                         // The re-sync surfaces the note; the watcher then settles to
                         // PrivateSpendable (or Failed), never a fabricated "spendable $0".
@@ -1508,11 +1455,11 @@ impl Shell {
                         if is_session_ended(&reason) {
                             this.handle_session_revoked(cx);
                         } else {
-                            this.shield_error =
+                            this.shield.error =
                                 Some(format!("Shield denied: {}", humanize_deny(&reason)));
                         }
                     }
-                    Err(e) => this.shield_error = Some(short_err(e)),
+                    Err(e) => this.shield.error = Some(short_err(e)),
                 }
                 cx.notify();
             })
@@ -1521,29 +1468,24 @@ impl Shell {
         .detach();
     }
 
-    /// Begin a confirm hold: start the amber fill-sweep and a timer that fires
-    /// `confirm_shield` only if the hold survives [`SHIELD_HOLD`]. A per-hold epoch guards
-    /// against a stale timer firing after an early release / re-press.
+    /// Begin a confirm hold: start the amber fill-sweep and a timer that fires `confirm_shield`
+    /// only if the hold survives [`SHIELD_HOLD`]. A per-hold epoch guards against a stale timer
+    /// firing after an early release / re-press.
     pub fn shield_hold_start(&mut self, cx: &mut Context<Self>) {
-        if self.shield_holding || self.shield_busy || self.shield_proposal.is_none() {
+        // begin_hold guards (no-op while busy / already holding / no proposal), sets `holding`,
+        // bumps the hold epoch, and returns it for the timer to re-check.
+        let Some(epoch) = self.shield.begin_hold() else {
             return;
-        }
-        self.shield_holding = true;
-        self.shield_hold_epoch = self.shield_hold_epoch.wrapping_add(1);
-        let epoch = self.shield_hold_epoch;
+        };
         cx.notify();
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(SHIELD_HOLD).await;
             this.update(cx, |this, cx| {
-                // Only fire if THIS hold is still active (not released, not superseded) AND
-                // the user is still on the Shield surface — leaving via ⌘[ / palette / a
-                // surface change must never let a held confirm sign after the screen is gone.
-                if this.shield_holding
-                    && this.shield_hold_epoch == epoch
-                    && this.surface == Surface::Shield
-                    && this.shield_proposal.is_some()
-                {
-                    this.shield_holding = false;
+                // Fire only if THIS hold is still valid AND the user is still on Shield — leaving
+                // via ⌘[ / palette / a surface change must never sign after the screen is gone.
+                // (The surface check stays here — it depends on the live surface, not flow state.)
+                if this.surface == Surface::Shield && this.shield.hold_still_valid(epoch) {
+                    this.shield.holding = false;
                     this.confirm_shield(cx);
                 }
             })
@@ -1555,9 +1497,7 @@ impl Shell {
     /// Release the confirm hold before it completed — reset the sweep; the epoch bump
     /// cancels the pending timer.
     pub fn shield_hold_cancel(&mut self, cx: &mut Context<Self>) {
-        if self.shield_holding {
-            self.shield_holding = false;
-            self.shield_hold_epoch = self.shield_hold_epoch.wrapping_add(1);
+        if self.shield.cancel_hold() {
             cx.notify();
         }
     }
@@ -1569,20 +1509,68 @@ impl Shell {
         if self.viewing_watch {
             return;
         }
-        self.reset_send();
+        self.send.reset();
         self.open(Surface::Send, cx);
     }
 
-    /// Clear all transient send state (proposal, error, broadcast, hold). Bumps the hold +
-    /// review epochs so any in-flight hold timer or propose/resolve reply lands as a no-op.
-    fn reset_send(&mut self) {
-        self.send_proposal = None;
-        self.send_error = None;
-        self.send_tx = None;
-        self.send_busy = false;
-        self.send_holding = false;
-        self.send_hold_epoch = self.send_hold_epoch.wrapping_add(1);
-        self.send_review_epoch = self.send_review_epoch.wrapping_add(1);
+    /// The shared review TAIL: fold a `propose` reply into a [`CommitFlow`] on the UI thread.
+    /// Every commit surface runs an identical post-`propose` sequence — re-acquire the flow,
+    /// drop a stale (superseded) reply, clear `busy`, then install the proposal on
+    /// `Allow`/`NeedsApproval`, bounce on a session-ended `Deny`, surface a humanized deny line
+    /// otherwise, or a short error. Factored out of the per-surface `review_*` so Send (now) and
+    /// Shield (Step 2) share one copy.
+    ///
+    /// `flow` re-acquires the surface's flow (it's only ever called *inside* `update`, never held
+    /// across an await, so a `fn(&mut Shell) -> &mut CommitFlow` is sound). The
+    /// `propose_result` carries the intent, the **recipient snapshot** (built in the prelude — the
+    /// checksummed `to` for Send, the input string for Shield), and the daemon `Decision`.
+    /// `review_deny_prefix` is the surface's leading copy on an inline deny ("Can't send: ").
+    fn finish_review(
+        &mut self,
+        flow: fn(&mut Shell) -> &mut CommitFlow,
+        epoch: u64,
+        propose_result: Result<(Intent, String, Decision), anyhow::Error>,
+        review_deny_prefix: &str,
+        cx: &mut Context<Self>,
+    ) {
+        // Guard FIRST: a stale review must not even clear `busy` (a newer review may own it now).
+        if !flow(self).review_is_current(epoch) {
+            return;
+        }
+        flow(self).busy = false;
+        match propose_result {
+            Ok((intent, recipient, Decision::Allow)) => {
+                let request_id = SignerClient::request_id_for_intent(&intent);
+                flow(self).proposal = Some(crate::commit_flow::Proposal {
+                    intent,
+                    request_id,
+                    recipient,
+                    needs_resolve: false,
+                });
+            }
+            // NeedsApproval (over-cap, or the daemon's mainnet guardrail): the review card +
+            // hold-to-confirm ARE the human approval surface — the hold resolves the pending
+            // record, then executes.
+            Ok((intent, recipient, Decision::NeedsApproval { request_id })) => {
+                flow(self).proposal = Some(crate::commit_flow::Proposal {
+                    intent,
+                    request_id,
+                    recipient,
+                    needs_resolve: true,
+                });
+            }
+            Ok((_, _, Decision::Deny { reason })) => {
+                // An external STOP/lock ends the session — bounce to the unlock gate.
+                if is_session_ended(&reason) {
+                    self.handle_session_revoked(cx);
+                } else {
+                    flow(self).error =
+                        Some(format!("{review_deny_prefix}{}", humanize_deny(&reason)));
+                }
+            }
+            Err(e) => flow(self).error = Some(short_err(e)),
+        }
+        cx.notify();
     }
 
     /// Resolve the recipient, then build + `propose` the send off-thread. A `0x…` recipient is
@@ -1592,37 +1580,35 @@ impl Shell {
     /// review card + hold-to-confirm appear; on a parse/resolve/`Deny` error, surface a clear
     /// line. Mirrors `review_shield` (epoch-guarded; the guard is checked before `busy`).
     pub fn review_send(&mut self, cx: &mut Context<Self>) {
-        if self.send_busy {
+        if self.send.busy {
             return;
         }
-        let amount = self.send_amount.read(cx).value().to_string();
-        let recipient = self.send_recipient.read(cx).value().to_string();
+        let amount = self.send.amount.read(cx).value().to_string();
+        let recipient = self.send.recipient.read(cx).value().to_string();
         let value_wei = match signer::parse_eth_to_wei(&amount) {
             Ok(w) if w > U256::ZERO => w,
             Ok(_) => {
-                self.send_error = Some("Enter an amount greater than zero".into());
+                self.send.error = Some("Enter an amount greater than zero".into());
                 cx.notify();
                 return;
             }
             Err(e) => {
-                self.send_error = Some(e);
+                self.send.error = Some(e);
                 cx.notify();
                 return;
             }
         };
         let recipient = recipient.trim().to_string();
         if recipient.is_empty() {
-            self.send_error = Some("Enter a recipient address or ENS name".into());
+            self.send.error = Some("Enter a recipient address or ENS name".into());
             cx.notify();
             return;
         }
-        self.send_error = None;
-        self.send_proposal = None;
-        self.send_busy = true;
-        // Each review supersedes the last; a slow reply for a since-cancelled/re-issued review
-        // checks this epoch before installing (and before touching `busy`).
-        self.send_review_epoch = self.send_review_epoch.wrapping_add(1);
-        let epoch = self.send_review_epoch;
+        self.send.error = None;
+        self.send.proposal = None;
+        // begin_review bumps the epoch (each review supersedes the last) and sets `busy`; a slow
+        // reply for a since-cancelled/re-issued review checks this epoch before installing.
+        let epoch = self.send.begin_review();
         cx.notify();
         let client = self.signer.client();
         let chain_id = self.chain_id;
@@ -1642,49 +1628,18 @@ impl Shell {
             };
             let intent = signer::build_native_send_intent(chain_id, to, value_wei);
             let decision = client.propose_blocking(&intent)?;
-            Ok::<(Intent, Address, Decision), anyhow::Error>((intent, to, decision))
+            // The recipient SNAPSHOT inside the signed intent: the checksummed destination — never
+            // the raw `0x…`/ENS text the user could have since edited.
+            Ok::<(Intent, String, Decision), anyhow::Error>((
+                intent,
+                to.to_checksum(None),
+                decision,
+            ))
         });
         cx.spawn(async move |this, cx| {
             let res = task.await;
             this.update(cx, |this, cx| {
-                // Guard FIRST: a stale review must not even clear `busy`.
-                if this.send_review_epoch != epoch {
-                    return;
-                }
-                this.send_busy = false;
-                match res {
-                    Ok((intent, to, Decision::Allow)) => {
-                        let request_id = SignerClient::request_id_for_intent(&intent);
-                        this.send_proposal = Some(SendProposal {
-                            intent,
-                            request_id,
-                            recipient: to.to_checksum(None),
-                            needs_resolve: false,
-                        });
-                    }
-                    // NeedsApproval (over-cap, or `Always` approval): the review card +
-                    // hold-to-confirm ARE the human approval surface — the hold resolves the
-                    // pending record, then executes.
-                    Ok((intent, to, Decision::NeedsApproval { request_id })) => {
-                        this.send_proposal = Some(SendProposal {
-                            intent,
-                            request_id,
-                            recipient: to.to_checksum(None),
-                            needs_resolve: true,
-                        });
-                    }
-                    Ok((_, _, Decision::Deny { reason })) => {
-                        // An external STOP/lock ends the session — bounce to the unlock gate.
-                        if is_session_ended(&reason) {
-                            this.handle_session_revoked(cx);
-                        } else {
-                            this.send_error =
-                                Some(format!("Can't send: {}", humanize_deny(&reason)));
-                        }
-                    }
-                    Err(e) => this.send_error = Some(short_err(e)),
-                }
-                cx.notify();
+                this.finish_review(|s| &mut s.send, epoch, res, "Can't send: ", cx);
             })
             .ok();
         })
@@ -1700,15 +1655,15 @@ impl Shell {
             request_id,
             needs_resolve,
             ..
-        }) = self.send_proposal.clone()
+        }) = self.send.proposal.clone()
         else {
             return;
         };
-        if self.send_busy {
+        if self.send.busy {
             return;
         }
-        self.send_busy = true;
-        self.send_error = None;
+        self.send.busy = true;
+        self.send.error = None;
         cx.notify();
         let client = self.signer.client();
         let control = self.signer.control();
@@ -1720,14 +1675,14 @@ impl Shell {
         cx.spawn(async move |this, cx| {
             let res = task.await;
             this.update(cx, |this, cx| {
-                this.send_busy = false;
+                this.send.busy = false;
                 // Invalidate the proposal on EVERY execute attempt: a second hold must not be
                 // able to re-broadcast. On an ambiguous timeout the transfer may already be in
                 // flight, so retrying requires a fresh, deliberate review (new request id).
-                this.send_proposal = None;
+                this.send.proposal = None;
                 match res {
                     Ok(ExecuteResult::Broadcast { tx_hash }) => {
-                        this.send_tx = Some(tx_hash);
+                        this.send.tx = Some(tx_hash);
                         // The transfer left the wallet — re-fetch the public balance so home
                         // reflects it (a send has no private side to sync, unlike shield).
                         this.refresh_portfolio(cx);
@@ -1737,11 +1692,11 @@ impl Shell {
                         if is_session_ended(&reason) {
                             this.handle_session_revoked(cx);
                         } else {
-                            this.send_error =
+                            this.send.error =
                                 Some(format!("Send denied: {}", humanize_deny(&reason)));
                         }
                     }
-                    Err(e) => this.send_error = Some(short_err(e)),
+                    Err(e) => this.send.error = Some(short_err(e)),
                 }
                 cx.notify();
             })
@@ -1754,24 +1709,20 @@ impl Shell {
     /// only if the hold survives [`SHIELD_HOLD`]. A per-hold epoch guards against a stale timer
     /// firing after an early release / re-press.
     pub fn send_hold_start(&mut self, cx: &mut Context<Self>) {
-        if self.send_holding || self.send_busy || self.send_proposal.is_none() {
+        // begin_hold guards (no-op while busy / already holding / no proposal), sets `holding`,
+        // bumps the hold epoch, and returns it for the timer to re-check.
+        let Some(epoch) = self.send.begin_hold() else {
             return;
-        }
-        self.send_holding = true;
-        self.send_hold_epoch = self.send_hold_epoch.wrapping_add(1);
-        let epoch = self.send_hold_epoch;
+        };
         cx.notify();
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(SHIELD_HOLD).await;
             this.update(cx, |this, cx| {
-                // Fire only if THIS hold is still active AND the user is still on Send — leaving
+                // Fire only if THIS hold is still valid AND the user is still on Send — leaving
                 // via ⌘[ / palette / a surface change must never sign after the screen is gone.
-                if this.send_holding
-                    && this.send_hold_epoch == epoch
-                    && this.surface == Surface::Send
-                    && this.send_proposal.is_some()
-                {
-                    this.send_holding = false;
+                // (The surface check stays here — it depends on the live surface, not flow state.)
+                if this.surface == Surface::Send && this.send.hold_still_valid(epoch) {
+                    this.send.holding = false;
                     this.confirm_send(cx);
                 }
             })
@@ -1783,9 +1734,402 @@ impl Shell {
     /// Release the confirm hold before it completed — reset the sweep; the epoch bump
     /// cancels the pending timer.
     pub fn send_hold_cancel(&mut self, cx: &mut Context<Self>) {
-        if self.send_holding {
-            self.send_holding = false;
-            self.send_hold_epoch = self.send_hold_epoch.wrapping_add(1);
+        if self.send.cancel_hold() {
+            cx.notify();
+        }
+    }
+
+    // --- CoW swap flow (#25) ---
+
+    /// Drop any priced quote (and the review proposal it backs) and fence a slow in-flight quote
+    /// reply via the epoch bump, so a stale price can never be signed against changed compose
+    /// inputs (codex must-do #4). Called on every sell-amount edit (the input subscription) and on
+    /// every sell/buy token change. Does NOT `notify` — the caller decides when to re-render.
+    fn invalidate_swap_quote(&mut self) {
+        self.swap_quote = None;
+        // A live review proposal was built from the now-cleared quote; drop it too so the user
+        // can't confirm a card whose figures no longer have a backing quote.
+        self.swap.proposal = None;
+        self.swap.error = None;
+        self.swap_quote_epoch = self.swap_quote_epoch.wrapping_add(1);
+    }
+
+    /// Open the swap flow from the wallet home / palette. Refused while viewing a watched
+    /// read-only account (a swap signs from YOUR wallet) and refused on a chain with no curated
+    /// token list (a plain anvil fork, chain 31337 — `tokens_for` is empty there, so there'd be
+    /// nothing to pick); both surface a clear line rather than opening an unusable screen. Seeds
+    /// the sell/buy tokens to the first two distinct tokens so the pickers are never empty.
+    pub fn open_swap(&mut self, cx: &mut Context<Self>) {
+        if self.viewing_watch {
+            return;
+        }
+        let tokens = tokens_for(self.chain_id);
+        if tokens.is_empty() {
+            // Open the surface anyway so the refusal is visible (not a silently-inert button), but
+            // with no quote/pickers possible — an honest "wrong network" line.
+            self.swap.reset();
+            self.swap_quote = None;
+            self.swap_uid = None;
+            self.swap.error = Some(
+                "Swap needs a supported network (Sepolia or mainnet) — switch chains first".into(),
+            );
+            self.open(Surface::Swap, cx);
+            return;
+        }
+        // Fresh slate: clear the flow, the last quote, and any prior done-screen uid.
+        self.swap.reset();
+        self.swap_quote = None;
+        self.swap_uid = None;
+        self.swap_quote_epoch = self.swap_quote_epoch.wrapping_add(1);
+        // Seed the pickers to the first two distinct tokens (only if not already chosen this
+        // session) so compose has a valid default pair on first paint.
+        if self.swap_sell_token.is_none() {
+            self.swap_sell_token = tokens.first().map(|t| t.address);
+        }
+        if self.swap_buy_token.is_none() {
+            self.swap_buy_token = tokens
+                .iter()
+                .map(|t| t.address)
+                .find(|&a| Some(a) != self.swap_sell_token);
+        }
+        self.open(Surface::Swap, cx);
+    }
+
+    /// Choose the sell-side token. A different token invalidates the quote (it was priced for the
+    /// old pair) and never lets the sell == buy degenerate case stand (it clears the buy side if
+    /// they'd collide).
+    pub fn set_swap_sell_token(&mut self, token: Address, cx: &mut Context<Self>) {
+        if self.swap_sell_token == Some(token) {
+            return;
+        }
+        self.swap_sell_token = Some(token);
+        if self.swap_buy_token == Some(token) {
+            self.swap_buy_token = None;
+        }
+        self.invalidate_swap_quote();
+        cx.notify();
+    }
+
+    /// Choose the buy-side token (same staleness + collision rules as the sell side).
+    pub fn set_swap_buy_token(&mut self, token: Address, cx: &mut Context<Self>) {
+        if self.swap_buy_token == Some(token) {
+            return;
+        }
+        self.swap_buy_token = Some(token);
+        if self.swap_sell_token == Some(token) {
+            self.swap_sell_token = None;
+        }
+        self.invalidate_swap_quote();
+        cx.notify();
+    }
+
+    /// Fetch an indicative quote for the current compose inputs, off-thread. Epoch-fenced: a slow
+    /// reply for a since-edited compose (different amount or pair) lands as a no-op. The quote is
+    /// indicative only — `confirm_swap` re-quotes at confirm time for the binding figures.
+    pub fn get_swap_quote(&mut self, cx: &mut Context<Self>) {
+        if self.swap_quoting {
+            return;
+        }
+        let amount = self.swap.amount.read(cx).value().to_string();
+        let sell_wei = match signer::parse_eth_to_wei(&amount) {
+            Ok(w) if w > U256::ZERO => w,
+            Ok(_) => {
+                self.swap.error = Some("Enter an amount greater than zero".into());
+                cx.notify();
+                return;
+            }
+            Err(e) => {
+                self.swap.error = Some(e);
+                cx.notify();
+                return;
+            }
+        };
+        let (Some(sell_token), Some(buy_token)) = (self.swap_sell_token, self.swap_buy_token)
+        else {
+            self.swap.error = Some("Pick a token to sell and a token to receive".into());
+            cx.notify();
+            return;
+        };
+        if sell_token == buy_token {
+            self.swap.error = Some("Pick two different tokens".into());
+            cx.notify();
+            return;
+        }
+        let Some(base) = crate::swap::orderbook_base(self.chain_id) else {
+            self.swap.error = Some("Swap needs a supported network (Sepolia or mainnet)".into());
+            cx.notify();
+            return;
+        };
+        let wallet = self.wallet_address.unwrap_or(Address::ZERO);
+
+        self.swap.error = None;
+        self.swap_quoting = true;
+        // Fence this request: a reply for a since-changed compose is dropped on arrival.
+        self.swap_quote_epoch = self.swap_quote_epoch.wrapping_add(1);
+        let epoch = self.swap_quote_epoch;
+        cx.notify();
+
+        let req = crate::swap::quote_request(sell_token, buy_token, wallet, sell_wei);
+        let task = cx.background_spawn(async move {
+            // CoW HTTP (reqwest/hickory DNS) needs a tokio reactor, which GPUI's executor lacks —
+            // so the quote goes through deckard-core's blocking wrapper (it owns the runtime). The
+            // blocking call runs on this spawned background task, never the UI thread.
+            let ob = CowOrderbook::new();
+            ob.quote_blocking(base, &req)
+        });
+        cx.spawn(async move |this, cx| {
+            let res = task.await;
+            this.update(cx, |this, cx| {
+                // Drop a reply for a since-superseded quote request (a later edit / token change).
+                if this.swap_quote_epoch != epoch {
+                    return;
+                }
+                this.swap_quoting = false;
+                match res {
+                    Ok(quote) => {
+                        this.swap_quote = Some(quote);
+                        this.swap.error = None;
+                    }
+                    Err(e) => {
+                        this.swap_quote = None;
+                        this.swap.error = Some(crate::swap::humanize_quote_error(&e));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Build the bound order from the current quote, `propose_order` it off-thread, and on
+    /// `NeedsApproval` install the review proposal so the clear-signing card + hold-to-confirm
+    /// appear. A swap is ALWAYS `NeedsApproval` in v1 (the completed hold IS the approval); a
+    /// `Deny` surfaces a swap-worded line. Validates a fresh quote + distinct tokens up front.
+    pub fn review_swap(&mut self, cx: &mut Context<Self>) {
+        if self.swap.busy {
+            return;
+        }
+        let Some(quote) = self.swap_quote.clone() else {
+            self.swap.error = Some("Get a quote first, then review the order".into());
+            cx.notify();
+            return;
+        };
+        let (Some(sell_token), Some(buy_token)) = (self.swap_sell_token, self.swap_buy_token)
+        else {
+            self.swap.error = Some("Pick a token to sell and a token to receive".into());
+            cx.notify();
+            return;
+        };
+        if sell_token == buy_token {
+            self.swap.error = Some("Pick two different tokens".into());
+            cx.notify();
+            return;
+        }
+        let Some(wallet) = self.wallet_address else {
+            self.swap.error = Some("Unlock your wallet first".into());
+            cx.notify();
+            return;
+        };
+        let chain_id = self.chain_id;
+        let order = crate::swap::order_from_quote(&quote, chain_id, wallet);
+        let bound = signer::bind_swap_order(&order, wallet);
+        let request_id = SignerClient::request_id_for_swap_order(&bound);
+        // A display-only "X SELL → at least Y BUY" summary the review card shows above the rows.
+        let summary = self.swap_summary_line(&quote, chain_id);
+
+        self.swap.error = None;
+        self.swap.proposal = None;
+        // begin_review bumps the review epoch + sets busy; a stale reply checks it before installing.
+        let epoch = self.swap.begin_review();
+        cx.notify();
+        let client = self.signer.client();
+        let order_for_task = order.clone();
+        let task =
+            cx.background_spawn(async move { client.propose_order_blocking(&order_for_task) });
+        cx.spawn(async move |this, cx| {
+            let res = task.await;
+            this.update(cx, |this, cx| {
+                // Guard FIRST: a stale review must not clear `busy` a newer review may own.
+                if !this.swap.review_is_current(epoch) {
+                    return;
+                }
+                this.swap.busy = false;
+                match res {
+                    // A valid swap is always NeedsApproval — the hold IS the approval. An Allow is
+                    // unexpected (v1 swaps never auto-allow), but install it the same way (confirm
+                    // re-derives + resolves regardless); the daemon stays the gate.
+                    Ok(Decision::NeedsApproval { .. }) | Ok(Decision::Allow) => {
+                        this.swap.proposal = Some(crate::commit_flow::Proposal {
+                            // The swap path never reads `intent` (the orchestrator works off a
+                            // fresh SwapInputs snapshot + re-quote); carry a synthetic placeholder
+                            // so the shared `Proposal` shape is satisfied.
+                            intent: signer::build_exact_approve_intent(
+                                chain_id,
+                                sell_token,
+                                order.sell_amount,
+                            ),
+                            request_id,
+                            recipient: summary,
+                            needs_resolve: true,
+                        });
+                    }
+                    Ok(Decision::Deny { reason }) => {
+                        if is_session_ended(&reason) {
+                            this.handle_session_revoked(cx);
+                        } else {
+                            this.swap.error =
+                                Some(format!("Can't swap: {}", humanize_swap_deny(&reason)));
+                        }
+                    }
+                    Err(e) => this.swap.error = Some(short_err(e)),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// A display-only "0.05 WETH → at least 92.1 COW" summary for the review card header, scaled
+    /// by each side's curated decimals. Indicative (mirrors the quote summary); the binding figures
+    /// are the rows the card renders from the same quote.
+    fn swap_summary_line(&self, quote: &QuoteResponse, chain_id: u64) -> String {
+        let sell_tok = quote.quote.sell_token;
+        let buy_tok = quote.quote.buy_token;
+        let sell_sym = crate::swap::token_symbol(chain_id, sell_tok);
+        let buy_sym = crate::swap::token_symbol(chain_id, buy_tok);
+        let sell_dec = crate::swap::token_decimals(chain_id, sell_tok);
+        let buy_dec = crate::swap::token_decimals(chain_id, buy_tok);
+        let gross_sell = quote
+            .quote
+            .sell_amount
+            .saturating_add(quote.quote.fee_amount);
+        let min_recv = deckard_core::apply_slippage(
+            quote.quote.buy_amount,
+            deckard_core::DEFAULT_SLIPPAGE_BPS,
+        );
+        format!(
+            "{} {} → at least {} {}",
+            deckard_core::format_amount(gross_sell, sell_dec, 6),
+            sell_sym,
+            deckard_core::format_amount(min_recv, buy_dec, 6),
+            buy_sym,
+        )
+    }
+
+    /// Confirm a reviewed swap (the hold-to-confirm completed): run the off-thread orchestrator
+    /// (re-quote → propose-order → exact-gross approve if short → resolve+sign over the control
+    /// channel → submit) and, on success, surface the order uid (the done screen). Mixes async I/O
+    /// with the daemon's `*_blocking` calls, so it runs inside `cx.background_spawn` (the blocking
+    /// calls block the spawned task, never the UI). Invalidates the proposal on every attempt — a
+    /// second hold must not re-submit (codex must-do, mirrors confirm_send/confirm_shield).
+    pub fn confirm_swap(&mut self, cx: &mut Context<Self>) {
+        if self.swap.proposal.is_none() || self.swap.busy {
+            return;
+        }
+        // Snapshot every value the orchestrator needs (codex must-do #5 — Shell isn't Send).
+        let (Some(quote), Some(sell_token), Some(buy_token), Some(wallet)) = (
+            self.swap_quote.as_ref(),
+            self.swap_sell_token,
+            self.swap_buy_token,
+            self.wallet_address,
+        ) else {
+            self.swap.error = Some("Review the swap again — the order details are missing".into());
+            cx.notify();
+            return;
+        };
+        let Some(base) = crate::swap::orderbook_base(self.chain_id) else {
+            self.swap.error = Some("Swap needs a supported network (Sepolia or mainnet)".into());
+            cx.notify();
+            return;
+        };
+        let chain_id = self.chain_id;
+        // The gross sell amount the relayer must be allowed to pull. The orchestrator re-quotes at
+        // confirm time and re-derives its own gross, but THIS gross is the sell-in-atoms it
+        // re-quotes against (`sellAmountBeforeFee`), so it must be the compose quote's gross.
+        let sell_wei = quote
+            .quote
+            .sell_amount
+            .saturating_add(quote.quote.fee_amount);
+
+        self.swap.busy = true;
+        self.swap.error = None;
+        // Invalidate the proposal on EVERY confirm attempt (a second hold can't re-submit).
+        self.swap.proposal = None;
+        cx.notify();
+
+        let client = self.signer.client();
+        let control = self.signer.control();
+        let eth = self.eth.clone();
+        let inputs = crate::swap::SwapInputs {
+            chain_id,
+            wallet,
+            sell_token,
+            buy_token,
+            sell_wei,
+        };
+        // The orchestrator is fully blocking: the CoW HTTP goes through deckard-core's `*_blocking`
+        // wrappers (which own a tokio runtime — the GPUI app never touches tokio), and the signer
+        // calls are already `*_blocking`. Run it on a background task so it blocks that task, never
+        // the UI thread.
+        let task = cx.background_spawn(async move {
+            let ob = CowOrderbook::new();
+            crate::swap::confirm_swap_blocking(&ob, &eth, &client, &control, base, inputs)
+        });
+        cx.spawn(async move |this, cx| {
+            let outcome = task.await;
+            this.update(cx, |this, cx| {
+                this.swap.busy = false;
+                match outcome {
+                    Ok(crate::swap::SwapConfirmOutcome::Submitted { uid }) => {
+                        this.swap_uid = Some(uid);
+                        // The order is on the orderbook (not yet on-chain) — no public balance
+                        // change to refetch until a solver fills it.
+                    }
+                    Ok(crate::swap::SwapConfirmOutcome::Denied { reason }) => {
+                        // A session-ended deny bounces to the unlock gate; the orchestrator returns
+                        // the raw tag for those so we can detect it here.
+                        if is_session_ended(&reason) {
+                            this.handle_session_revoked(cx);
+                        } else {
+                            this.swap.error =
+                                Some(format!("Can't swap: {}", humanize_swap_deny(&reason)));
+                        }
+                    }
+                    Err(e) => this.swap.error = Some(short_err(e)),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Begin a confirm hold on the swap review: start the amber fill-sweep + a timer that fires
+    /// `confirm_swap` only if the hold survives [`SHIELD_HOLD`] and the user is still on Swap.
+    pub fn swap_hold_start(&mut self, cx: &mut Context<Self>) {
+        let Some(epoch) = self.swap.begin_hold() else {
+            return;
+        };
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SHIELD_HOLD).await;
+            this.update(cx, |this, cx| {
+                if this.surface == Surface::Swap && this.swap.hold_still_valid(epoch) {
+                    this.swap.holding = false;
+                    this.confirm_swap(cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Release the swap confirm hold before it completed — reset the sweep; the epoch bump cancels
+    /// the pending timer.
+    pub fn swap_hold_cancel(&mut self, cx: &mut Context<Self>) {
+        if self.swap.cancel_hold() {
             cx.notify();
         }
     }
@@ -1909,6 +2253,7 @@ impl Shell {
             "send" => self.open_send(cx),
             "receive" => self.open(Surface::Receive, cx),
             "shield" => self.open_shield(cx),
+            "swap" => self.open_swap(cx),
             "settings" => self.open(Surface::Settings, cx),
             "copy" => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(
@@ -1981,22 +2326,31 @@ impl Shell {
     fn prepare_shield_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.pending_shield_clear {
             self.pending_shield_clear = false;
-            self.shield_amount
+            self.shield
+                .amount
                 .update(cx, |i, cx| i.set_value("", window, cx));
-            self.shield_recipient
+            self.shield
+                .recipient
                 .update(cx, |i, cx| i.set_value("", window, cx));
             // The send inputs share the lock-clear: a prior wallet's recipient/amount must not
             // linger into the next unlock.
-            self.send_amount
+            self.send
+                .amount
                 .update(cx, |i, cx| i.set_value("", window, cx));
-            self.send_recipient
+            self.send
+                .recipient
+                .update(cx, |i, cx| i.set_value("", window, cx));
+            // The swap sell-amount field shares the lock-clear too (the quote/tokens were already
+            // cleared in `lock`; this clears the input text that a listener can't, needing a Window).
+            self.swap
+                .amount
                 .update(cx, |i, cx| i.set_value("", window, cx));
         }
         if self.recipient_autofilled {
             return;
         }
         if let Some(addr) = self.railgun_address.clone() {
-            self.shield_recipient.update(cx, |input, cx| {
+            self.shield.recipient.update(cx, |input, cx| {
                 input.set_value(addr.as_str(), window, cx);
             });
             self.recipient_autofilled = true;
@@ -2060,8 +2414,23 @@ impl Render for Shell {
                     .child(self.render_settings(window, cx))
                     .into_any_element(),
                 (_, Surface::Receive) => self.render_receive(cx).into_any_element(),
-                (_, Surface::Send) => self.render_send(cx).into_any_element(),
-                (_, Surface::Shield) => self.render_shield(cx).into_any_element(),
+                (_, Surface::Send) => self
+                    .render_commit(&crate::send_view::SEND_VIEW, cx)
+                    .into_any_element(),
+                (_, Surface::Shield) => self
+                    .render_commit(&crate::shield_view::SHIELD_VIEW, cx)
+                    .into_any_element(),
+                // Swap is a bespoke render (token pickers + a quote summary the generic
+                // `render_commit` can't express); wrap it in its own scroll surface since the
+                // compose arm (pickers + summary) can run taller than the pane.
+                // v_flex (not a block div) so render_swap's commit_shell flex_1/justify_center
+                // actually centers the card — matching Send/Shield (see gpui-div-defaults-block).
+                (_, Surface::Swap) => v_flex()
+                    .id("scroll-swap")
+                    .size_full()
+                    .overflow_y_scrollbar()
+                    .child(self.render_swap(cx))
+                    .into_any_element(),
                 (Selection::Wallet, Surface::Home) => div()
                     .id("scroll-wallet")
                     .size_full()
@@ -2134,30 +2503,5 @@ impl Render for Shell {
             .on_action(cx.listener(Self::on_palette_next))
             .on_action(cx.listener(Self::on_palette_prev))
             .child(body)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_session_ended;
-
-    #[test]
-    fn session_ended_matches_only_stop_states() {
-        // A locked daemon answers `locked` to a propose; an execute after STOP answers
-        // `revoked`. Both must bounce the app back to the unlock gate.
-        assert!(is_session_ended("locked"));
-        assert!(is_session_ended("revoked"));
-        // Ordinary policy denials stay inline (the app stays Ready, shows the reason).
-        for inline in [
-            "over_cap",
-            "off_allowlist",
-            "chain_mismatch",
-            "shield_to_mismatch",
-            "not_approved",
-            "already_executed",
-            "broadcast_timeout",
-        ] {
-            assert!(!is_session_ended(inline), "{inline} must stay inline");
-        }
     }
 }

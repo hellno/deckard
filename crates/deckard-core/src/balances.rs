@@ -8,7 +8,7 @@ use alloy::providers::{DynProvider, Provider};
 use alloy::sol;
 use alloy::sol_types::SolCall;
 
-use crate::tokens::DEFAULT_TOKENS;
+use crate::tokens::tokens_for;
 
 sol! {
     #[sol(rpc)]
@@ -27,9 +27,11 @@ sol! {
 /// Multicall3 is deployed at the same address on every chain it supports.
 const MULTICALL3: Address = address!("0xcA11bde05977b3631167028862bE2a173976CA11");
 
-/// One token holding: enough to render a row and (later) value it.
+/// One token holding: enough to render a row, (later) value it, and prefill a swap.
 #[derive(Clone, Debug)]
 pub struct TokenBalance {
+    /// The token's ERC-20 contract address — the GUI needs it to prefill a swap's sell token.
+    pub address: Address,
     pub symbol: &'static str,
     pub name: &'static str,
     pub decimals: u8,
@@ -45,14 +47,18 @@ pub struct Portfolio {
     pub tokens: Vec<TokenBalance>,
 }
 
-/// Read the full portfolio for `address` in one Multicall3 round-trip.
+/// Read the full portfolio for `address` on `chain_id` in one Multicall3 round-trip. The
+/// curated ERC-20 set is keyed by chain via [`tokens_for`] (mainnet majors, the Sepolia
+/// swap-test set, or empty for an unknown chain — in which case only native ETH is read).
 pub async fn fetch_portfolio(
     provider: &DynProvider,
     address: Address,
+    chain_id: u64,
 ) -> anyhow::Result<Portfolio> {
+    let listed = tokens_for(chain_id);
     let mc = IMulticall3::new(MULTICALL3, provider);
 
-    let mut calls = Vec::with_capacity(DEFAULT_TOKENS.len() + 1);
+    let mut calls = Vec::with_capacity(listed.len() + 1);
     // [0] = native ETH balance (read through Multicall3 itself).
     calls.push(IMulticall3::Call3 {
         target: MULTICALL3,
@@ -62,7 +68,7 @@ pub async fn fetch_portfolio(
             .into(),
     });
     // [1..] = balanceOf per listed token, failure-tolerant.
-    for t in DEFAULT_TOKENS {
+    for t in listed {
         calls.push(IMulticall3::Call3 {
             target: t.address,
             allowFailure: true,
@@ -91,13 +97,14 @@ pub async fn fetch_portfolio(
     let native_wei = IMulticall3::getEthBalanceCall::abi_decode_returns(&native.returnData)?;
 
     let mut tokens = Vec::new();
-    for (t, r) in DEFAULT_TOKENS.iter().zip(results.iter().skip(1)) {
+    for (t, r) in listed.iter().zip(results.iter().skip(1)) {
         if !r.success {
             continue;
         }
         if let Ok(raw) = IERC20::balanceOfCall::abi_decode_returns(&r.returnData) {
             if !raw.is_zero() {
                 tokens.push(TokenBalance {
+                    address: t.address,
                     symbol: t.symbol,
                     name: t.name,
                     decimals: t.decimals,
@@ -154,6 +161,37 @@ fn group_thousands(int_part: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tokens::SEPOLIA_TOKENS;
+    use alloy::sol_types::SolValue;
+
+    /// An ABI-encoded `balanceOf` return decodes back to its `U256`, and a `TokenBalance`
+    /// built from a real Sepolia token carries its address + 18 decimals (the test-USDC quirk).
+    #[test]
+    fn decodes_balance_and_builds_token() {
+        // The Sepolia test USDC is an 18-decimals mock (see tokens.rs module note).
+        let usdc = SEPOLIA_TOKENS
+            .iter()
+            .find(|t| t.symbol == "USDC")
+            .expect("sepolia USDC present");
+        assert_eq!(usdc.decimals, 18, "sepolia test USDC is 18 decimals, not 6");
+
+        // 1.5 USDC at 18 decimals, ABI-encoded the way an ERC-20 balanceOf return is.
+        let raw = U256::from(1_500_000_000_000_000_000u64);
+        let encoded = raw.abi_encode();
+        let decoded =
+            IERC20::balanceOfCall::abi_decode_returns(&encoded).expect("decode balanceOf");
+        assert_eq!(decoded, raw);
+
+        let tb = TokenBalance {
+            address: usdc.address,
+            symbol: usdc.symbol,
+            name: usdc.name,
+            decimals: usdc.decimals,
+            raw: decoded,
+        };
+        assert_eq!(tb.address, usdc.address);
+        assert_eq!(format_amount(tb.raw, tb.decimals, 4), "1.5");
+    }
 
     #[test]
     fn formats_and_groups() {

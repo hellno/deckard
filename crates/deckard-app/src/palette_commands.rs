@@ -60,6 +60,13 @@ pub const COMMANDS: &[Command] = &[
         icon: None, // no shield glyph in the bundled subset
     },
     Command {
+        id: "swap",
+        title: "Swap",
+        aliases: &["trade", "exchange", "cow", "convert"],
+        shortcut: None,
+        icon: None, // no swap glyph in the bundled subset
+    },
+    Command {
         id: "settings",
         title: "Settings",
         aliases: &["preferences", "config"],
@@ -297,13 +304,18 @@ mod tests {
     }
 
     #[test]
-    fn empty_query_returns_all_ten() {
+    fn empty_query_returns_all_commands() {
         let mut m = matcher();
         let usage = empty_usage();
         let results = rank("", COMMANDS, &usage, 0, &mut m);
 
         assert_eq!(results.len(), COMMANDS.len());
-        assert_eq!(COMMANDS.len(), 10);
+        assert_eq!(COMMANDS.len(), 11);
+        // The swap command joined the registry (#25); membership is asserted below.
+        assert!(
+            COMMANDS.iter().any(|c| c.id == "swap"),
+            "the swap command must be in the registry"
+        );
         for r in &results {
             assert!(r.positions.is_empty());
         }
@@ -334,6 +346,27 @@ mod tests {
         // Flat frecency ⇒ stable registry order.
         assert_eq!(id_at(&results, 0), "portfolio");
         assert_eq!(id_at(&results, COMMANDS.len() - 1), "lock");
+    }
+
+    #[test]
+    fn swap_and_trade_rank_the_swap_command() {
+        let mut m = matcher();
+        let usage = empty_usage();
+
+        // The literal title matches.
+        let by_title = rank("swap", COMMANDS, &usage, 0, &mut m);
+        assert!(
+            by_title.iter().any(|r| COMMANDS[r.cmd_index].id == "swap"),
+            "\"swap\" must match the swap command"
+        );
+
+        // The "trade" alias reaches it too (no title positions on an alias match).
+        let by_alias = rank("trade", COMMANDS, &usage, 0, &mut m);
+        let swap = by_alias
+            .iter()
+            .find(|r| COMMANDS[r.cmd_index].id == "swap")
+            .expect("\"trade\" must match the swap command via its \"trade\" alias");
+        assert!(swap.positions.is_empty());
     }
 
     #[test]
