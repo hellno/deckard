@@ -272,8 +272,8 @@ async fn activity_feed_within_cap_auto_allow_is_decided() {
 }
 
 /// #60: the feed expires BEFORE reading, so a lapsed `Pending` card never shows as still
-/// proposed. A never-decided lapse collapses to `Decided{approved:false}` in the feed (the
-/// Approvals queue still carries the precise `Expired` status).
+/// proposed. A never-decided lapse maps to its own `ActivityLifecycle::Expired` (NOBODY acted),
+/// kept distinct from a human denial / STOP revoke so the feed renders it neutral.
 #[tokio::test]
 async fn activity_feed_expires_before_read() {
     let dir = TempDir::new("activity-expire");
@@ -294,8 +294,9 @@ async fn activity_feed_expires_before_read() {
     let rec = feed.iter().find(|r| r.request_id == id).unwrap();
     assert_eq!(
         rec.lifecycle,
-        ActivityLifecycle::Decided { approved: false },
-        "a lapsed card reads as a non-approval in the feed (expire-on-read)"
+        ActivityLifecycle::Expired,
+        "a lapsed card reads as its own `Expired` lifecycle (NOBODY acted), distinct from a human \
+         denial / STOP revoke — so the feed renders it neutral, never the amber 'you acted' tint"
     );
 }
 

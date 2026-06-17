@@ -553,6 +553,8 @@ impl Shell {
                     "approved"
                 }
                 ActivityLifecycle::Decided { approved: false } => "declined",
+                // A card went to you but the window lapsed before you acted — not a decline.
+                ActivityLifecycle::Expired => "expired",
             };
             chain = chain
                 .child(div().text_sm().text_color(muted).child("→"))
@@ -661,6 +663,23 @@ impl Shell {
                 }
                 c
             }
+            // Lapsed window — NOBODY acted (the approval TTL elapsed with no human decision).
+            // Honest two-signal: a muted neutral dash glyph + muted label + the time it lapsed.
+            // NEVER amber (amber claims "you acted"), NEVER the red x of a human denial.
+            ActivityLifecycle::Expired => cluster
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(settled_outcome_label(record, self.mask)),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(relative_time(record.timestamp_ms, now)),
+                )
+                .child(Icon::new(IconName::Minus).text_color(muted).small()),
             // Decided / executed: the outcome label + (when broadcast) the tx hash + time + glyph.
             ActivityLifecycle::Decided { .. } | ActivityLifecycle::Executed => {
                 // Executed and Decided{approved:true} are both "approved"; only an explicit
@@ -945,7 +964,8 @@ impl Shell {
 /// The settled-row outcome label, by lifecycle + whether it was auto-allowed hands-free + actor.
 /// - auto-allowed within cap (hands-free) → "auto-approved within cap"
 /// - human-involved (over-cap OR mainnet-guardrail hold), approved → "you approved" (agent)
-/// - denied / revoked / lapsed → "not approved"
+/// - denied / STOP-revoked (a human acted) → "not approved"
+/// - lapsed window (NObody acted) → "expired"
 ///
 /// Keys off `auto_allowed`, NOT the breach `reason`: a mainnet-guardrail hold breaches no cap
 /// (`reason == None`) yet still required a human, so it must read "you approved", not
@@ -954,6 +974,9 @@ fn settled_label(record: &ActivityRecord) -> &'static str {
     let is_agent = record.origin == ProposalOrigin::Agent;
     match record.lifecycle {
         ActivityLifecycle::Decided { approved: false } => "not approved",
+        // The approval window lapsed — nobody acted. Read it as such (not "not approved", which
+        // implies a human declined it).
+        ActivityLifecycle::Expired => "expired",
         ActivityLifecycle::Decided { approved: true } | ActivityLifecycle::Executed => {
             if record.auto_allowed {
                 if is_agent {
@@ -1235,6 +1258,21 @@ mod tests {
             false,
         );
         assert_eq!(settled_label(&denied), "not approved");
+        // Amber-honesty (codex MEDIUM): a LAPSED window had NO human action, so it must read
+        // "expired", NOT "not approved" (which would imply a human declined it). It is its own
+        // lifecycle so the renderer can tint it neutral instead of the amber "you acted".
+        let lapsed = record(
+            0x05,
+            ActivityLifecycle::Expired,
+            BreachedLimit::PerTxCap,
+            false,
+        );
+        assert_eq!(settled_label(&lapsed), "expired");
+        assert_ne!(
+            settled_label(&lapsed),
+            settled_label(&denied),
+            "a lapsed window must not read identically to a human denial"
+        );
     }
 
     #[test]

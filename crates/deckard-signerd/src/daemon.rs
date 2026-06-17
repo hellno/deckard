@@ -987,23 +987,13 @@ impl Daemon {
     /// the on-chain cancel outcome, so `sign_order`/`execute` refuse from here on.
     async fn stop(&mut self) {
         // Collect the order ids to cancel up front (an immutable borrow that ends before the
-        // mutable cancel calls). Only SIGNED, un-cancelled, non-expired orders are worth a
-        // cancel: an unsigned order was never submitted to the orderbook.
-        let to_cancel: Vec<RequestId> = self
-            .requests
-            .iter()
-            .filter_map(|(id, req)| {
-                let is_order = matches!(req.payload, PendingPayload::Order(_));
-                let signed = req.signature.is_some();
-                let not_cancelled = req.broadcast.is_none();
-                let not_expired = !matches!(req.status, ApprovalStatus::Expired);
-                if is_order && signed && not_cancelled && not_expired {
-                    Some(*id)
-                } else {
-                    None
-                }
-            })
-            .collect();
+        // mutable cancel calls). Only SIGNED, un-cancelled orders are loose on the CoW orderbook
+        // and worth an on-chain invalidate (an unsigned order was never submitted).
+        //
+        // The selection (which signed orders are still settleable) is extracted to
+        // `select_orders_to_cancel` so it can be unit-tested without a chain — see its doc for why
+        // it gates on the order's real `valid_to`, NOT the daemon's local approval-TTL `Expired`.
+        let to_cancel = select_orders_to_cancel(&self.requests, now_secs());
 
         for id in to_cancel {
             // The key is still live here (we lock AFTER this pass). Swallow + log errors so one
@@ -1365,6 +1355,34 @@ impl Daemon {
     }
 }
 
+/// STOP's on-chain-cancel selection, extracted from `stop()` so it is unit-testable without a
+/// chain. Returns the SIGNED, un-cancelled orders that are STILL settleable at `now` (unix secs)
+/// — the ones loose on the CoW orderbook that an `invalidateOrder` must kill before the key is
+/// zeroized.
+///
+/// It gates on the order's REAL `valid_to`, NEVER the daemon's local approval-TTL
+/// `ApprovalStatus::Expired`. Those are different clocks: a signed order whose 120s approval
+/// record has lapsed is still settleable by a solver until `valid_to` (up to 24h), so STOP must
+/// still cancel it. (Skipping locally-`Expired` orders was a STOP-integrity hole — they could
+/// settle after the kill switch.) Unsigned orders (never submitted), already-cancelled/broadcast
+/// orders, plain `Tx` records, and orders whose `valid_to` is already in the past (genuinely
+/// unsettleable — a cancel would be wasted gas) are all skipped.
+fn select_orders_to_cancel(requests: &HashMap<RequestId, PendingReq>, now: u64) -> Vec<RequestId> {
+    requests
+        .iter()
+        .filter_map(|(id, req)| {
+            let order = match &req.payload {
+                PendingPayload::Order(o) => o,
+                PendingPayload::Tx(_) => return None,
+            };
+            let signed = req.signature.is_some();
+            let not_cancelled = req.broadcast.is_none();
+            let still_settleable = u64::from(order.valid_to) > now;
+            (signed && not_cancelled && still_settleable).then_some(*id)
+        })
+        .collect()
+}
+
 /// Map a stored [`PendingPayload`] to its wire [`PendingPayloadView`] for the inbox. A `Tx`
 /// whose calldata decodes as an exact `approve(spender, amount)` is surfaced as the structured
 /// `Approve` view; any other `Tx` rides as the raw intent; an `Order` rides as-is.
@@ -1422,15 +1440,15 @@ fn breach_for(intent: &Intent, policy: &Policy) -> BreachedLimit {
     }
 }
 
-/// Derive a record's feed lifecycle from its live state. A broadcast tx is `Executed`
-/// regardless of status; otherwise the `ApprovalStatus` maps onto the three-state lifecycle.
-/// An `Expired` (lapsed, never-decided) card collapses to `Decided{approved: false}` — the
-/// feed shows it as closed, while the Approvals queue still carries the precise `Expired`
-/// status. This keeps `ActivityLifecycle` at three states (no fifth `ApprovalStatus` ripple).
+/// Derive a record's feed lifecycle from its live state. A broadcast tx is `Executed` regardless
+/// of status; otherwise the `ApprovalStatus` maps onto the lifecycle. A lapsed `Expired` card maps
+/// to its own `ActivityLifecycle::Expired` (NOT `Decided{approved:false}`) so the feed can render
+/// it neutrally — no human acted on a window that simply timed out, so it must not carry the amber
+/// "you acted" tint that a human denial / STOP revoke does.
 fn activity_lifecycle(req: &PendingReq) -> ActivityLifecycle {
     // A cancelled order's only broadcast was an `invalidateOrder` — the order did NOT go through,
     // so read it as a non-approval (stopped), never `Executed`. Check this BEFORE the broadcast
-    // branch (a cancel sets `broadcast`).
+    // branch (a cancel sets `broadcast`). A STOP revoke IS a human action → `Decided{false}`.
     if req.cancelled {
         return ActivityLifecycle::Decided { approved: false };
     }
@@ -1440,9 +1458,10 @@ fn activity_lifecycle(req: &PendingReq) -> ActivityLifecycle {
     match req.status {
         ApprovalStatus::Pending => ActivityLifecycle::Proposed,
         ApprovalStatus::Allowed => ActivityLifecycle::Decided { approved: true },
-        ApprovalStatus::Denied { .. } | ApprovalStatus::Expired => {
-            ActivityLifecycle::Decided { approved: false }
-        }
+        // A human denial or STOP revoke (both `Denied`) → a human acted.
+        ApprovalStatus::Denied { .. } => ActivityLifecycle::Decided { approved: false },
+        // The window lapsed with nobody acting → neutral, human-absent close.
+        ApprovalStatus::Expired => ActivityLifecycle::Expired,
     }
 }
 
@@ -1458,4 +1477,91 @@ fn one_line(e: &anyhow::Error) -> String {
         .chars()
         .take(160)
         .collect()
+}
+
+#[cfg(test)]
+mod stop_selection_tests {
+    //! Regression guard for the STOP-integrity fix: STOP must cancel a SIGNED order on-chain even
+    //! when its local approval record has lapsed to `Expired`, because the order is still
+    //! settleable on the CoW orderbook until its real `valid_to`. Drives the extracted
+    //! `select_orders_to_cancel` directly — no socket, no chain.
+    use super::*;
+
+    fn order(valid_to: u32) -> SwapOrder {
+        SwapOrder {
+            chain_id: 11_155_111,
+            owner: Address::ZERO,
+            sell_token: Address::repeat_byte(0x11),
+            buy_token: Address::repeat_byte(0x22),
+            sell_amount: U256::from(1u64),
+            buy_amount_min: U256::from(1u64),
+            receiver: Address::ZERO,
+            valid_to,
+            app_data: deckard_core::APP_DATA_HASH,
+        }
+    }
+
+    /// A record carrying `payload`, optionally signed / already-broadcast. Its local `status` is
+    /// `Expired` on purpose: the selection must IGNORE it and consult `valid_to` instead.
+    fn req(payload: PendingPayload, signed: bool, broadcast: bool) -> PendingReq {
+        PendingReq {
+            payload,
+            status: ApprovalStatus::Expired,
+            expires_at: Instant::now(),
+            broadcast: broadcast.then(|| B256::repeat_byte(0xbb)),
+            signature: signed.then(|| Bytes::from_static(b"sig")),
+            approved: true,
+            origin: ProposalOrigin::App,
+            created_ms: 0,
+            seq: 0,
+            breached: BreachedLimit::None,
+            cancelled: false,
+            auto_allowed: false,
+        }
+    }
+
+    #[test]
+    fn cancels_a_signed_order_even_when_locally_expired() {
+        // now = 1000s; the order is valid_to = 2000s (still settleable) but its local record is
+        // `Expired`. Before the fix the `not_expired` filter dropped it — STOP must select it.
+        let id = request_id_for_order(&order(2000));
+        let mut reqs = HashMap::new();
+        reqs.insert(id, req(PendingPayload::Order(order(2000)), true, false));
+        assert_eq!(select_orders_to_cancel(&reqs, 1000), vec![id]);
+    }
+
+    #[test]
+    fn skips_unsettleable_unsigned_cancelled_and_tx_records() {
+        let now = 1000u64;
+        let mut reqs = HashMap::new();
+        // (a) valid_to already in the past → unsettleable → skip (a cancel would be wasted gas).
+        reqs.insert(
+            B256::repeat_byte(0x01),
+            req(PendingPayload::Order(order(500)), true, false),
+        );
+        // (b) unsigned → never posted to the orderbook → skip.
+        reqs.insert(
+            B256::repeat_byte(0x02),
+            req(PendingPayload::Order(order(2000)), false, false),
+        );
+        // (c) already cancelled/broadcast → skip (its only broadcast was the invalidate).
+        reqs.insert(
+            B256::repeat_byte(0x03),
+            req(PendingPayload::Order(order(2000)), true, true),
+        );
+        // (d) a plain Tx (Send/Shield/shaped-approve) is not an order → skip.
+        let intent = Intent {
+            chain_id: 11_155_111,
+            to: Address::ZERO,
+            token: None,
+            value: U256::ZERO,
+            calldata: Bytes::new(),
+            kind: IntentKind::ContractCall,
+        };
+        reqs.insert(
+            B256::repeat_byte(0x04),
+            req(PendingPayload::Tx(intent), true, false),
+        );
+        assert!(select_orders_to_cancel(&reqs, now).is_empty());
+    }
 }

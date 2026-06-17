@@ -306,10 +306,12 @@ mod roundtrip_tests {
 
     #[test]
     fn activity_wire_types_roundtrip() {
-        // Lifecycle: every state, both `approved` polarities of `Decided`.
+        // Lifecycle: every state, both `approved` polarities of `Decided`, plus the lapsed-window
+        // `Expired` (the human-absent closed state, split out from `Decided{false}`).
         roundtrip(&ActivityLifecycle::Proposed);
         roundtrip(&ActivityLifecycle::Decided { approved: true });
         roundtrip(&ActivityLifecycle::Decided { approved: false });
+        roundtrip(&ActivityLifecycle::Expired);
         roundtrip(&ActivityLifecycle::Executed);
 
         // The breached-limit cite: every variant, and the safe default (no cap breached).

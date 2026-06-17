@@ -209,20 +209,30 @@ pub enum PendingPayloadView {
 /// Where an [`ActivityRecord`] sits in its lifecycle: `Proposed` (stored, awaiting a human
 /// decision — an over-cap or mainnet-guardrail card, still approvable), `Decided` (a verdict
 /// landed — `approved: true` for an auto-allow-within-cap or a human approval; `approved:
-/// false` for a denial, a STOP revoke, or a lapsed window), or `Executed` (signed + broadcast,
-/// so the record's `tx_hash` is `Some`).
+/// false` for a denial or a STOP revoke — both cases where **a human acted**), `Expired` (the
+/// approval window lapsed with **no human action**), or `Executed` (signed + broadcast, so the
+/// record's `tx_hash` is `Some`).
 ///
-/// This is its OWN enum, deliberately NOT a fifth [`ApprovalStatus`] variant: the feed needs a
-/// distinct shape (auto-allowed/executed rows that never wait in `PendingList`), and a new
-/// `ApprovalStatus` variant would ripple through every exhaustive match in the daemon + app.
+/// `Expired` is split out from `Decided{approved:false}` on purpose: the feed's amber tint means
+/// "a human acted here" (DESIGN §the actor model), and a lapsed window is the one closed state
+/// where nobody acted — so it must render neutral, never amber. A human denial and a STOP revoke
+/// stay `Decided{approved:false}` (pressing deny / STOP *is* a human action).
+///
+/// This is its OWN enum, deliberately NOT extra [`ApprovalStatus`] variants: the feed needs a
+/// distinct shape (auto-allowed/executed rows that never wait in `PendingList`), and new
+/// `ApprovalStatus` variants would ripple through every exhaustive match in the daemon + app.
 /// `ApprovalStatus` and `PendingRecord` stay untouched (#28/#31 additive-evolution rule).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ActivityLifecycle {
     /// Stored and waiting on a human — approvable from the feed (and the Approvals queue).
     Proposed,
-    /// A decision landed. `approved == true`: auto-allowed within cap, or a human approval.
-    /// `approved == false`: a human denial, a STOP/`revoke_all`, or an elapsed approval window.
+    /// A decision landed by a human (or an auto-allow). `approved == true`: auto-allowed within
+    /// cap, or a human approval. `approved == false`: a human denial or a STOP/`revoke_all` — in
+    /// both a human acted.
     Decided { approved: bool },
+    /// The approval window lapsed before anyone acted — a closed, never-approved card with NO
+    /// human in the loop. Rendered neutral (never the amber "you acted" tint).
+    Expired,
     /// Signed + broadcast — the record's `tx_hash` is `Some`.
     Executed,
 }

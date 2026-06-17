@@ -115,9 +115,12 @@ AUTO_MIN_WEI="$(mcp_field '.auto_shield_min_wei')"
 CAP_WEI="$(mcp_field '.per_tx_cap_wei')"
 : "${AUTO_MIN_WEI:=0}" "${CAP_WEI:=0}"
 
+# BASELINE_WEI is the balance already here at startup — the funds we must NOT shield. It is set
+# ONCE and never moves. Everything above it is "new deposits to act on"; see iterate() for why a
+# fixed baseline (rather than a high-water mark we ratchet up and down) is what makes the loop safe.
 if [[ -n "${DECKARD_AGENT_BASELINE_WEI:-}" ]]; then
     # Pinned baseline (the --once smoke): treat funds above this as a new deposit to shield.
-    LAST_SEEN_WEI="${DECKARD_AGENT_BASELINE_WEI}"
+    BASELINE_WEI="${DECKARD_AGENT_BASELINE_WEI}"
 else
     mcp balance
     if [[ ${MCP_RC} -ne 0 ]]; then
@@ -132,11 +135,11 @@ else
         echo "demo-agent: the wallet is LOCKED — unlock it in the Deckard app first (the daemon holds no key until you do)." >&2
         exit 1
     fi
-    LAST_SEEN_WEI="$(mcp_field '.public_wei')"
-    : "${LAST_SEEN_WEI:=0}"
+    BASELINE_WEI="$(mcp_field '.public_wei')"
+    : "${BASELINE_WEI:=0}"
 fi
 
-say "read policy (cap $(cast from-wei "${CAP_WEI}") ETH, auto-shield floor $(cast from-wei "${AUTO_MIN_WEI}") ETH) · baseline $(cast from-wei "${LAST_SEEN_WEI}") ETH · watching…"
+say "read policy (cap $(cast from-wei "${CAP_WEI}") ETH, auto-shield floor $(cast from-wei "${AUTO_MIN_WEI}") ETH) · baseline $(cast from-wei "${BASELINE_WEI}") ETH · watching…"
 
 # Pending request_ids the human still has to approve. Parallel arrays: id + whether we've
 # already narrated the "waiting" line (so we say it once, not every poll).
@@ -202,27 +205,35 @@ iterate() {
     local public_wei; public_wei="$(mcp_field '.public_wei')"
     [[ -z "${public_wei}" ]] && return
 
-    # (a) Ratchet DOWN: a post-shield balance drop must not permanently mask later deposits.
-    if [[ "$(wei_le "${public_wei}" "${LAST_SEEN_WEI}")" == "1" ]]; then
-        LAST_SEEN_WEI="${public_wei}"
-    fi
-
-    # (b) Did fresh, above-floor ETH arrive?
-    local delta; delta="$(wei_sub "${public_wei}" "${LAST_SEEN_WEI}")"
-    if [[ "$(wei_gt "${delta}" 0)" == "1" && "$(wei_ge "${delta}" "${AUTO_MIN_WEI}")" == "1" ]]; then
-        # Leave a little gas headroom if the deposit is ~the whole balance: shield the delta,
-        # but never more than (balance - 0.001 ETH) so the wallet can pay for the shield tx.
+    # Fixed-baseline detection. BASELINE_WEI is the balance that was already here at startup and
+    # NEVER moves, so the "work to do" each poll is simply (public − baseline). We deliberately do
+    # NOT keep a high-water mark and ratchet it up on deposits / down after shields settle: that one
+    # dual-direction number raced the settlement (a deposit landing in the ~2s window between a
+    # broadcast and the balance dropping got absorbed by the downward rebaseline and lost forever).
+    # Instead, two simpler facts keep us correct with no bookkeeping:
+    #   • funds we've decided on stay "counted" only while a request is IN FLIGHT — so we gate a new
+    #     proposal on `pending_count == 0` and never stack or re-shield the same deposit;
+    #   • once an in-flight shield broadcasts, the funds LEAVE, so (public − baseline) drops back
+    #     under the floor on its own — nothing to rebaseline.
+    # The daemon is the real idempotency authority (request_id is deterministic): an identical
+    # re-propose returns the SAME record as-is — pending → same card (no TTL reset), already
+    # broadcast → `already_executed`, expired → expired — so even a redundant propose can't
+    # double-shield. A deposit that lands while a card is awaiting your approval simply waits its
+    # turn: when you approve and that shield broadcasts, the newcomer becomes the surplus and is
+    # proposed on the next poll.
+    local surplus; surplus="$(wei_sub "${public_wei}" "${BASELINE_WEI}")"
+    if [[ "$(wei_ge "${surplus}" "${AUTO_MIN_WEI}")" == "1" && "$(pending_count)" -eq 0 ]]; then
+        # Shield the whole surplus, but never so much that the wallet can't pay gas for the shield
+        # tx — cap it at (balance − 0.001 ETH). The fixed baseline is normally well above that
+        # headroom, so in practice we shield the full deposit and gas comes out of the old funds.
         local headroom="1000000000000000"   # 0.001 ETH
         local cap_wei shield_wei
         cap_wei="$(wei_sub "${public_wei}" "${headroom}")"
-        shield_wei="${delta}"
+        shield_wei="${surplus}"
         [[ "$(wei_gt "${shield_wei}" "${cap_wei}")" == "1" ]] && shield_wei="${cap_wei}"
-        if [[ "$(wei_le "${shield_wei}" 0)" == "1" ]]; then
-            LAST_SEEN_WEI="${public_wei}"   # all dust/gas — nothing to shield
-            return
-        fi
+        if [[ "$(wei_gt "${shield_wei}" 0)" == "1" ]]; then
         local amount_eth; amount_eth="$(cast from-wei "${shield_wei}")"
-        say "noticed +$(cast from-wei "${delta}") ETH · proposing shield of ${amount_eth} ETH…"
+        say "noticed +$(cast from-wei "${surplus}") ETH above the baseline · proposing shield of ${amount_eth} ETH…"
 
         local t0 t1
         t0="$(now_ms)"
@@ -230,15 +241,15 @@ iterate() {
         t1="$(now_ms)"
         if [[ ${MCP_RC} -ne 0 ]]; then
             if mcp_is_stop; then STOPPED=1; return; fi
-            say "shield refused (transient) — will retry next poll."
-            printf '%s\n' "${MCP_ERR}" >&2
+            # A broadcast still settling answers a re-propose with `already_executed` — that is
+            # expected and silent (the funds are on their way out). Anything else is transient;
+            # there is no state to unwind, so we just re-propose next poll.
+            mcp_says 'already_executed' || { say "shield refused (transient) — will retry next poll."; printf '%s\n' "${MCP_ERR}" >&2; }
             return
         fi
         local decision req_id
         decision="$(mcp_field '.decision')"
         req_id="$(mcp_field '.request_id')"
-        # Idempotency: advance the high-water mark the instant we've proposed, before execute.
-        LAST_SEEN_WEI="${public_wei}"
 
         if [[ "${decision}" == "allow" ]]; then
             [[ ${CAPTURE} -eq 1 ]] && printf 'Atlas[capture]: propose→decision(allow) %s ms\n' "$((t1 - t0))"
@@ -261,6 +272,7 @@ iterate() {
             pending_add "${req_id}"
         else
             say "unexpected shield decision '${decision}' — leaving it for the next poll."
+        fi
         fi
     fi
 

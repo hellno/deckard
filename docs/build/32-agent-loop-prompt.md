@@ -38,16 +38,21 @@ You run this with the six tools from the quickstart — read them first if you h
 >
 > 1. Call `deckard_policy_get` once and note `per_tx_cap_wei`, `daily_cap_wei`, and
 >    `auto_shield_min_wei`. Call `deckard_wallet_balance` once and remember `public_wei` as the
->    **baseline** — do not shield the funds that were already there.
-> 2. Then loop: every ~10 seconds call `deckard_wallet_balance`. First, if `public_wei ≤
->    last_seen_wei` (a prior shield settled and lowered the public balance), set `last_seen_wei =
->    public_wei` — this ratchets the baseline DOWN so a later deposit is still detected. Then
->    compute `delta = public_wei − last_seen_wei`. If `delta` is positive and `delta ≥
->    auto_shield_min_wei`, a new deposit arrived worth shielding.
-> 3. For a new deposit: convert `delta` to a decimal ETH string and call `deckard_shield` with it
->    (leave a little headroom for gas — shield slightly less than the full delta if the deposit is
->    close to the whole balance). Set `last_seen_wei = public_wei` **immediately**, before you
->    execute, so the next poll does not re-shield the same funds.
+>    **baseline** — the funds already here, which you must NOT shield. This number is fixed: you set
+>    it once and never change it.
+> 2. Then loop: every ~10 seconds call `deckard_wallet_balance` and compute `surplus = public_wei −
+>    baseline`. If `surplus ≥ auto_shield_min_wei` **and you have no request already awaiting
+>    approval or execution**, fresh ETH has arrived worth shielding. (The "nothing in flight" guard
+>    is what keeps a fixed baseline correct: you never need to ratchet it — funds you've already
+>    acted on stay accounted-for only while their request is live, and once a shield broadcasts they
+>    leave the public balance, so `surplus` drops back under the floor on its own.)
+> 3. For a new deposit: shield the whole `surplus` — convert it to a decimal ETH string and call
+>    `deckard_shield` (leave a little headroom for gas: if `surplus` is essentially the entire
+>    balance, shield `balance − 0.001 ETH` so the wallet can still pay for the shield tx). You do
+>    **not** track or advance any "last seen" number: the daemon builds a deterministic
+>    `request_id` from the intent, so if you ever re-propose the same funds it returns the same
+>    record as-is (a pending card stays one card, an already-broadcast shield answers
+>    `already_executed`) — it can never double-shield.
 >    - `decision: "allow"` → call `deckard_execute` with the `request_id`. Report the `tx_hash`.
 >    - `decision: "needs_approval"` → the amount is over a cap (or you're on mainnet). **Do not
 >      re-propose and do not lower the amount on your own.** Remember this `request_id`. Tell the
@@ -67,11 +72,12 @@ You run this with the six tools from the quickstart — read them first if you h
 
 ## How each rule works (and why)
 
-### Detecting a deposit — the balance delta
+### Detecting a deposit — surplus over a fixed baseline
 
 There is no daemon-side receive-watcher in this demo (a `get_logs` watcher is the later
-hands-free version). You poll. Hold a single number in your context — `last_seen_wei` — and on
-each poll compare it to the fresh `public_wei`. A positive `delta` is new inbound ETH.
+hands-free version). You poll. Hold ONE number in your context — `baseline`, the public balance at
+startup — and **never change it**. Each poll, `surplus = public_wei − baseline` is the new inbound
+ETH you haven't dealt with.
 
 `auto_shield_min_wei` is **advisory**: the policy gate does not switch on it (`deckard_policy_get`
 returns it for you to read). Treat it as your own floor so dust deposits and gas-refund noise do
@@ -83,20 +89,25 @@ This is the one rule that makes a *loop* safe. The trap: you shield a deposit, b
 poll the public balance has not dropped yet (the shield is still confirming), so a naive loop
 sees the "same" balance as still-new and shields it again.
 
-Two layers stop that:
+An earlier version of this loop tried to solve it by tracking a *high-water mark* and ratcheting it
+both up (on deposits) and down (after shields settle). Don't — that one number means two things at
+once, and the downward ratchet *races* the settlement: a deposit that lands in the couple of
+seconds between a broadcast and the balance dropping gets absorbed into the rebaseline and is lost
+forever. The fixed-baseline model avoids the race entirely, with two simple facts:
 
-1. **You track `last_seen_wei` in your own context** and advance it the moment you propose — so
-   the next poll's `delta` is computed against the balance you already acted on, not the baseline.
-   In the prompt form this is the primary mechanism: the conversation *is* the state. Crucially,
-   `last_seen_wei` is a high-water mark you must also **ratchet DOWN**: once a shield settles the
-   public balance drops, so if you never lower `last_seen_wei` a smaller later deposit can leave
-   the balance still below the old mark and be missed forever. The poll's first step (`if
-   public_wei ≤ last_seen_wei: last_seen_wei = public_wei`) handles this.
-2. **The daemon is the backstop.** `deckard_shield` builds a deterministic `request_id` from the
-   intent, so an identical re-propose returns the same id; once it has broadcast, a re-execute is
-   refused with `already_executed` — **do not retry that**. (An in-app loop, if one is built
-   later, would track the in-flight `request_id` explicitly instead of relying on conversation
-   context — see #61.)
+1. **A new proposal is gated on "nothing in flight."** You only shield `surplus` when you have no
+   request still awaiting approval or execution. Funds you've acted on stay accounted-for *only
+   while their request is live*; the moment that shield broadcasts they leave the public balance,
+   so `surplus` falls back under the floor by itself — no number to ratchet. A deposit that lands
+   while a card is waiting on you simply waits its turn (it's the next surplus once the current one
+   clears).
+2. **The daemon is the backstop, and the real authority.** `deckard_shield` builds a deterministic
+   `request_id` from the intent, so an identical re-propose returns the SAME record as-is — a
+   pending card stays one card (its approval timer is not reset), and once it has broadcast a
+   re-propose or re-execute is refused with `already_executed`. So even a redundant propose can
+   never double-shield; you don't need perfect client-side bookkeeping to be safe. (The headless
+   runner `scripts/demo-agent.sh` implements exactly this — a fixed `BASELINE_WEI` and a
+   `pending_count == 0` gate.)
 
 ### Backpressure — wait, do not spam
 
