@@ -279,12 +279,14 @@ demo-deposit amount='0.02':
         exit 1
     fi
 
-    # SAFETY: never broadcast a transfer with a well-known dev key on mainnet. If the RPC is
-    # chain 1, the funding key is a publicly-known account — refuse loudly.
+    # SAFETY: never broadcast a transfer with a well-known dev key on a real chain. ALLOWLIST the
+    # exact demo chain — a chain-1-only denylist would still pass any OTHER real network fronted at
+    # :8545 (a forwarded Sepolia/Holesky node, a tunnel) and broadcast a real tx with a public key.
+    # (Matches the `demo` recipe's own `CHAIN_ID == demo_chain_id` enforcement.)
     CHAIN_ID="$(cast chain-id --rpc-url "{{demo_rpc_url}}" 2>/dev/null || echo "?")"
-    if [[ "${CHAIN_ID}" == "1" ]]; then
-        echo "error: refusing to run — the RPC reports chain 1 (mainnet)." >&2
-        echo "  demo-deposit signs with a PUBLIC anvil dev key; broadcasting it on mainnet is unsafe." >&2
+    if [[ "${CHAIN_ID}" != "{{demo_chain_id}}" ]]; then
+        echo "error: refusing to run — {{demo_rpc_url}} reports chain ${CHAIN_ID}, not the demo chain {{demo_chain_id}}." >&2
+        echo "  demo-deposit signs with a PUBLIC anvil dev key; broadcasting it on any real chain is unsafe." >&2
         echo "  Point {{demo_rpc_url}} at the local demo fork (just demo) and retry." >&2
         exit 1
     fi

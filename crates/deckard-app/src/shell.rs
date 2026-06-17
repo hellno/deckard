@@ -2248,13 +2248,22 @@ impl Shell {
                 match res {
                     Ok(records) => {
                         this.activity_error = None;
+                        // Preserve the highlight by request_id, NOT by raw index. The ~2s poller
+                        // can insert/remove proposed rows between renders, so a stale numeric index
+                        // could point at a DIFFERENT record than the operator sees selected — and
+                        // `x`/deny + the palette deny-selected resolve the SELECTED record. Capture
+                        // the id from the old snapshot, then re-key to it in the new pending subset;
+                        // if it's gone (settled/expired), clamp. This closes a wrong-deny race.
+                        let selected_id = crate::activity_view::activity_pending(&this.activity)
+                            .get(this.activity_selected)
+                            .map(|r| r.request_id);
                         this.activity = records;
-                        let len = crate::activity_view::activity_pending(&this.activity).len();
-                        this.activity_selected = if len == 0 {
-                            0
-                        } else {
-                            this.activity_selected.min(len - 1)
-                        };
+                        let pending = crate::activity_view::activity_pending(&this.activity);
+                        this.activity_selected = selected_id
+                            .and_then(|id| pending.iter().position(|r| r.request_id == id))
+                            .unwrap_or_else(|| {
+                                this.activity_selected.min(pending.len().saturating_sub(1))
+                            });
                     }
                     Err(e) => this.activity_error = Some(short_err(e)),
                 }
@@ -2615,10 +2624,12 @@ impl Shell {
             // "NEEDS YOU" band — so this id now opens Activity, same as "activity".
             "approvals" => self.open_activity(window, cx),
             "activity" => self.open_activity(window, cx),
-            // Approve / deny route to the feed's inline review. Each still requires the deliberate
-            // two-step (open the row's review, then a second approve), so neither can blind-resolve
-            // a spend from a list row or the palette. Open the feed FIRST (mirroring STOP) so the
-            // operator triages against a fresh, on-screen snapshot — never a stale off-feed one.
+            // APPROVE requires the deliberate two-step (open the row's review, then a second
+            // approve) — you can NEVER blind-approve a SPEND from a list row or the palette. DENY is
+            // one-key by design (deny only REFUSES a spend — the fail-safe direction); it resolves
+            // the highlighted record, which refresh_activity re-keys by request_id so it can't hit
+            // the wrong row under poll churn. Open the feed FIRST (mirroring STOP) so the operator
+            // triages against a fresh, on-screen snapshot — never a stale off-feed one.
             "approve-selected" => {
                 self.open_activity(window, cx);
                 self.approve_activity(cx);
