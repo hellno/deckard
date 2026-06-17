@@ -45,9 +45,10 @@ Recorded so the rubric below reflects deliberate product choices, not unexamined
   attributes**; we explicitly do **not** chase Walletbeat's Stage ladder. The differentiator (an
   agent that can't move funds without policy) is something Walletbeat doesn't even score; the rubric
   is a checklist to harvest where it aligns, not a ladder to climb.
-- **Hardware-wallet signing (#4) — out of scope.** Deckard is keyboard-first, native, single-binary;
-  external hardware signing is a deliberate non-goal. (A *secure-enclave* unlock path, #5, is separate
-  and still in scope.)
+- **Hardware-wallet signing (#4) — in scope, lower priority.** A HW signer kind behind `signerd` fits
+  the key-isolation thesis (the device holds the key, not the host). EOA HW devices sign secp256k1 only,
+  so the Railgun private-spend path (babyjubjub) still needs a software key. (A *secure-enclave* unlock
+  path, #5, is separate and also in scope.) Spec'd in #78.
 - **Connection surface — decided in [ADR 0001](adr/0001-dapp-connectivity-architecture.md) (epic
   [#44](https://github.com/hellno/deckard/issues/44)).** The exploration we were deferring to has
   landed: the MCP agent stays the day-one surface, **WalletConnect is rejected**, an embedded browser
@@ -78,8 +79,9 @@ Recorded so the rubric below reflects deliberate product choices, not unexamined
 
 These statuses are Deckard's self-assessment against the rules below; Walletbeat would rate
 independently. The biggest single lever is the **external security audit** (#1). Per the decisions
-above, three attributes are **deliberate non-goals** and are not counted as actionable gaps:
-#4 hardware signing, #6 social recovery, #15 L2 force-withdrawal. Several others are now owned by other
+above, two attributes are **deliberate non-goals** and are not counted as actionable gaps:
+#6 social recovery and #15 L2 force-withdrawal (#4 hardware signing is in scope, lower priority — #78).
+Several others are now owned by other
 tracks (see *Tracking & cross-references*): #25 browser integration and #11 isolation by
 [ADR 0001](adr/0001-dapp-connectivity-architecture.md), and #26/#27 by issue #33. We optimize the
 **vision-aligned** attributes, not Walletbeat's Stage ladder.
@@ -93,7 +95,7 @@ tracks (see *Tracking & cross-references*): #25 browser integration and #11 isol
 | 1 | **Security audits** | Audited within last 365 days, all medium+ findings fixed; stale/unresolved = PARTIAL | **MISSING** — "no third-party audit yet" (`SECURITY.md`) | **Fund + complete an external audit** of the signer/policy/keystore surface; publish the report and remediation. Highest-leverage single item (also a Stage-1 gate). **Decision spike — budget/vendor undecided (2026-06-14).** |
 | 2 | **Scam prevention** | Warn users about scams (malicious address / approval / phishing / simulation) | **PARTIAL** — network-warning on Receive only (`receive.rs`, `DESIGN.md`) | Add malicious-address / known-scam checks and **simulate-before-sign warnings** in the clear-signing card; surface risk before approval. |
 | 3 | **Transaction legibility** (clear-signing) | Display basic, human-readable tx details before signing; decode EIP-712 | **PARTIAL** — clear-signing card wired for shield/swap (`shield_view.rs`); EIP-712 machinery exists (`cow_types.rs`) but not user-facing for arbitrary tx | Extend the clear-signing card to **all writes** (esp. the gated Send), and render decoded **EIP-712** structured data in plain language. |
-| 4 | **Hardware wallet support** | Sign via external hardware wallets, ideally 3+ vendors (Stage-1 wants multi-vendor) | **OUT OF SCOPE (2026-06-14)** — no Ledger/Trezor path | **Deliberate non-goal** — keyboard-first, native, single-binary. (Secure-enclave unlock, #5, is separate and in scope.) |
+| 4 | **Hardware wallet support** | Sign via external hardware wallets, ideally 3+ vendors (Stage-1 wants multi-vendor) | **IN SCOPE, LOWER PRIORITY** — no Ledger/Trezor path yet | A HW signer kind behind `signerd` fits the key-isolation thesis; EOA HW signs secp256k1 only, so Railgun private spends (babyjubjub) still need a software key. Spec'd in #78. |
 | 5 | **Security best practices** | Key storage in secure enclave/HSM = PASS; **standardized-KDF-encrypted / OS-sandboxed = PARTIAL**; on-device keygen with OS CSPRNG required | **PARTIAL** — Argon2id + XChaCha20-Poly1305 at rest, on-device keygen, OS CSPRNG (`keystore.rs`) | Already a solid PARTIAL. To reach **PASS**, add a **secure-enclave / OS-keychain** key path (Touch ID / Secure Enclave on macOS — already a Phase-2 line item). |
 | 6 | **Account recovery** | Credits **only guardian/social recovery** — seed backup does **not** count; needs 3+ independent shares, no single party can recover, reconstituted on user device | **OUT OF SCOPE (2026-06-14)** — BIP-39 seed backup only | **Deliberately out of scope for v0.** Guardian/social recovery conflicts with the pure-EOA, no-third-party model; accepted as unrated and documented as a trade-off. |
 | 7 | **Duress resistance** | Protect against physical coercion / unauthorized access (decoy, duress unlock, panic) | **PARTIAL** — STOP panic brake zeroizes the key (`deckard_revoke_all`, `daemon.rs`); explicit lock | Add **idle auto-lock** (already noted missing) and consider a **decoy/duress unlock**. The panic brake is a genuine partial credit. |
@@ -211,20 +213,20 @@ custom-RPC-before-first-request, #2 simulate + scam warnings, and the **Send-un-
 crate placement, seam-vs-expansion, and size are in the architecture-fit map above. The audit (#1)
 remains a budget/vendor **decision spike**, not yet an issue.
 
-**Deliberate non-goals** (rationale in *Decisions locked* above): hardware signing (#4), guardian/social
-recovery (#6), L2 force-withdrawal (#15).
+**Deliberate non-goals** (rationale in *Decisions locked* above): guardian/social recovery (#6),
+L2 force-withdrawal (#15). Hardware signing (#4) is in scope, lower priority.
 
 ## The Stages ladder (reference only — we are not climbing it)
 
 Per the **"harvest, don't climb"** decision (2026-06-14), Deckard does **not** target Walletbeat's
-Stages. **Multi-vendor hardware (#4)** is a deliberate non-goal, so **full Stage 1 is structurally
-unreachable by choice**, and that's accepted. Browser integration (#25) is planned but *phased
+Stages. **Multi-vendor hardware (#4)** is in scope but **lower priority**, so **full Stage 1 stays out
+of reach for now** — a not-yet (HW deferred + audit pending), not a never. Browser integration (#25) is planned but *phased
 post-audit* (ADR 0001), so it's a not-yet rather than a never. The ladder is kept only to show which
 vision-aligned items happen to overlap:
 
 - **Stage 0** — *cleared*: public source code (#20).
-- **Stage 1 (not targeted)** — gated by the **hardware (#4)** non-goal and the not-yet-built **audit (#1)**
-  and **dapp bridge (#25, ADR 0001)**.
+- **Stage 1 (not targeted yet)** — gated by **not-yet-built hardware (#4, lower priority)**, the
+  **audit (#1)**, and the **dapp bridge (#25, ADR 0001)**.
   Deckard nonetheless satisfies the vision-aligned Stage-1 items: **chain verification** ✅ (#16),
   **private-by-default transfers** ✅ (#10), **account portability** ✅ (#14), **FOSS license** ✅ (#19),
   with **own-node** (#13, near-PASS), **ENS** (#24), and **audit** (#1) in flight.
