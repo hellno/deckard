@@ -39,6 +39,13 @@ pub const COMMANDS: &[Command] = &[
         icon: None,
     },
     Command {
+        id: "refresh",
+        title: "Refresh balances",
+        aliases: &["refresh", "reload", "sync", "refetch", "update balances"],
+        shortcut: None,
+        icon: Some(IconName::Replace),
+    },
+    Command {
         id: "send",
         title: "Send",
         aliases: &["transfer", "pay", "withdraw", "send eth"],
@@ -310,7 +317,7 @@ mod tests {
         let results = rank("", COMMANDS, &usage, 0, &mut m);
 
         assert_eq!(results.len(), COMMANDS.len());
-        assert_eq!(COMMANDS.len(), 11);
+        assert_eq!(COMMANDS.len(), 12);
         // The swap command joined the registry (#25); membership is asserted below.
         assert!(
             COMMANDS.iter().any(|c| c.id == "swap"),
