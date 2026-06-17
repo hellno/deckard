@@ -623,9 +623,16 @@ impl Daemon {
                 reason: deny_reasons::APPROVE_WRONG_SPENDER.into(),
             });
         }
+        // The order must be LIVE — still `Pending`, awaiting its human hold. A Denied / Expired /
+        // already-signed order with a matching sell token + amount must NOT admit a fresh approve
+        // card: a new swap brings its OWN pending order. (Tightens the "matching pending order"
+        // invariant; matters more now that `finish_propose` lets a repeated approve start a fresh
+        // cycle — without this, a stale completed order could keep admitting approves.)
         let has_matching_order = self.requests.values().any(|req| match &req.payload {
             PendingPayload::Order(order) => {
-                order.sell_token == intent.to && order.sell_amount == amount
+                matches!(req.status, ApprovalStatus::Pending)
+                    && order.sell_token == intent.to
+                    && order.sell_amount == amount
             }
             PendingPayload::Tx(_) => false,
         });
