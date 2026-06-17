@@ -320,8 +320,11 @@ impl Shell {
         scroll_body = scroll_body.child(body);
 
         div().flex_1().flex().flex_col().items_center().p_8().child(
+            // Responsive width: up to 760px, but SHRINK in a narrow window so the row's right
+            // cluster (the STOP control, tx hashes, times) is never clipped off the edge.
             v_flex()
-                .w(px(760.0))
+                .w_full()
+                .max_w(px(760.0))
                 .h_full()
                 .min_h_0()
                 .items_start()
@@ -1118,7 +1121,14 @@ fn activity_shell(inner: gpui::AnyElement) -> impl IntoElement {
         .flex_col()
         .items_center()
         .p_8()
-        .child(v_flex().w(px(760.0)).items_start().child(inner))
+        // Responsive: up to 760px, shrinks in a narrow window (no right-edge clipping).
+        .child(
+            v_flex()
+                .w_full()
+                .max_w(px(760.0))
+                .items_start()
+                .child(inner),
+        )
 }
 
 #[cfg(test)]
