@@ -286,6 +286,8 @@ pub struct Shell {
     pub portfolio: Option<Portfolio>,
     /// True only during the first sync (the one allowed loading state).
     pub portfolio_loading: bool,
+    /// Address currently being refreshed. Separate from `portfolio_loading`, which is visual state.
+    portfolio_refresh_in_flight: Option<Address>,
     pub portfolio_error: Option<String>,
     /// Trust label for the last portfolio/block read: Helios-`Verified` vs visibly
     /// `Unsynced`/`Degraded`. Never silently "trusted" — surfaced in the status line.
@@ -611,6 +613,7 @@ impl Shell {
             viewing_watch: false,
             portfolio: None,
             portfolio_loading: false,
+            portfolio_refresh_in_flight: None,
             portfolio_error: None,
             read_status: None,
             synced_block: None,
@@ -665,6 +668,7 @@ impl Shell {
         .detach();
         self.wallet_address = None;
         self.portfolio = None;
+        self.portfolio_refresh_in_flight = None;
         // Dropping the task cancels the balance auto-refresh loop.
         self.poll_task = None;
         // Dropping the handle closes its channel → the sync worker thread exits.
@@ -1151,10 +1155,16 @@ impl Shell {
         cx.spawn(async move |this, cx| {
             let res = rx.recv_async().await;
             this.update(cx, |this, cx| {
+                if this.portfolio_refresh_in_flight == Some(addr) {
+                    this.portfolio_refresh_in_flight = None;
+                }
+                // Ignore stale replies for an address we are no longer viewing.
+                if addr != this.display_address {
+                    return;
+                }
                 this.portfolio_loading = false;
                 match res {
                     Ok(Ok(read)) => {
-                        // Ignore a stale reply for an address we're no longer viewing.
                         if read.value.address == this.display_address {
                             this.portfolio = Some(read.value);
                             this.portfolio_error = None;
@@ -1170,6 +1180,21 @@ impl Shell {
             .ok();
         })
         .detach();
+    }
+
+    fn kick_public_balance_refresh(&mut self, cx: &mut Context<Self>) -> bool {
+        let addr = self.display_address;
+        if self.portfolio_refresh_in_flight == Some(addr) {
+            return false;
+        }
+        self.portfolio_refresh_in_flight = Some(addr);
+        if self.portfolio.is_none() {
+            self.portfolio_loading = true;
+        }
+        self.portfolio_error = None;
+        Self::kick_portfolio(&self.eth, addr, cx);
+        Self::kick_block_number(&self.eth, cx);
+        true
     }
 
     /// Refresh the latest block height for the status line.
@@ -1190,12 +1215,7 @@ impl Shell {
 
     /// Re-fetch the portfolio for the current `display_address` (manual or post-change).
     pub fn refresh_portfolio(&mut self, cx: &mut Context<Self>) {
-        if self.portfolio.is_none() {
-            self.portfolio_loading = true;
-        }
-        self.portfolio_error = None;
-        Self::kick_portfolio(&self.eth, self.display_address, cx);
-        Self::kick_block_number(&self.eth, cx);
+        self.kick_public_balance_refresh(cx);
         // An MCP/CLI agent shields through the daemon WITHOUT this app in the loop, so a
         // manual refresh must re-scan the shielded balance too — otherwise an agent-path
         // deposit stays invisible until the next unlock.
@@ -1225,9 +1245,11 @@ impl Shell {
                         return false;
                     }
                     // Only while the wallet home is showing, and never stacked on the first load.
-                    if matches!(this.surface, Surface::Home) && !this.portfolio_loading {
-                        Self::kick_portfolio(&this.eth, this.display_address, cx);
-                        Self::kick_block_number(&this.eth, cx);
+                    if matches!(this.surface, Surface::Home)
+                        && this.selection == Selection::Wallet
+                        && this.portfolio_refresh_in_flight.is_none()
+                    {
+                        this.kick_public_balance_refresh(cx);
                     }
                     true
                 });
@@ -1307,6 +1329,7 @@ impl Shell {
             return;
         }
         self.current_rpc = url.clone();
+        self.portfolio_refresh_in_flight = None;
         self.eth = EthProvider::spawn(url, self.settings.effective_chain_id());
         self.retarget(cx);
         // Re-point the shielded sync at the new RPC too (drops the old worker, clears stale
