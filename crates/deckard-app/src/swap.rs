@@ -116,6 +116,14 @@ pub enum SwapConfirmOutcome {
     Denied { reason: String },
 }
 
+/// How long the confirm waits for the exact-gross approve to land on-chain before giving up and
+/// asking the user to hold again. ~16 checks × 2s ≈ 32s covers a Sepolia/mainnet block or two; on
+/// a local auto-mining fork the very first check already passes (the loop checks BEFORE it sleeps),
+/// so fast chains pay no wait. This is what makes a swap a SINGLE hold on a real network: the first
+/// hold broadcasts the approve AND waits for it to confirm AND submits the order.
+const APPROVE_CONFIRM_POLLS: u32 = 16;
+const APPROVE_CONFIRM_POLL_SECS: u64 = 2;
+
 /// Confirm a reviewed swap, off-thread: re-quote, propose the order, approve the vault relayer for
 /// the exact gross IF the allowance is short, resolve+sign over the PRIVATE control channel, then
 /// submit the signed order to the orderbook. Returns the order uid on success.
@@ -210,18 +218,29 @@ pub fn confirm_swap_blocking(
             ExecuteResult::Denied { reason } => return Ok(SwapConfirmOutcome::Denied { reason }),
         }
         // The approve tx must be ON-CHAIN before we submit the order, or the orderbook rejects it
-        // with InsufficientAllowance. Re-read the relayer allowance: on a local fork (auto-mine) the
-        // approve is already mined here, so this passes and the FIRST swap on a fresh wallet works.
-        // On a slow network it may not be mined yet — surface an honest "hold again" line instead of
-        // a confusing orderbook rejection (re-quote/re-hold once it confirms).
-        let confirmed = eth
-            .allowance(wallet, GPV2_VAULT_RELAYER, sell_token)
-            .recv()
-            .map_err(|_| anyhow::anyhow!("network worker stopped"))??;
-        if needs_approval(confirmed, gross) {
+        // with InsufficientAllowance. Poll the relayer allowance until it covers the gross so the
+        // swap submits in the SAME hold — one gesture, not two. The loop checks BEFORE each sleep,
+        // so a local auto-mining fork (and an already-sufficient allowance) returns immediately; on
+        // a public network the approve confirms in ~one block and we wait a bounded ~32s. A timeout
+        // returns the honest "hold again" line rather than a confusing orderbook InsufficientAllowance.
+        let mut approved = false;
+        for attempt in 0..APPROVE_CONFIRM_POLLS {
+            let confirmed = eth
+                .allowance(wallet, GPV2_VAULT_RELAYER, sell_token)
+                .recv()
+                .map_err(|_| anyhow::anyhow!("network worker stopped"))??;
+            if !needs_approval(confirmed, gross) {
+                approved = true;
+                break;
+            }
+            if attempt + 1 < APPROVE_CONFIRM_POLLS {
+                std::thread::sleep(std::time::Duration::from_secs(APPROVE_CONFIRM_POLL_SECS));
+            }
+        }
+        if !approved {
             return Ok(SwapConfirmOutcome::Denied {
                 reason:
-                    "approving the sell token on-chain — once that confirms, hold to swap again"
+                    "the token approval is still confirming on-chain — give it a few seconds, then hold to swap again"
                         .into(),
             });
         }
