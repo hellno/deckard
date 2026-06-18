@@ -16,6 +16,9 @@ name: CI
 # The `quick` gate fails cheap on the most common trivial mistake (unformatted code) before the two
 # heavy runners ever spin up.
 #
+# REUSE: this workflow is also the release gate — .github/workflows/release.yml calls it via
+#   workflow_call on a `v*` tag, so a release runs exactly these checks (no drift, no separate gate).
+#
 # COST: free on PUBLIC repos (the macOS 10x multiplier only bills PRIVATE repos). If you make this
 # repo private, add to the macos job: `if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v')`.
 # Don't switch to "*-large" runners — those are billed even on public repos.
@@ -23,10 +26,13 @@ name: CI
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   pull_request:
     branches: [main]
   workflow_dispatch:
+  # Reused as the release gate: .github/workflows/release.yml calls this verbatim on a
+  # `v*` tag so the gate can never drift from CI. The tag trigger lives in release.yml
+  # (one workflow owns the tag — no double build).
+  workflow_call:
 
 env:
   CARGO_TERM_COLOR: always

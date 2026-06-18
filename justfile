@@ -431,3 +431,10 @@ icon:
     iconutil -c icns icon.iconset -o icon.icns
     rm -rf icon.iconset
     echo "→ assets/icon.png + assets/icon.icns regenerated"
+
+# Pre-flight a release tag BEFORE pushing it: validate the tag shape, assert every
+# crate is at that version, and print the tag's CHANGELOG section (the release body).
+# This is the exact script .github/workflows/release.yml runs in CI, so local and CI
+# agree. Fails loudly with the fix if anything is off.  Usage: just release-check v0.0.2-alpha
+release-check tag:
+    @scripts/release-check.sh "{{tag}}"
