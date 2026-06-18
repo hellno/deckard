@@ -246,6 +246,7 @@ reviewing self-custody enforcement is your thing, please reach out.
 - [`SECURITY.md`](SECURITY.md) — how to report a vulnerability **privately**
   (to report privately, use GitHub's **Security** tab → **Report a vulnerability**).
 - [`CHANGELOG.md`](CHANGELOG.md) — what changed, release by release.
+- [`docs/RELEASING.md`](docs/RELEASING.md) — how to cut a versioned release (maintainers).
 
 Repo: <https://github.com/hellno/deckard>.
 
