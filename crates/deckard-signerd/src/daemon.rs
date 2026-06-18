@@ -510,22 +510,34 @@ impl Daemon {
 
         // Idempotent re-propose: an identical intent maps to the same id, so an existing record
         // is returned AS-IS — a re-propose can't reset a `Pending` card's TTL, downgrade a
-        // human approval, or re-raise a `Denied`/`Expired` request. Retrying a terminal intent
-        // needs a fresh session (`Unlock` clears the table).
+        // human approval, or re-raise a `Denied`/`Expired` request. Retrying a terminal
+        // (already-broadcast) Send/Shield needs a fresh session (`Unlock` clears the table) — that
+        // strict replay guard is what stops a double-spend of a fund-moving tx.
         if let Some(existing) = self.requests.get(&id) {
-            return match &existing.status {
-                _ if existing.broadcast.is_some() => Decision::Deny {
-                    reason: deny_reasons::ALREADY_EXECUTED.into(),
-                },
-                ApprovalStatus::Pending => Decision::NeedsApproval { request_id: id },
-                ApprovalStatus::Allowed => Decision::Allow,
-                ApprovalStatus::Denied { reason } => Decision::Deny {
-                    reason: reason.clone(),
-                },
-                ApprovalStatus::Expired => Decision::Deny {
-                    reason: deny_reasons::EXPIRED.into(),
-                },
-            };
+            // A shaped relayer-approve is the ONE exception. It moves no funds (an ERC-20
+            // `approve` is idempotent on-chain) and is re-issued for EVERY swap, so a prior
+            // already-broadcast approve must NOT permanently block an identical later swap — a
+            // user must be able to swap the same amount any number of times. Once the previous
+            // approve is on the wire, start a FRESH approval cycle by falling through to overwrite
+            // the record below. It stays gated by a matching pending order
+            // (`shaped_approve_admission`) and the human hold, so this is never a hands-free
+            // re-broadcast. Fund-moving Send/Shield intents keep the strict replay guard.
+            let fresh_approve_cycle = always_needs_card && existing.broadcast.is_some();
+            if !fresh_approve_cycle {
+                return match &existing.status {
+                    _ if existing.broadcast.is_some() => Decision::Deny {
+                        reason: deny_reasons::ALREADY_EXECUTED.into(),
+                    },
+                    ApprovalStatus::Pending => Decision::NeedsApproval { request_id: id },
+                    ApprovalStatus::Allowed => Decision::Allow,
+                    ApprovalStatus::Denied { reason } => Decision::Deny {
+                        reason: reason.clone(),
+                    },
+                    ApprovalStatus::Expired => Decision::Deny {
+                        reason: deny_reasons::EXPIRED.into(),
+                    },
+                };
+            }
         }
 
         // No record yet: decide the stored status.
@@ -611,9 +623,16 @@ impl Daemon {
                 reason: deny_reasons::APPROVE_WRONG_SPENDER.into(),
             });
         }
+        // The order must be LIVE — still `Pending`, awaiting its human hold. A Denied / Expired /
+        // already-signed order with a matching sell token + amount must NOT admit a fresh approve
+        // card: a new swap brings its OWN pending order. (Tightens the "matching pending order"
+        // invariant; matters more now that `finish_propose` lets a repeated approve start a fresh
+        // cycle — without this, a stale completed order could keep admitting approves.)
         let has_matching_order = self.requests.values().any(|req| match &req.payload {
             PendingPayload::Order(order) => {
-                order.sell_token == intent.to && order.sell_amount == amount
+                matches!(req.status, ApprovalStatus::Pending)
+                    && order.sell_token == intent.to
+                    && order.sell_amount == amount
             }
             PendingPayload::Tx(_) => false,
         });

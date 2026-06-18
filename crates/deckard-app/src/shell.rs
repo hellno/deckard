@@ -284,10 +284,9 @@ pub struct Shell {
     pub viewing_watch: bool,
     /// Last good portfolio snapshot; rendered from cache while a refresh runs.
     pub portfolio: Option<Portfolio>,
-    /// True only during the first sync (the one allowed loading state).
+    /// True while a public portfolio read (or ENS resolution) is in flight — the single
+    /// "refresh in flight" dedup flag. First-sync UI = `portfolio_loading && portfolio.is_none()`.
     pub portfolio_loading: bool,
-    /// Address currently being refreshed. Separate from `portfolio_loading`, which is visual state.
-    portfolio_refresh_in_flight: Option<Address>,
     pub portfolio_error: Option<String>,
     /// Trust label for the last portfolio/block read: Helios-`Verified` vs visibly
     /// `Unsynced`/`Degraded`. Never silently "trusted" — surfaced in the status line.
@@ -613,7 +612,6 @@ impl Shell {
             viewing_watch: false,
             portfolio: None,
             portfolio_loading: false,
-            portfolio_refresh_in_flight: None,
             portfolio_error: None,
             read_status: None,
             synced_block: None,
@@ -668,7 +666,10 @@ impl Shell {
         .detach();
         self.wallet_address = None;
         self.portfolio = None;
-        self.portfolio_refresh_in_flight = None;
+        self.portfolio_loading = false;
+        self.portfolio_error = None;
+        self.read_status = None;
+        self.synced_block = None;
         // Dropping the task cancels the balance auto-refresh loop.
         self.poll_task = None;
         // Dropping the handle closes its channel → the sync worker thread exits.
@@ -1150,16 +1151,23 @@ impl Shell {
     // --- live network plumbing (Chunks 1 & 2) ---
 
     /// Spawn a portfolio fetch for `addr`; fold the result into `self` on the UI thread.
-    fn kick_portfolio(eth: &EthProvider, addr: Address, cx: &mut Context<Self>) {
+    fn kick_portfolio(
+        eth: &EthProvider,
+        addr: Address,
+        auth_epoch: u64,
+        view_epoch: u64,
+        cx: &mut Context<Self>,
+    ) {
         let rx = eth.portfolio(addr);
         cx.spawn(async move |this, cx| {
             let res = rx.recv_async().await;
             this.update(cx, |this, cx| {
-                if this.portfolio_refresh_in_flight == Some(addr) {
-                    this.portfolio_refresh_in_flight = None;
-                }
-                // Ignore stale replies for an address we are no longer viewing.
-                if addr != this.display_address {
+                // Fence: reject a reply from a superseded session/view (lock, re-unlock, retarget).
+                if this.auth != AuthStep::Ready
+                    || this.auth_epoch != auth_epoch
+                    || this.view_epoch != view_epoch
+                    || addr != this.display_address
+                {
                     return;
                 }
                 this.portfolio_loading = false;
@@ -1183,26 +1191,36 @@ impl Shell {
     }
 
     fn kick_public_balance_refresh(&mut self, cx: &mut Context<Self>) -> bool {
-        let addr = self.display_address;
-        if self.portfolio_refresh_in_flight == Some(addr) {
+        if self.auth != AuthStep::Ready || self.portfolio_loading {
             return false;
         }
-        self.portfolio_refresh_in_flight = Some(addr);
-        if self.portfolio.is_none() {
-            self.portfolio_loading = true;
-        }
+        let addr = self.display_address;
+        let auth_epoch = self.auth_epoch;
+        let view_epoch = self.view_epoch;
+        self.portfolio_loading = true;
         self.portfolio_error = None;
-        Self::kick_portfolio(&self.eth, addr, cx);
-        Self::kick_block_number(&self.eth, cx);
+        Self::kick_portfolio(&self.eth, addr, auth_epoch, view_epoch, cx);
+        Self::kick_block_number(&self.eth, auth_epoch, view_epoch, cx);
         true
     }
 
     /// Refresh the latest block height for the status line.
-    fn kick_block_number(eth: &EthProvider, cx: &mut Context<Self>) {
+    fn kick_block_number(
+        eth: &EthProvider,
+        auth_epoch: u64,
+        view_epoch: u64,
+        cx: &mut Context<Self>,
+    ) {
         let rx = eth.block_number();
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(read)) = rx.recv_async().await {
                 this.update(cx, |this, cx| {
+                    if this.auth != AuthStep::Ready
+                        || this.auth_epoch != auth_epoch
+                        || this.view_epoch != view_epoch
+                    {
+                        return;
+                    }
                     this.synced_block = Some(read.value);
                     this.read_status = Some(read.status);
                     cx.notify();
@@ -1245,9 +1263,7 @@ impl Shell {
                         return false;
                     }
                     // Only while the wallet home is showing, and never stacked on the first load.
-                    if matches!(this.surface, Surface::Home)
-                        && this.selection == Selection::Wallet
-                        && this.portfolio_refresh_in_flight.is_none()
+                    if matches!(this.surface, Surface::Home) && this.selection == Selection::Wallet
                     {
                         this.kick_public_balance_refresh(cx);
                     }
@@ -1270,11 +1286,13 @@ impl Shell {
             self.display_address = self.wallet_address.unwrap_or(Address::ZERO);
             self.viewing_watch = false;
             self.portfolio = None;
+            self.portfolio_loading = false;
             self.refresh_portfolio(cx);
         } else if let Ok(addr) = target.parse::<Address>() {
             self.display_address = addr;
             self.viewing_watch = true;
             self.portfolio = None;
+            self.portfolio_loading = false;
             self.refresh_portfolio(cx);
         } else {
             // Treat as an ENS name: resolve first, then fetch.
@@ -1294,6 +1312,7 @@ impl Shell {
                     match res {
                         Ok(Ok(addr)) => {
                             this.display_address = addr;
+                            this.portfolio_loading = false;
                             this.refresh_portfolio(cx);
                         }
                         Ok(Err(e)) => {
@@ -1329,7 +1348,6 @@ impl Shell {
             return;
         }
         self.current_rpc = url.clone();
-        self.portfolio_refresh_in_flight = None;
         self.eth = EthProvider::spawn(url, self.settings.effective_chain_id());
         self.retarget(cx);
         // Re-point the shielded sync at the new RPC too (drops the old worker, clears stale
