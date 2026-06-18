@@ -1,0 +1,87 @@
+name: Release
+
+# Source-only releases. A `v*` tag (or a manual dry-run) runs the full CI gate (the
+# reusable ci.yml), then publishes a GitHub Release whose body is the tag's CHANGELOG
+# section. GitHub attaches the `Source code (zip/tar.gz)` archives automatically; this
+# workflow builds NO binaries. The deliberately-manual, unsigned/testnet-only `.app`
+# path and the deferred signed-build plan live in docs/RELEASING.md.
+#
+# Why source-only: for a self-custodial wallet, an unsigned/un-notarized downloadable
+# binary trains users to bypass Gatekeeper to run a key-holder, and a checksum in the
+# same Release proves download-integrity, not authenticity. Signed + notarized binaries
+# are the real later unlock (Apple Developer cert), tracked separately.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to validate, e.g. v0.0.2-alpha. workflow_dispatch is dry-run only — it never publishes."
+        required: true
+
+# Least privilege by default; only the publish job opts up to contents: write.
+permissions:
+  contents: read
+
+# Never cancel an in-flight publish, and never let two publishes of the same ref race.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Full Definition-of-Done gate, reusing ci.yml verbatim via workflow_call so the
+  # release gate can never drift from CI: fmt, both clippy `-D warnings` configs, the
+  # whole test suite (+ Foundry/anvil) on Linux, the macOS compile + tray lint, and
+  # both cargo-deny supply-chain gates. The `v*` tag trigger moved here from ci.yml so
+  # one workflow owns the tag (no double build). publish needs this — a tag can never
+  # publish a build that wouldn't pass CI.
+  gate:
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    needs: gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Resolve tag + prerelease flag
+        id: meta
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          # Alpha/beta/rc tags publish as a GitHub prerelease (never "Latest").
+          if printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+-(alpha|beta|rc)([.-]?[0-9]+)?$'; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Validate tag + render release body
+        # scripts/release-check.sh hard-fails on a malformed tag, split crate versions,
+        # or a missing CHANGELOG section. The source-only + testnet warning is a STATIC
+        # prepend so it can never be dropped, independent of the CHANGELOG content.
+        run: |
+          {
+            echo "> **Source-only release — no prebuilt binary is attached.** Build from source:"
+            echo "> see the [README build instructions](https://github.com/hellno/deckard#build--run)."
+            echo "> A manual, unsigned, testnet-only \`.app\` path is documented in"
+            echo "> [docs/RELEASING.md](https://github.com/hellno/deckard/blob/main/docs/RELEASING.md)."
+            echo ">"
+            echo "> ⚠️ **Pre-1.0 alpha. Testnet / throwaway keys only — do not use with real funds.**"
+            echo "> No third-party security audit has been performed."
+            echo ""
+            scripts/release-check.sh "${{ steps.meta.outputs.tag }}"
+          } > RELEASE_BODY.md
+          echo "----- rendered release body -----"
+          cat RELEASE_BODY.md
+      - name: Publish GitHub Release
+        # Only a real tag push publishes; workflow_dispatch is a dry-run that stops here.
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.tag }}
+          body_path: RELEASE_BODY.md
+          prerelease: ${{ steps.meta.outputs.prerelease }}
+          generate_release_notes: false
