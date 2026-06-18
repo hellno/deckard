@@ -231,6 +231,14 @@ Don't deviate from `DESIGN.md` without explicit maintainer approval.
 - Satisfy the full **Definition of Done** before requesting review, and include the command output
   as evidence.
 
+## Releasing
+
+Cutting a versioned release is a maintainer task with its own runbook:
+[`docs/RELEASING.md`](docs/RELEASING.md). In short — bump every crate version, promote the
+`CHANGELOG.md` `[Unreleased]` block to the new version, run `just release-check vX.Y.Z` to
+pre-flight, then push the tag. The `release.yml` workflow gates on the full CI and publishes a
+source-only GitHub Release automatically (no binaries; the unsigned `.app` path stays manual).
+
 ## Where to look
 
 | File | What it is |
