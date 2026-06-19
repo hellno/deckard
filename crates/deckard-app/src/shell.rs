@@ -39,6 +39,9 @@ use crate::{
     TogglePalette, ToggleTheme, APP_NAME,
 };
 
+/// Auto-refresh the public wallet balance every this many seconds while the home view is open.
+const BALANCE_POLL_SECS: u64 = 20;
+
 /// How long the user must hold the shield confirm before it signs — the deliberate-gesture
 /// duration (DESIGN: confirm is a hold, never a tap). The amber fill-sweep (`shield_view`)
 /// runs for the same span so the bar fills exactly as the action fires.
@@ -319,7 +322,8 @@ pub struct Shell {
     pub viewing_watch: bool,
     /// Last good portfolio snapshot; rendered from cache while a refresh runs.
     pub portfolio: Option<Portfolio>,
-    /// True only during the first sync (the one allowed loading state).
+    /// True while a public portfolio read (or ENS resolution) is in flight — the single
+    /// "refresh in flight" dedup flag. First-sync UI = `portfolio_loading && portfolio.is_none()`.
     pub portfolio_loading: bool,
     pub portfolio_error: Option<String>,
     /// Trust label for the last portfolio/block read: Helios-`Verified` vs visibly
@@ -327,6 +331,8 @@ pub struct Shell {
     pub read_status: Option<ReadStatus>,
     /// Latest block height — a liveness/sync indicator for the status line.
     pub synced_block: Option<u64>,
+    /// Handle to the running balance auto-refresh loop; dropped on lock to cancel it.
+    poll_task: Option<gpui::Task<()>>,
     /// Bumped on every `retarget`; a slow ENS resolution checks it before applying so a
     /// stale reply for a since-changed target can't clobber the current view.
     view_epoch: u64,
@@ -656,6 +662,7 @@ impl Shell {
             portfolio_error: None,
             read_status: None,
             synced_block: None,
+            poll_task: None,
             view_epoch: 0,
             current_rpc,
             chain_id,
@@ -706,6 +713,12 @@ impl Shell {
         .detach();
         self.wallet_address = None;
         self.portfolio = None;
+        self.portfolio_loading = false;
+        self.portfolio_error = None;
+        self.read_status = None;
+        self.synced_block = None;
+        // Dropping the task cancels the balance auto-refresh loop.
+        self.poll_task = None;
         // Dropping the handle closes its channel → the sync worker thread exits.
         self.shielded = None;
         self.railgun_address = None;
@@ -1024,6 +1037,7 @@ impl Shell {
         self.retarget(cx);
         self.kick_railgun_grant(cx);
         self.kick_agent_policy(cx);
+        self.start_balance_poll(cx);
     }
 
     /// Fetch the daemon's live policy for the wallet home's "What Atlas may do" fence (off
@@ -1189,15 +1203,28 @@ impl Shell {
     // --- live network plumbing (Chunks 1 & 2) ---
 
     /// Spawn a portfolio fetch for `addr`; fold the result into `self` on the UI thread.
-    fn kick_portfolio(eth: &EthProvider, addr: Address, cx: &mut Context<Self>) {
+    fn kick_portfolio(
+        eth: &EthProvider,
+        addr: Address,
+        auth_epoch: u64,
+        view_epoch: u64,
+        cx: &mut Context<Self>,
+    ) {
         let rx = eth.portfolio(addr);
         cx.spawn(async move |this, cx| {
             let res = rx.recv_async().await;
             this.update(cx, |this, cx| {
+                // Fence: reject a reply from a superseded session/view (lock, re-unlock, retarget).
+                if this.auth != AuthStep::Ready
+                    || this.auth_epoch != auth_epoch
+                    || this.view_epoch != view_epoch
+                    || addr != this.display_address
+                {
+                    return;
+                }
                 this.portfolio_loading = false;
                 match res {
                     Ok(Ok(read)) => {
-                        // Ignore a stale reply for an address we're no longer viewing.
                         if read.value.address == this.display_address {
                             this.portfolio = Some(read.value);
                             this.portfolio_error = None;
@@ -1215,12 +1242,37 @@ impl Shell {
         .detach();
     }
 
+    fn kick_public_balance_refresh(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.auth != AuthStep::Ready || self.portfolio_loading {
+            return false;
+        }
+        let addr = self.display_address;
+        let auth_epoch = self.auth_epoch;
+        let view_epoch = self.view_epoch;
+        self.portfolio_loading = true;
+        self.portfolio_error = None;
+        Self::kick_portfolio(&self.eth, addr, auth_epoch, view_epoch, cx);
+        Self::kick_block_number(&self.eth, auth_epoch, view_epoch, cx);
+        true
+    }
+
     /// Refresh the latest block height for the status line.
-    fn kick_block_number(eth: &EthProvider, cx: &mut Context<Self>) {
+    fn kick_block_number(
+        eth: &EthProvider,
+        auth_epoch: u64,
+        view_epoch: u64,
+        cx: &mut Context<Self>,
+    ) {
         let rx = eth.block_number();
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(read)) = rx.recv_async().await {
                 this.update(cx, |this, cx| {
+                    if this.auth != AuthStep::Ready
+                        || this.auth_epoch != auth_epoch
+                        || this.view_epoch != view_epoch
+                    {
+                        return;
+                    }
                     this.synced_block = Some(read.value);
                     this.read_status = Some(read.status);
                     cx.notify();
@@ -1233,12 +1285,7 @@ impl Shell {
 
     /// Re-fetch the portfolio for the current `display_address` (manual or post-change).
     pub fn refresh_portfolio(&mut self, cx: &mut Context<Self>) {
-        if self.portfolio.is_none() {
-            self.portfolio_loading = true;
-        }
-        self.portfolio_error = None;
-        Self::kick_portfolio(&self.eth, self.display_address, cx);
-        Self::kick_block_number(&self.eth, cx);
+        self.kick_public_balance_refresh(cx);
         // An MCP/CLI agent shields through the daemon WITHOUT this app in the loop, so a
         // manual refresh must re-scan the shielded balance too — otherwise an agent-path
         // deposit stays invisible until the next unlock.
@@ -1247,6 +1294,38 @@ impl Shell {
             self.watch_shielded_sync(false, cx);
         }
         cx.notify();
+    }
+
+    /// Auto-refresh the PUBLIC balance while the wallet home is open, so funds that arrive
+    /// out-of-band (a faucet top-up, an incoming transfer) appear without a manual refresh.
+    /// Deliberately lightweight: re-reads ONLY the public balance + block height — the heavier
+    /// shielded resync stays on the explicit refresh (header button / ⌘K command). Stored in
+    /// `poll_task`; dropping it (on lock / re-unlock) cancels the loop. Epoch-fenced as
+    /// belt-and-suspenders against a stale tick after a fast re-unlock.
+    fn start_balance_poll(&mut self, cx: &mut Context<Self>) {
+        let epoch = self.auth_epoch;
+        self.poll_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_secs(BALANCE_POLL_SECS))
+                    .await;
+                let keep = this.update(cx, |this, cx| {
+                    // End the loop once this unlocked session is over (lock / re-unlock bumps the epoch).
+                    if this.auth != AuthStep::Ready || this.auth_epoch != epoch {
+                        return false;
+                    }
+                    // Only while the wallet home is showing, and never stacked on the first load.
+                    if matches!(this.surface, Surface::Home) && this.selection == Selection::Wallet
+                    {
+                        this.kick_public_balance_refresh(cx);
+                    }
+                    true
+                });
+                if !matches!(keep, Ok(true)) {
+                    break;
+                }
+            }
+        }));
     }
 
     /// Point the portfolio at the wallet, a raw address, or an ENS name (per settings).
@@ -1259,11 +1338,13 @@ impl Shell {
             self.display_address = self.wallet_address.unwrap_or(Address::ZERO);
             self.viewing_watch = false;
             self.portfolio = None;
+            self.portfolio_loading = false;
             self.refresh_portfolio(cx);
         } else if let Ok(addr) = target.parse::<Address>() {
             self.display_address = addr;
             self.viewing_watch = true;
             self.portfolio = None;
+            self.portfolio_loading = false;
             self.refresh_portfolio(cx);
         } else {
             // Treat as an ENS name: resolve first, then fetch.
@@ -1283,6 +1364,7 @@ impl Shell {
                     match res {
                         Ok(Ok(addr)) => {
                             this.display_address = addr;
+                            this.portfolio_loading = false;
                             this.refresh_portfolio(cx);
                         }
                         Ok(Err(e)) => {
@@ -2647,6 +2729,7 @@ impl Shell {
                 self.select(Selection::Wallet, cx);
                 self.open(Surface::Home, cx);
             }
+            "refresh" => self.refresh_portfolio(cx),
             "send" => self.open_send(cx),
             "receive" => self.open(Surface::Receive, cx),
             "shield" => self.open_shield(cx),

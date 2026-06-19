@@ -39,6 +39,13 @@ pub const COMMANDS: &[Command] = &[
         icon: None,
     },
     Command {
+        id: "refresh",
+        title: "Refresh balances",
+        aliases: &["refresh", "reload", "sync", "refetch", "update balances"],
+        shortcut: None,
+        icon: Some(IconName::Replace),
+    },
+    Command {
         id: "send",
         title: "Send",
         aliases: &["transfer", "pay", "withdraw", "send eth"],

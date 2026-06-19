@@ -32,6 +32,34 @@ before you're done. (For UI work you must build the app: `just check`.)
 4. No new or changed dependencies (`Cargo.toml` / `Cargo.lock`) unless explicitly approved
    (the git GPUI stack is bumped only via `just bump-gpui` — never hand-edit those pins)
 
+## Branch hygiene — required before edits
+
+Before changing files, always establish the current branch and its source-of-truth status:
+
+1. Run `git status --short --branch`.
+2. If on `main`, run `git fetch origin --prune`, fast-forward from `origin/main`, then create a new
+   feature branch before editing.
+3. If not on `main`, run `git fetch origin --prune` and check whether the branch has already been
+   merged into current `origin/main`.
+   - If it has been merged, switch back to `main`, fast-forward from `origin/main`, and create a new
+     feature branch before editing.
+   - If it has not been merged, inspect the branch's upstream/ahead/behind state and update local
+     state before editing. Do not stack unrelated work on a stale or merged branch.
+4. If there are uncommitted changes, identify whether they are user changes before switching,
+   rebasing, stashing, or applying patches.
+
+## PR workflow — required after implementation
+
+After implementing and verifying a task, do not leave the branch as uncommitted local work:
+
+1. Commit the changes in logical chunks. Keep unrelated workflow/docs updates separate from feature
+   code when the change is large enough to warrant it.
+2. Push the feature branch and open a pull request.
+3. Check CI status for the PR.
+4. If CI is green and the PR does not require human review/approval, merge it to `main` using the
+   repo's normal merge strategy.
+5. If CI is red or blocked, report the failing check and fix or ask for guidance before merging.
+
 ## Code constraints
 
 **Enforced workspace-wide** by `[workspace.lints]` + `clippy.toml` (CI fails the build):

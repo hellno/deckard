@@ -75,17 +75,21 @@ tag a feature branch.
 
 ---
 
-## 2. Version bump — all 4 crate manifests + sync the lockfile
+## 2. Version bump — every crate manifest + sync the lockfile
 
-Set the **same** `version` in every crate manifest. Note that at the first cut these may be
-out of sync (some crates carried `0.1.0`); bringing them all to the release string is part of the bump.
+Set the **same** `version` in **every** crate manifest. The release workflow's
+`just release-check` asserts every crate equals the tag, so a split-version release can't
+slip through — but you set them by hand first.
 
-Edit the `version = "…"` line under `[package]` in each of:
+Edit the `version = "…"` line under `[package]` in **every** crate's `Cargo.toml` (currently 7):
 
 - `crates/deckard-app/Cargo.toml`
 - `crates/deckard-core/Cargo.toml`
 - `crates/deckard-contract/Cargo.toml`
 - `crates/deckard-signerd/Cargo.toml`
+- `crates/deckard-mcp/Cargo.toml`
+- `crates/deckard-browser-bridge/Cargo.toml`
+- `crates/deckard-wallet-client/Cargo.toml`
 
 ```toml
 [package]
@@ -96,7 +100,7 @@ Then sync `Cargo.lock` so the recorded crate versions match (this is the *only* 
 change allowed during a routine cut — it is a version sync, not new deps):
 
 ```bash
-cargo update --workspace --offline   # re-resolves the four workspace crates to the new version
+cargo update --workspace --offline   # re-resolves the workspace crates to the new version
 # (a plain `cargo build`/`cargo check` also rewrites Cargo.lock; either is fine)
 git diff -- Cargo.lock                # sanity-check: only the deckard-* versions changed
 ```
@@ -104,7 +108,7 @@ git diff -- Cargo.lock                # sanity-check: only the deckard-* version
 > Do **not** hand-edit the GPUI git pins in `Cargo.lock`; those are bumped only via `just bump-gpui`
 > (see [`docs/UPGRADING.md`](UPGRADING.md)) and are out of scope for a version cut.
 
-Verify all four moved together:
+Verify they all moved together:
 
 ```bash
 git grep -nE '^version = ' -- 'crates/*/Cargo.toml'
@@ -115,6 +119,12 @@ git grep -nE '^version = ' -- 'crates/*/Cargo.toml'
 ## 3. Update `CHANGELOG.md`
 
 Move the accumulated `Unreleased` notes into a dated section for the new version.
+
+> **This is a hard pre-flight, not a nicety.** The release workflow builds the GitHub Release
+> body from the **closed `## [X.Y.Z]` section** — it never reads `[Unreleased]`. If you tag before
+> promoting `[Unreleased]` → `## [X.Y.Z] - <date>`, `just release-check` hard-fails with "no
+> `## [X.Y.Z]` section". Promote first, then tag. Anchor is the `[version]` bracket, so the date
+> delimiter (`-` or `—`) doesn't matter.
 
 - If `CHANGELOG.md` does not exist yet (first release), create it at the repo root in
   [Keep a Changelog](https://keepachangelog.com) style.
@@ -129,7 +139,7 @@ All notable changes to Deckard are documented here. Format: Keep a Changelog; ve
 
 ## [Unreleased]
 
-## [0.0.1-alpha] — 2026-06-10
+## [0.0.1-alpha] - 2026-06-10
 ### Added
 - First public alpha. Encrypted BIP-39 keystore + onboarding; live on-chain balances (Multicall3);
   receive (address + QR); command palette; Helios-verified reads (no third-party RPC trusted by
@@ -204,48 +214,60 @@ the two-pass `palettegen` recipe below — that is how the current `docs/demo.gi
 
 ---
 
-## 5. Tag + GitHub release
+## 5. Tag + GitHub release (automated)
 
-Commit the version bump + changelog (+ GIF) first, on the release commit. Then create an **annotated**
-tag whose message becomes the release body, push it, and publish a **pre-release** on GitHub.
+Pushing a `v*` tag is the whole release. [`.github/workflows/release.yml`](../.github/workflows/release.yml)
+runs the **full CI gate** (it calls `ci.yml` via `workflow_call` — fmt, both clippy `-D warnings`
+configs, the whole test suite, the macOS compile, and both cargo-deny gates), then publishes a
+**source-only** GitHub Release: GitHub attaches the `Source code (zip/tar.gz)` archives automatically,
+and the release body is a static "source-only / testnet-only" warning followed by the tag's
+`CHANGELOG.md` section. **No binaries are built** (see *Why source-only*, below). `-alpha/-beta/-rc`
+tags publish as a **prerelease** automatically (never marked "Latest").
+
+**Pre-flight the tag locally first** — this runs the exact validation CI runs, so you catch a
+forgotten `[Unreleased]` promotion or a split crate version *before* the tag is public:
+
+```bash
+just release-check v0.0.1-alpha   # validates tag shape + every crate version + prints the release body
+```
+
+Then commit the cut and push the tag:
 
 ```bash
 # Commit the cut (version bump, CHANGELOG, demo.gif).
 git add crates/*/Cargo.toml Cargo.lock CHANGELOG.md docs/demo.gif
 git commit -m "release: 0.0.1-alpha"
+git push origin main                 # or the release branch you cut from
 
-# Annotated tag — mirrors the manifest version with a leading v.
-# The annotation text is reused as the release notes via --notes-from-tag below.
-git tag -a v0.0.1-alpha -m "Deckard 0.0.1-alpha — first public alpha
-
-ALPHA / EXPERIMENTAL / pre-1.0. Not production-ready, no third-party security audit.
-Testnet or throwaway keys only — do NOT use with real funds or real mainnet keys.
-
-Works: encrypted BIP-39 keystore + onboarding, live on-chain balances, receive (address + QR),
-command palette, Helios-verified reads, process-isolated signer daemon, the shield hero (wired +
-black-box tested on an anvil fork).
-Not yet: Send (gated, next release), Swap (TODO), agent/MCP surface (not built), receive-watcher (TODO).
-
-License: AGPL-3.0-or-later. Security: report privately via GitHub Security Advisories."
-
-# Push the commit and the tag.
-git push origin main          # or the release branch you cut from
-git push origin v0.0.1-alpha
-
-# Publish a PRE-RELEASE on GitHub, reusing the tag annotation as the notes.
-gh release create v0.0.1-alpha \
-  --prerelease \
-  --title "Deckard 0.0.1-alpha (experimental)" \
-  --notes-from-tag
+# Lightweight tag is enough — the release body comes from CHANGELOG, not the tag message.
+git tag v0.0.1-alpha
+git push origin v0.0.1-alpha         # → release.yml gates on full CI, then publishes the prerelease
 ```
 
-`--prerelease` is **required** for an alpha — it keeps GitHub from marking it "Latest" and signals to
-visitors this is not a stable build.
+Watch it: `gh run watch` (or the Actions tab). When it's green, `gh release view v0.0.1-alpha`.
 
-### Optionally attach the macOS app bundle
+### Test the workflow before the first real cut
 
-If you want a downloadable build on the release, produce the `.app` and attach it. Make clear in the
-asset description / notes that it is unsigned, experimental, and testnet-only.
+You can't truly dry-run a tag push, but you can exercise the gate + validation + rendered body
+**without publishing** via `workflow_dispatch` (the publish step is skipped for any non-tag event):
+
+```bash
+gh workflow run release.yml --ref <your-branch> -f tag=v0.0.1-alpha
+gh run watch          # runs the full gate + prints the exact release body in the publish job log
+```
+
+**If a tag push fails the gate or validation,** the tag is already pushed but nothing published.
+Recover by deleting the tag, fixing the cause, and re-tagging:
+
+```bash
+git push --delete origin v0.0.1-alpha && git tag -d v0.0.1-alpha
+# fix CHANGELOG / versions, re-commit, then re-tag and push again.
+```
+
+### Manual escape hatch — attach an unsigned macOS `.app`
+
+The workflow does **not** attach binaries. If a tester needs a clickable build, produce and upload
+one by hand, clearly labelled unsigned / experimental / testnet-only:
 
 ```bash
 just bundle    # → target/release/bundle/osx/Deckard.app  (needs: cargo install cargo-bundle)
@@ -258,6 +280,15 @@ gh release upload v0.0.1-alpha Deckard-0.0.1-alpha-macos.app.zip
 
 > The bundle is **not code-signed or notarized**; on first launch macOS Gatekeeper will warn. That is
 > expected for an experimental alpha. Mention it in the release notes so users aren't surprised.
+
+### Why source-only (and the path to signed binaries)
+
+For a self-custodial wallet, an unsigned/un-notarized downloadable binary is a trust liability, not a
+convenience: it trains users to bypass Gatekeeper to run a key-holder, and a checksum posted in the
+same Release proves download-integrity, not authenticity. So the automated release ships source +
+notes; binaries stay manual and opt-in. The real unlock for downloadable binaries is **Apple
+codesigning + notarization** (Developer cert), which is deferred until there's an observed tester
+request — that, not checksums, is what makes a downloadable wallet build trustworthy.
 
 ---
 
@@ -284,9 +315,10 @@ Only when all of that holds should a maintainer flip visibility. Treat it as its
 | Step | Command(s) |
 |---|---|
 | Pre-flight DoD | `cargo fmt --all --check` · `just check` · `cargo test --workspace` · clean `git status` |
-| Bump version | edit `version` in all 4 `crates/*/Cargo.toml`, then sync `Cargo.lock` |
-| Changelog | move `Unreleased` → `[0.0.1-alpha] — <date>` in `CHANGELOG.md` |
+| Bump version | edit `version` in **every** `crates/*/Cargo.toml` (7), then sync `Cargo.lock` |
+| Changelog | move `Unreleased` → `[0.0.1-alpha] - <date>` in `CHANGELOG.md` (**promote before tagging**) |
 | Demo GIF | `just run` → record → `ffmpeg` palettegen/paletteuse → `docs/demo.gif` |
-| Tag + release | `git tag -a v0.0.1-alpha …` · `git push origin v0.0.1-alpha` · `gh release create … --prerelease --notes-from-tag` |
-| Bundle (optional) | `just bundle` → zip → `gh release upload` |
+| Pre-flight tag | `just release-check v0.0.1-alpha` (validates tag + versions + CHANGELOG, prints body) |
+| Tag + release | `git tag v0.0.1-alpha` · `git push origin v0.0.1-alpha` → `release.yml` gates on CI, then publishes the prerelease |
+| Bundle (optional, manual) | `just bundle` → zip → `gh release upload` |
 | Go public | deliberate maintainer decision, **not** part of the routine cut |

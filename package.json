@@ -1,0 +1,15 @@
+{
+  "name": "deckard",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "qa:browser:install": "playwright install chromium",
+    "qa:extension": "playwright test --config=playwright.extension.config.ts browser-bridge-extension.spec.ts",
+    "qa:extension:headed": "playwright test --config=playwright.extension.config.ts browser-bridge-extension.spec.ts --headed",
+    "qa:extension:real": "playwright test --config=playwright.extension.config.ts real-daemon.spec.ts",
+    "qa:extension:real:headed": "playwright test --config=playwright.extension.config.ts real-daemon.spec.ts --headed"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.0"
+  }
+}

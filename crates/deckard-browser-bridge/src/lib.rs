@@ -242,16 +242,23 @@ pub async fn serve(
         anyhow::bail!("browser bridge must bind to loopback (example: 127.0.0.1:8765)");
     }
     let chain_id = wallet.chain_id();
+    let socket_display = wallet.socket_path().display().to_string();
+    let mock_account = dev_mock_account.clone();
     let backend = match dev_mock_account {
         Some(account) => BridgeBackend::DevMock { account },
         None => BridgeBackend::from_env(wallet),
     };
     let bridge = Arc::new(BrowserBridge::new(chain_id, backend));
     let listener = TcpListener::bind(bind).await?;
-    eprintln!(
-        "Deckard browser bridge listening on http://{bind}/rpc (dev mock via {})",
-        dev_account_env_name()
-    );
+    match mock_account {
+        Some(account) => eprintln!(
+            "Deckard browser bridge listening on http://{bind}/rpc — DEV MOCK account {account} (holds no keys, no daemon)."
+        ),
+        None => eprintln!(
+            "Deckard browser bridge listening on http://{bind}/rpc — dialing signer daemon at {socket_display} (chain {chain_id}).\n\
+             If requests fail with a connect error, start `just demo` or `just qa`, unlock the wallet, then retry. The bridge holds no keys."
+        ),
+    }
     loop {
         let (stream, _) = listener.accept().await?;
         let bridge = Arc::clone(&bridge);

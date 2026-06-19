@@ -73,6 +73,7 @@ pub fn humanize_swap_deny(reason: &str) -> String {
         "already_signed" => {
             "this order was already signed — it's on its way to the orderbook".into()
         }
+        "already_executed" => "this swap was already submitted".into(),
         "not_an_order" => "the signer session was reset — review the swap again".into(),
         "swap_unsupported_in_mock" => "swaps aren't available in this test build".into(),
         // Everything else (session/process tags) keeps the shared humanizer's copy.

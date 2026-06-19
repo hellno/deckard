@@ -192,3 +192,61 @@ async fn shaped_approve_admission_matrix() {
         }
     );
 }
+
+/// A shaped approve is admitted ONLY by a LIVE (still `Pending`) order. Once the matching order
+/// is resolved (no longer `Pending`), the identical approve must be refused — a stale / resolved /
+/// expired order can't admit a fresh approve card; a new swap brings its own pending order.
+#[tokio::test]
+async fn shaped_approve_requires_a_live_pending_order() {
+    let dir = TempDir::new("shaped-approve-live");
+    let (wallet, _other) = seal_account0(dir.path());
+    let d = spawn_daemon(dir.path(), DUMMY_RPC, SEPOLIA, &[]);
+    let client = SignerClient::new(d.socket_path.clone());
+    client.unlock(PASS).await.unwrap();
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mut ord = order(wallet);
+    ord.valid_to = (now + 3_600) as u32;
+    let order_id = match client
+        .propose_order(&ord, deckard_contract::ProposalOrigin::App)
+        .await
+        .unwrap()
+    {
+        Decision::NeedsApproval { request_id } => request_id,
+        other => panic!("expected NeedsApproval for a well-formed order, got {other:?}"),
+    };
+
+    let relayer = deckard_core::GPV2_VAULT_RELAYER;
+    let approve = contract_call(
+        sell_token(),
+        approve_calldata(relayer, U256::from(SELL_AMOUNT)),
+    );
+
+    // While the order is Pending, the exact approve is admitted (a card).
+    assert!(
+        matches!(
+            client
+                .propose(&approve, deckard_contract::ProposalOrigin::Agent)
+                .await
+                .unwrap(),
+            Decision::NeedsApproval { .. }
+        ),
+        "a Pending order must admit its exact shaped approve"
+    );
+
+    // Resolve the order → it is no longer Pending. The SAME approve must now be refused.
+    d.resolve(order_id, true);
+    assert_eq!(
+        client
+            .propose(&approve, deckard_contract::ProposalOrigin::Agent)
+            .await
+            .unwrap(),
+        Decision::Deny {
+            reason: "approve_no_matching_order".into()
+        },
+        "a non-Pending (resolved/stale) order must NOT admit a shaped approve"
+    );
+}

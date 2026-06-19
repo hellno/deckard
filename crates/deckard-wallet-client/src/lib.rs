@@ -64,6 +64,11 @@ impl WalletClient {
         self.config_dir.as_deref()
     }
 
+    /// The signer-daemon socket path this client will dial (for diagnostics/logging).
+    pub fn socket_path(&self) -> &Path {
+        self.client.path()
+    }
+
     pub fn signer_client(&self) -> &SignerClient {
         &self.client
     }

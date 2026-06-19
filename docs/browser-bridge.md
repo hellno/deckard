@@ -71,8 +71,12 @@ its CLI/tools. It does not own or serve the browser bridge.
 
 Unsupported methods return an EIP-1193-style error object with code `4200`.
 
-`personal_sign`, `eth_sendTransaction`, broad signing, hardware wallets, Kohaku, native messaging, and
-store distribution are intentionally not implemented in this PR.
+The injected provider also exposes `isConnected()`, `on`, and `removeListener` with a minimal event
+surface for `accountsChanged`, `chainChanged`, `connect`, and `disconnect`.
+
+`personal_sign`, `eth_sendTransaction`, broad signing, hardware wallets, native messaging, and store
+distribution are intentionally not implemented in this bridge slice. Kohaku remains useful for
+wallet-internal provider/backend integration, not as the browser-facing dapp provider.
 
 ## Dapp sessions
 
@@ -108,6 +112,24 @@ cargo run -p deckard-browser-bridge -- --bind 127.0.0.1:8765
 
 ## Run against local Deckard
 
+For the automated real-daemon proof, run:
+
+```sh
+npm run qa:extension:real
+```
+
+That command creates a temporary throwaway QA vault, starts `deckard-signerd`, unlocks it with
+the fixed QA passphrase, starts the browser bridge without `--dev-mock-account`, loads the
+unpacked extension in Playwright Chromium, and verifies the local dapp account/chain flow. The
+expected address is `0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266`; the expected chain id is
+`0x7a69` from `DECKARD_CHAIN_ID=31337`.
+
+The same suite records the expected local failure behavior:
+
+- locked wallet -> `eth_requestAccounts` rejects with code `4900` and locked-wallet guidance
+- missing daemon socket -> code `4900` and daemon-not-running guidance
+- wrong chain configuration -> code `4900` and chain-mismatch guidance
+
 In one terminal, run Deckard's normal demo stack and unlock a throwaway wallet:
 
 ```sh
@@ -115,15 +137,23 @@ export RPC_URL_SEPOLIA=https://eth-sepolia.g.alchemy.com/v2/<your-key>
 just demo
 ```
 
-In another terminal, run the bridge on loopback:
+In another terminal, run the bridge against the demo app's daemon:
 
 ```sh
-export DECKARD_CHAIN_ID=11155111
-cargo run -p deckard-browser-bridge -- --bind 127.0.0.1:8765
+just demo-bridge
 ```
 
-The bridge uses the existing Deckard socket path (`DECKARD_SOCKET_PATH` or the default) and calls the
-same shared key-less wallet client path that `deckard-mcp address` uses.
+`demo-bridge` reuses the demo world's `DECKARD_SOCKET_PATH` and `DECKARD_CHAIN_ID` — the same values
+`just demo` launches the app with — so the bridge always dials the daemon the app actually spawned
+(`~/.deckard/demo/signerd.sock`) and can't silently fall back to the per-uid default socket. For the
+fast-unlock QA world use `just qa-bridge` instead (pair it with `just qa`, unlocked with the
+passphrase `deckard-qa`).
+
+The bridge calls the same shared key-less wallet client path that `deckard-mcp address` uses, and now
+logs which socket it dials at startup. If you run it by hand instead of via the recipe, you **must**
+set `DECKARD_SOCKET_PATH` (and `DECKARD_CHAIN_ID`) to match the launcher — otherwise it resolves the
+per-uid default socket, which `just demo`/`just qa` never use, and reports a misleading "daemon is not
+running" error even though the daemon is up on the world socket.
 
 ## Load the unpacked extension
 

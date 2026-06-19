@@ -8,7 +8,7 @@ mod common;
 use alloy_primitives::{Address, Bytes, U256};
 use deckard_contract::{
     ActivityLifecycle, ApprovalMode, ApprovalStatus, BreachedLimit, Decision, ExecuteResult,
-    Intent, IntentKind, Policy, ProposalOrigin, SignerRequest, SignerResponse,
+    Intent, IntentKind, Policy, ProposalOrigin, SignerRequest, SignerResponse, SwapOrder,
 };
 use deckard_signerd::SignerClient;
 
@@ -188,6 +188,28 @@ async fn daily_cap_enforced_at_execute() {
     );
 }
 
+/// Build `approve(address,uint256)` calldata (selector + two 32-byte words).
+fn approve_calldata(spender: Address, amount: U256) -> Bytes {
+    let mut data = vec![0x09, 0x5e, 0xa7, 0xb3];
+    let mut spender_word = [0u8; 32];
+    spender_word[12..].copy_from_slice(spender.as_slice());
+    data.extend_from_slice(&spender_word);
+    data.extend_from_slice(&amount.to_be_bytes::<32>());
+    Bytes::from(data)
+}
+
+/// A value-0 `ContractCall` to `to` carrying `calldata` — the shaped-approve wire shape.
+fn contract_call(to: Address, calldata: Bytes) -> Intent {
+    Intent {
+        chain_id: CHAIN,
+        to,
+        token: None,
+        value: U256::ZERO,
+        calldata,
+        kind: IntentKind::ContractCall,
+    }
+}
+
 #[tokio::test]
 async fn activity_feed_executed_carries_tx_hash() {
     // #60 acceptance 1: an auto-allowed within-cap AGENT action, once broadcast, appears in the
@@ -246,4 +268,111 @@ async fn activity_feed_executed_carries_tx_hash() {
         "within cap → no breached fence"
     );
     assert!(rec.timestamp_ms > 0, "the row carries a daemon timestamp");
+}
+
+/// Regression: a user must be able to swap the SAME amount any number of times. Each swap
+/// re-issues an identical exact-gross relayer approve, which hashes to the same request id; the
+/// daemon must NOT treat the second one as an `already_executed` replay (an `approve` moves no
+/// funds and is gated by a matching pending order + the human hold). The strict replay guard
+/// stays for fund-moving sends — asserted in the same test.
+#[tokio::test]
+async fn repeat_same_amount_swap_approve_is_not_replay_blocked() {
+    if !anvil_available() {
+        eprintln!("SKIP repeat_same_amount_swap_approve_is_not_replay_blocked: anvil not on PATH");
+        return;
+    }
+    let anvil = start_anvil();
+    wait_anvil_ready(&anvil.url()).await;
+
+    let dir = TempDir::new("anvil-repeat-approve");
+    let (wallet, recipient) = seal_account0(dir.path());
+    let d = spawn_daemon(dir.path(), &anvil.url(), CHAIN, &[]);
+    let client = SignerClient::new(d.socket_path.clone());
+    client.unlock(PASS).await.unwrap();
+
+    let relayer = deckard_core::GPV2_VAULT_RELAYER;
+    let sell_token = Address::repeat_byte(0x77);
+    let sell_amount = U256::from(1_000_000u64);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    // A pending order admits the shaped approve for its sell token + exact amount.
+    let ord = SwapOrder {
+        chain_id: CHAIN,
+        owner: wallet,
+        sell_token,
+        buy_token: Address::repeat_byte(0x88),
+        sell_amount,
+        buy_amount_min: U256::from(900_000u64),
+        receiver: wallet,
+        valid_to: (now + 3_600) as u32,
+        app_data: deckard_core::APP_DATA_HASH,
+    };
+    assert!(matches!(
+        client
+            .propose_order(&ord, ProposalOrigin::App)
+            .await
+            .unwrap(),
+        Decision::NeedsApproval { .. }
+    ));
+
+    // First swap's approve: propose → resolve → execute → on-chain (broadcast recorded).
+    let approve = contract_call(sell_token, approve_calldata(relayer, sell_amount));
+    let approve_id = match client
+        .propose(&approve, ProposalOrigin::Agent)
+        .await
+        .unwrap()
+    {
+        Decision::NeedsApproval { request_id } => request_id,
+        other => panic!("expected NeedsApproval for the first approve, got {other:?}"),
+    };
+    d.resolve(approve_id, true);
+    assert!(matches!(
+        client.execute(approve_id).await.unwrap(),
+        ExecuteResult::Broadcast { .. }
+    ));
+
+    // THE FIX: re-proposing the identical approve (the order is still pending) must NOT be an
+    // `already_executed` replay — it starts a fresh approval cycle (NeedsApproval again).
+    assert!(
+        matches!(
+            client
+                .propose(&approve, ProposalOrigin::Agent)
+                .await
+                .unwrap(),
+            Decision::NeedsApproval { .. }
+        ),
+        "repeating the same-amount swap approve must be allowed, not replay-blocked"
+    );
+
+    // ...and the carve-out resets the record to Pending — it does NOT auto-allow. Executing the
+    // re-proposed approve before a fresh control-channel hold is refused: a repeat swap still
+    // requires a new human approval (no funds move on the relaxed replay without a new hold).
+    assert_eq!(
+        client.execute(approve_id).await.unwrap(),
+        ExecuteResult::Denied {
+            reason: "not_approved".into()
+        }
+    );
+
+    // The strict replay guard is PRESERVED for fund-moving sends: re-proposing a broadcast send
+    // is still refused as `already_executed`.
+    let s = send(recipient, 10_000_000_000_000_000); // 0.01 ETH, within cap → Allow
+    assert_eq!(
+        client.propose(&s, ProposalOrigin::Agent).await.unwrap(),
+        Decision::Allow
+    );
+    let send_id = SignerClient::request_id_for_intent(&s);
+    assert!(matches!(
+        client.execute(send_id).await.unwrap(),
+        ExecuteResult::Broadcast { .. }
+    ));
+    assert_eq!(
+        client.propose(&s, ProposalOrigin::Agent).await.unwrap(),
+        Decision::Deny {
+            reason: "already_executed".into()
+        }
+    );
 }
