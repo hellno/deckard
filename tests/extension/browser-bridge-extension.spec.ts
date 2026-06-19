@@ -28,15 +28,26 @@ test('local dapp can connect through the injected provider', async ({ page }, te
     if (!provider) {
       throw new Error('window.ethereum missing');
     }
+    const events: Array<{ name: string; payload: unknown }> = [];
+    const removedEvents: unknown[] = [];
+    const removedListener = (payload: unknown) => removedEvents.push(payload);
+    provider.on('accountsChanged', (payload) => events.push({ name: 'accountsChanged', payload }));
+    provider.on('accountsChanged', removedListener);
+    provider.removeListener('accountsChanged', removedListener);
     const accountsBefore = await provider.request({ method: 'eth_accounts' });
+    const connectedBefore = provider.isConnected();
     const requestAccounts = await provider.request({ method: 'eth_requestAccounts' });
     const accountsAfter = await provider.request({ method: 'eth_accounts' });
     const chainId = await provider.request({ method: 'eth_chainId' });
     return {
       accountsBefore,
+      connectedBefore,
       requestAccounts,
       accountsAfter,
       chainId,
+      connectedAfter: provider.isConnected(),
+      events,
+      removedEvents,
       isDeckard: Boolean(provider.isDeckard),
       selectedAddress: provider.selectedAddress,
     };
@@ -44,9 +55,13 @@ test('local dapp can connect through the injected provider', async ({ page }, te
 
   expect(providerState).toEqual({
     accountsBefore: [],
+    connectedBefore: true,
     requestAccounts: [mockAccount],
     accountsAfter: [mockAccount],
     chainId: '0xaa36a7',
+    connectedAfter: true,
+    events: [{ name: 'accountsChanged', payload: [mockAccount] }],
+    removedEvents: [],
     isDeckard: true,
     selectedAddress: mockAccount,
   });
@@ -70,6 +85,9 @@ declare global {
     ethereum?: {
       isDeckard?: boolean;
       selectedAddress?: string | null;
+      isConnected(): boolean;
+      on(eventName: string, listener: (payload: unknown) => void): Window['ethereum'];
+      removeListener(eventName: string, listener: (payload: unknown) => void): Window['ethereum'];
       request(args: { method: string; params?: unknown[] }): Promise<unknown>;
     };
   }
