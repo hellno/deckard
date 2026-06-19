@@ -45,6 +45,7 @@ The default test starts `deckard-browser-bridge` in dev/mock mode on `127.0.0.1:
 
 - the Manifest V3 service worker loads
 - `window.ethereum` is injected into the local test dapp
+- Deckard announces its provider through EIP-6963
 - `eth_accounts` returns `[]` before permission
 - `eth_requestAccounts` returns the deterministic dev/mock address
 - `eth_accounts` returns that address after permission
@@ -110,7 +111,7 @@ manually.
 - Never use or commit a real seed phrase, private key, production wallet, browser profile, or
   mainnet-funded account in this harness.
 - The checked-in test uses only a deterministic mock address:
-  `0xdeC0ded0000000000000000000000000000001193`.
+  `0xdec0ded000000000000000000000000000001193`.
 - The real-daemon proof uses only the deterministic throwaway `qa-vault` address:
   `0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266`, unlocked with the fixed QA passphrase
   `deckard-qa`.
@@ -120,12 +121,22 @@ manually.
 - Do not log extension storage, browser profile contents, cookies, local storage, seeds, keys, or
   wallet state.
 
+## WalletBeat
+
+Use the WalletBeat lane when you need to verify the public wallet-test UI against Deckard's
+unpacked extension:
+
+```sh
+npm run qa:walletbeat
+```
+
+See `docs/walletbeat-qa.md` for the exact scope and artifact paths.
+
 ## Remote and browser friction
 
 Playwright uses an isolated bundled Chromium profile, so normal wallet extensions such as
 MetaMask or Rabby are absent by design. That makes the automated proof deterministic, but it does
-not cover provider-selection conflicts in a normal browser profile. Use #62 / EIP-6963 provider
-discovery work for that path.
+not cover provider-selection behavior in a normal browser profile with multiple installed wallets.
 
 When the bridge and dapp run over SSH on another machine, the browser must still be able to reach
 both loopback ports. Forward both ports to the browser host, for example:
