@@ -2311,7 +2311,10 @@ impl Shell {
     }
 
     /// Open the inline review for a specific feed row (a click on a proposed row), aligning the
-    /// keyboard selection with it so a subsequent ⌘Enter/Esc targets the same record.
+    /// keyboard selection with it so a subsequent ⌘Enter/Esc targets the same record. Sets
+    /// `activity_reviewing` ONLY when the clicked row is STILL pending — a click can land a frame
+    /// after a background poll settled the row, and opening a phantom review for a settled id would
+    /// leave `activity_reviewing` stale.
     pub fn review_activity_row(
         &mut self,
         request_id: deckard_contract::RequestId,
@@ -2322,9 +2325,9 @@ impl Shell {
             .position(|r| r.request_id == request_id)
         {
             self.activity_selected = i;
+            self.activity_reviewing = Some(request_id);
+            cx.notify();
         }
-        self.activity_reviewing = Some(request_id);
-        cx.notify();
     }
 
     /// Leave the feed's inline review (Esc, or a completed approve/deny). Pure UI state.
@@ -2333,42 +2336,53 @@ impl Shell {
         cx.notify();
     }
 
-    /// Approve the reviewed feed row. Like the Approvals queue, approval ALWAYS routes through
-    /// the open review (no blind-approve from a list row): with no review open, `⌘Enter` opens
-    /// the highlighted row's review; with one open it resolves `approved == true` over the
-    /// private capability channel (the agent then executes its own write once it flips to
-    /// `Allowed` — the app never broadcasts).
+    /// Approve the reviewed feed row. Approval resolves ONLY the actively-reviewed, STILL-PENDING
+    /// record — NEVER the highlighted-row fallback that deny uses. If there is no valid open review
+    /// (none, or the reviewed row settled/expired under a background poll, or a click that raced a
+    /// settle left a stale id), `⌘Enter` instead opens the highlighted row's clear-signing review,
+    /// so the operator must SEE that row's card before a second `⌘Enter` approves. This makes a
+    /// blind-approve of an unreviewed spend STRUCTURALLY impossible no matter how `activity_reviewing`
+    /// came to be stale. The agent executes its own write once the record flips to `Allowed` — the
+    /// app never broadcasts.
     pub fn approve_activity(&mut self, cx: &mut Context<Self>) {
-        if self.activity_reviewing.is_none() {
-            self.open_selected_activity_review(cx);
-            return;
+        let pending = crate::activity_view::activity_pending(&self.activity);
+        match crate::activity_view::approve_target(self.activity_reviewing, &pending) {
+            // The reviewed record is still pending → its clear-signing card is exactly what the
+            // render shows (it keys the same id), so approving it is never blind.
+            Some(id) => self.resolve_activity_id(id, true, cx),
+            // No valid open review → resolve NOTHING. Drop any stale id and open the highlighted
+            // row's review first; the operator approves only after seeing that row's card.
+            None => {
+                self.activity_reviewing = None;
+                self.open_selected_activity_review(cx);
+            }
         }
-        self.resolve_activity_target(true, cx);
     }
 
-    /// Deny the target feed row (the reviewed record, else the highlighted proposed row).
+    /// Deny the target feed row: the reviewed record while still pending, else the highlighted
+    /// proposed row. Unlike approve, deny is one-key by design (it only REFUSES — the fail-safe
+    /// direction), so it MAY fall back to the highlighted, on-screen row.
     pub fn deny_activity(&mut self, cx: &mut Context<Self>) {
-        self.resolve_activity_target(false, cx);
-    }
-
-    /// Shared resolve body for the feed (approve/deny). Drives `Resolve` over the capability
-    /// channel off-thread and reconciles against the daemon's reply;
-    /// on success it leaves the review and re-fetches the feed (the now-decided row updates in
-    /// place); on a control-channel failure it fails loud and stays put. No `Execute` ever.
-    fn resolve_activity_target(&mut self, approved: bool, cx: &mut Context<Self>) {
-        // Honor the open review's id ONLY while that record is still pending. A background poll can
-        // settle/expire the reviewed record and the render then bypasses the review pane (it's
-        // `&self`, so it can't clear `activity_reviewing`) — falling back to the highlighted row
-        // keeps approve/deny pointed at what's actually on screen (re-keyed by request_id in
-        // refresh_activity), instead of resolving a stale off-screen id as a silent no-op.
         let pending = crate::activity_view::activity_pending(&self.activity);
         let target = self
             .activity_reviewing
             .filter(|id| pending.iter().any(|r| r.request_id == *id))
             .or_else(|| pending.get(self.activity_selected).map(|r| r.request_id));
-        let Some(request_id) = target else {
-            return;
-        };
+        if let Some(request_id) = target {
+            self.resolve_activity_id(request_id, false, cx);
+        }
+    }
+
+    /// Drive `Resolve(request_id, approved)` over the capability channel off-thread and reconcile
+    /// against the daemon's reply; on success leave the review and re-fetch the feed (the now-
+    /// decided row updates in place); on a control-channel failure fail loud and stay put. No
+    /// `Execute` ever — the agent/daemon broadcasts.
+    fn resolve_activity_id(
+        &mut self,
+        request_id: deckard_contract::RequestId,
+        approved: bool,
+        cx: &mut Context<Self>,
+    ) {
         let control = self.signer.control();
         self.activity_loading = true;
         cx.notify();

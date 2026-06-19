@@ -209,6 +209,21 @@ pub(crate) fn activity_pending(records: &[ActivityRecord]) -> Vec<&ActivityRecor
     records.iter().filter(|r| is_proposed(r)).collect()
 }
 
+/// The record id that **approve** (⌘Enter) is allowed to resolve: ONLY a still-pending,
+/// actively-reviewed record. Returns `None` — meaning "open a review first, resolve NOTHING" — when
+/// no review is open OR the reviewed record has left the pending set (settled/expired under a
+/// background poll, or a click that raced a settle left a stale id). The no-blind-approve invariant
+/// lives here, as a pure function, so it is unit-tested and a future refactor can't quietly
+/// re-add a "fall back to the highlighted row" path (which would approve an unreviewed spend).
+/// Deny does NOT use this — deny is one-key and may fall back to the highlighted row (it only
+/// refuses, the fail-safe direction).
+pub(crate) fn approve_target(
+    reviewing: Option<RequestId>,
+    pending: &[&ActivityRecord],
+) -> Option<RequestId> {
+    reviewing.filter(|id| pending.iter().any(|r| r.request_id == *id))
+}
+
 /// **The settled subset** of the feed (the LOG), in feed (newest-first) order — every row that is
 /// no longer waiting on a human (auto-allowed, approved, denied, executed). A proposed row lives
 /// ONLY in `activity_pending`, so the two subsets partition the feed with no duplication.
@@ -1290,6 +1305,43 @@ mod tests {
             settled_label(&denied),
             "a lapsed window must not read identically to a human denial"
         );
+    }
+
+    #[test]
+    fn approve_target_never_falls_back_to_the_highlighted_row() {
+        // The no-blind-approve guarantee: approve may resolve ONLY a still-pending reviewed record.
+        let a = record(
+            0x0A,
+            ActivityLifecycle::Proposed,
+            BreachedLimit::PerTxCap,
+            false,
+        );
+        let b = record(
+            0x0B,
+            ActivityLifecycle::Proposed,
+            BreachedLimit::PerTxCap,
+            false,
+        );
+        let both: Vec<&ActivityRecord> = vec![&a, &b];
+
+        // Reviewing a still-pending row → resolve exactly it.
+        assert_eq!(
+            approve_target(Some(a.request_id), &both),
+            Some(a.request_id)
+        );
+
+        // Reviewing a row that has LEFT the pending set (settled/expired, or a stale click) → None.
+        // It must NOT fall back to the other highlighted pending row B — that would blind-approve a
+        // spend whose clear-signing card was never shown.
+        let only_b: Vec<&ActivityRecord> = vec![&b];
+        assert_eq!(
+            approve_target(Some(a.request_id), &only_b),
+            None,
+            "approve must never resolve a row other than the one under review"
+        );
+
+        // No review open → None (⌘Enter opens a review instead of resolving anything).
+        assert_eq!(approve_target(None, &both), None);
     }
 
     #[test]
