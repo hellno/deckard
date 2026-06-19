@@ -88,10 +88,16 @@ mcp_is_stop() { mcp_says 'locked|revoked|signer is stopped|revoke_all'; }
 # The daemon's PERSISTED terminal-negative verdicts for a request_id: `user_denied` (the human
 # refused) or `expired` (the 120s approval window lapsed). The daemon keeps these for the whole
 # session — only Unlock clears the request table — so retrying the SAME id, by execute OR by
-# re-propose, can NEVER succeed. The runner must give up on those funds (advance the baseline past
-# them) instead of chasing them forever and wedging the loop. NOTE: only the human COPY reaches us
-# (the daemon's `expired`/`user_denied` tags render to prose), so match that prose, not the tag.
-mcp_is_terminal_refusal() { mcp_says 'user_denied|a human denied|expired|request expired'; }
+# re-propose, can NEVER succeed. The runner gives up on those funds (advances the baseline past
+# them) instead of chasing them forever and wedging the loop.
+#
+# Match the SPECIFIC terminal prose, NOT a bare "expired": dynamic-prefix deny reasons
+# (broadcast_failed/signer_error) embed an arbitrary upstream RPC error string, and transient
+# network failures routinely contain words like "connection expired" / "session expired". A bare
+# `expired` substring would mis-classify such a TRANSIENT failure as terminal and abandon a
+# still-valid card's funds. The exact daemon copy is "this request expired before it was executed"
+# (failure.rs EXPIRED) and "a human denied this request" (user_denied) — anchor on those.
+mcp_is_terminal_refusal() { mcp_says 'user_denied|a human denied|this request expired'; }
 
 # A LOCKED daemon does not FAIL `balance`/`policy` — it succeeds (exit 0) and renders the
 # locked balance as `read_status: "unsynced (unverified read): locked"`, public_wei "0". So a
@@ -106,6 +112,7 @@ now_ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time()*1000'; }
 
 # Arbitrary-precision wei helpers via bc (bash ints overflow above ~9.2 ETH in wei).
 # wei_sub A B → A-B ; wei_ge/wei_gt/wei_le A B → "1" or "0".
+wei_add() { echo "$1 + $2" | bc; }
 wei_sub() { echo "$1 - $2" | bc; }
 wei_ge()  { echo "$1 >= $2" | bc; }
 wei_gt()  { echo "$1 > $2"  | bc; }
@@ -208,7 +215,7 @@ try_execute() {
             local base="${PENDING_BASE[$idx]}"
             [[ "$(wei_gt "${base}" "${BASELINE_WEI}")" == "1" ]] && BASELINE_WEI="${base}"
         fi
-        if mcp_says 'expired|request expired'; then
+        if mcp_says 'this request expired'; then
             say "that over-cap request expired before you approved it — moving on (unlock in the app to retry it)."
         else
             say "the human denied that request — moving on."
@@ -277,7 +284,11 @@ iterate() {
             # stop being surplus — and move on. (try_execute normally absorbs them when it drops the
             # card; this is the safety net for a refusal seen first via the propose path.)
             if mcp_is_terminal_refusal; then
-                BASELINE_WEI="${public_wei}"
+                # Advance past EXACTLY the refused `surplus` (= baseline + surplus, which equals the
+                # just-now propose-time balance — symmetric with try_execute advancing to its
+                # PENDING_BASE). We add `surplus` rather than assign `public_wei` so the intent reads
+                # plainly as "skip the funds the daemon just refused", not "absorb the whole wallet".
+                BASELINE_WEI="$(wei_add "${BASELINE_WEI}" "${surplus}")"
                 say "those funds were refused (denied or expired) — moving past them (unlock in the app to retry)."
                 return
             fi

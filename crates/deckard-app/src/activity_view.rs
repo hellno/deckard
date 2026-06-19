@@ -514,9 +514,11 @@ impl Shell {
         let selected = proposed && selected_id == Some(record.request_id);
         // A human is in the chain for anything that was NOT auto-allowed hands-free — an over-cap
         // card, a mainnet-guardrail hold (within-cap but still your call), an approval, a denial.
-        // Driving this off `auto_allowed` (not the absent breach `reason`) is what keeps a
-        // mainnet-approved shield from masquerading as a hands-free auto-allow.
-        let needed_human = !record.auto_allowed;
+        // Keyed off the SAME `human_acted` predicate as the outcome-label tint so the two two-signal
+        // cues never disagree: a STOP-revoked auto-allow (Decided{false} with auto_allowed still
+        // true) is a human action, so it must BOTH show the "→ You" link and tint amber — driving
+        // this off bare `!auto_allowed` would render the amber label with no human in the chain.
+        let needed_human = human_acted(record);
         let summary = payload_summary(&record.payload, self.mask);
 
         // The lead glyph: the cyan agent squircle for an agent, a neutral identity square for an

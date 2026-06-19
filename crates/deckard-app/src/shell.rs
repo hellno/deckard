@@ -2264,6 +2264,18 @@ impl Shell {
                             .unwrap_or_else(|| {
                                 this.activity_selected.min(pending.len().saturating_sub(1))
                             });
+                        // CRITICAL: if the row whose review is OPEN has settled/expired (left the
+                        // pending set), clear `activity_reviewing` IN THE SAME swap. The render is
+                        // `&self` so it can't clear it — it just falls through to the feed — and a
+                        // stale reviewing id would make a one-key APPROVE blind-approve the now-
+                        // highlighted DIFFERENT row (`approve_activity` skips re-review while
+                        // `reviewing.is_some()`). Clearing forces approve to re-open the highlighted
+                        // row's own clear-signing review first — the no-blind-approve invariant.
+                        if let Some(id) = this.activity_reviewing {
+                            if !pending.iter().any(|r| r.request_id == id) {
+                                this.activity_reviewing = None;
+                            }
+                        }
                     }
                     Err(e) => this.activity_error = Some(short_err(e)),
                 }
