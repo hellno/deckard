@@ -16,6 +16,13 @@ demo_anvil_port     := "8545"
 demo_fork_block     := env_var_or_default("DECKARD_DEMO_FORK_BLOCK", "10822990")
 demo_fund_eth       := "10"
 
+# QA fast-unlock world constants (see the QA section below). Kept as top-level vars so the
+# qa recipes and `qa-bridge` resolve identical values — the bridge socket can't drift.
+qa_dir              := join("/tmp", "deckard-qa")
+qa_socket           := join(qa_dir, "signerd.sock")
+qa_chain_id         := "31337"
+qa_rpc_url          := "http://127.0.0.1:8545"
+
 # List available recipes.
 default:
     @just --list
@@ -47,18 +54,25 @@ run-tray:
 
 # Seal the QA vault into /tmp/deckard-qa (re-run anytime to reset it).
 qa-vault:
-    DECKARD_CONFIG_DIR="/tmp/deckard-qa" cargo run -q -p deckard-core --example qa-vault
+    DECKARD_CONFIG_DIR="{{qa_dir}}" cargo run -q -p deckard-core --example qa-vault
 
 # Launch the app against the QA vault, pointed at a local anvil (start `anvil` first
 # for live balances / send / shield). Run `just qa-vault` once before this.
 qa:
     cargo build -p deckard-signerd
-    DECKARD_CONFIG_DIR="/tmp/deckard-qa" \
-    DECKARD_SOCKET_PATH="/tmp/deckard-qa/signerd.sock" \
-    DECKARD_CHAIN_ID="31337" \
-    DECKARD_RPC_URL="http://127.0.0.1:8545" \
+    DECKARD_CONFIG_DIR="{{qa_dir}}" \
+    DECKARD_SOCKET_PATH="{{qa_socket}}" \
+    DECKARD_CHAIN_ID="{{qa_chain_id}}" \
+    DECKARD_RPC_URL="{{qa_rpc_url}}" \
     DECKARD_VERIFIED_READS="0" \
         cargo run
+
+# Run the key-less browser bridge against the QA fast-unlock app's signer daemon.
+# Prereq: `just qa` running in another terminal, unlocked with passphrase `deckard-qa`.
+qa-bridge bind="127.0.0.1:8765":
+    DECKARD_SOCKET_PATH="{{qa_socket}}" \
+    DECKARD_CHAIN_ID="{{qa_chain_id}}" \
+        cargo run -p deckard-browser-bridge -- --bind "{{bind}}"
 
 # Full walkthrough (onboard -> demo-fund -> shield): CONTRIBUTING "Demo / local-chain dev loop".
 # Wires an isolated ~/.deckard/demo config dir; verified reads are OFF; Ctrl-C tears anvil down.
@@ -374,6 +388,14 @@ demo-check:
         echo "demo-check: NOT READY (exit ${RC}) — fix the ✗ items above."
     fi
     exit $RC
+
+# Run the key-less browser bridge against the DEMO app's signer daemon.
+# Prereq: `just demo` running in another terminal with the wallet unlocked.
+# Reuses the demo world's socket+chain so the bridge can never dial the wrong daemon.
+demo-bridge bind="127.0.0.1:8765":
+    DECKARD_SOCKET_PATH="{{demo_socket}}" \
+    DECKARD_CHAIN_ID="{{demo_chain_id}}" \
+        cargo run -p deckard-browser-bridge -- --bind "{{bind}}"
 
 # Format + lint the whole workspace (both feature configurations of the app).
 fmt:
