@@ -6,7 +6,7 @@ type WorkerFixtures = {
   bridgeEndpoint: string;
 };
 
-const mockAccount = '0xdeC0ded0000000000000000000000000000001193';
+const mockAccount = '0xdec0ded000000000000000000000000000001193';
 
 export const test = extensionTest.extend<{}, WorkerFixtures>({
   bridgeEndpoint: [

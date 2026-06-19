@@ -30,11 +30,15 @@ test('local dapp can connect through the extension to a real unlocked daemon', a
         throw new Error('window.ethereum missing');
       }
       const events: Array<{ name: string; payload: unknown }> = [];
+      const connectEvents: unknown[] = [];
       const removedEvents: unknown[] = [];
       const removedListener = (payload: unknown) => removedEvents.push(payload);
+      provider.once('connect', (payload) => connectEvents.push(payload));
       provider.on('accountsChanged', (payload) => events.push({ name: 'accountsChanged', payload }));
       provider.on('accountsChanged', removedListener);
       provider.removeListener('accountsChanged', removedListener);
+      provider.on('disconnect', removedListener);
+      provider.removeAllListeners('disconnect');
       const accountsBefore = await provider.request({ method: 'eth_accounts' });
       const connectedBefore = provider.isConnected();
       const requestAccounts = await provider.request({ method: 'eth_requestAccounts' });
@@ -48,9 +52,12 @@ test('local dapp can connect through the extension to a real unlocked daemon', a
         chainId,
         connectedAfter: provider.isConnected(),
         events,
+        connectEvents,
         removedEvents,
         isDeckard: Boolean(provider.isDeckard),
         selectedAddress: provider.selectedAddress,
+        hasOnce: typeof provider.once === 'function',
+        hasRemoveAllListeners: typeof provider.removeAllListeners === 'function',
       };
     });
 
@@ -62,9 +69,12 @@ test('local dapp can connect through the extension to a real unlocked daemon', a
       chainId: realDaemonChainId,
       connectedAfter: true,
       events: [{ name: 'accountsChanged', payload: [realDaemonAccount] }],
+      connectEvents: [{ chainId: realDaemonChainId }],
       removedEvents: [],
       isDeckard: true,
       selectedAddress: realDaemonAccount,
+      hasOnce: true,
+      hasRemoveAllListeners: true,
     });
     expect(pageErrors).toEqual([]);
 
@@ -174,7 +184,9 @@ declare global {
       selectedAddress?: string | null;
       isConnected(): boolean;
       on(eventName: string, listener: (payload: unknown) => void): Window['ethereum'];
+      once(eventName: string, listener: (payload: unknown) => void): Window['ethereum'];
       removeListener(eventName: string, listener: (payload: unknown) => void): Window['ethereum'];
+      removeAllListeners(eventName?: string): Window['ethereum'];
       request(args: { method: string; params?: unknown[] }): Promise<unknown>;
     };
   }

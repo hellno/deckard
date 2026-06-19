@@ -109,13 +109,13 @@ This is the smallest way to test the browser bridge without an unlocked wallet:
 ```sh
 cargo run -p deckard-browser-bridge -- \
   --bind 127.0.0.1:8765 \
-  --dev-mock-account 0xdeC0ded0000000000000000000000000000001193
+  --dev-mock-account 0xdec0ded000000000000000000000000000001193
 ```
 
 Alternatively, the same dev mock can be supplied through the environment:
 
 ```sh
-export DECKARD_BRIDGE_DEV_ACCOUNT=0xdeC0ded0000000000000000000000000000001193
+export DECKARD_BRIDGE_DEV_ACCOUNT=0xdec0ded000000000000000000000000000001193
 cargo run -p deckard-browser-bridge -- --bind 127.0.0.1:8765
 ```
 

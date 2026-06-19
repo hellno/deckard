@@ -7,7 +7,9 @@
     "qa:extension": "playwright test --config=playwright.extension.config.ts browser-bridge-extension.spec.ts",
     "qa:extension:headed": "playwright test --config=playwright.extension.config.ts browser-bridge-extension.spec.ts --headed",
     "qa:extension:real": "playwright test --config=playwright.extension.config.ts real-daemon.spec.ts",
-    "qa:extension:real:headed": "playwright test --config=playwright.extension.config.ts real-daemon.spec.ts --headed"
+    "qa:extension:real:headed": "playwright test --config=playwright.extension.config.ts real-daemon.spec.ts --headed",
+    "qa:walletbeat": "node scripts/walletbeat-local-qa.mjs",
+    "qa:walletbeat:headed": "DECKARD_WALLETBEAT_HEADED=1 node scripts/walletbeat-local-qa.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.61.0"

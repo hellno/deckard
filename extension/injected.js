@@ -22,13 +22,22 @@
       this.selectedAddress = null;
       this.chainId = null;
       this._connected = true;
+      this._connectAnnounced = false;
     }
 
-    request(args) {
+    async request(args) {
       if (!args || typeof args.method !== 'string') {
         return Promise.reject(providerError(4100, 'request({ method }) is required'));
       }
 
+      if (args.method === 'eth_requestAccounts' && !this.chainId) {
+        await this._send({ method: 'eth_chainId', params: [] });
+      }
+
+      return this._send(args);
+    }
+
+    _send(args) {
       const id = nextId++;
       return new Promise((resolve, reject) => {
         pending.set(id, { resolve, reject, method: args.method });
@@ -58,6 +67,17 @@
       return this;
     }
 
+    once(eventName, listener) {
+      if (typeof listener !== 'function') {
+        return this;
+      }
+      const onceListener = (payload) => {
+        this.removeListener(eventName, onceListener);
+        listener(payload);
+      };
+      return this.on(eventName, onceListener);
+    }
+
     removeListener(eventName, listener) {
       const eventListeners = listeners.get(eventName);
       if (!eventListeners) {
@@ -66,6 +86,15 @@
       eventListeners.delete(listener);
       if (eventListeners.size === 0) {
         listeners.delete(eventName);
+      }
+      return this;
+    }
+
+    removeAllListeners(eventName) {
+      if (typeof eventName === 'string') {
+        listeners.delete(eventName);
+      } else {
+        listeners.clear();
       }
       return this;
     }
@@ -91,6 +120,14 @@
         });
       }
     }
+  }
+
+  function announceConnectIfReady() {
+    if (provider._connectAnnounced || !provider._connected || !provider.chainId) {
+      return;
+    }
+    provider._connectAnnounced = true;
+    emit('connect', { chainId: provider.chainId });
   }
 
   const provider = new DeckardProvider();
@@ -127,7 +164,6 @@
 
     if (!provider._connected) {
       provider._connected = true;
-      emit('connect', { chainId: provider.chainId });
     }
 
     if (entry.method === 'eth_chainId') {
@@ -137,6 +173,7 @@
         emit('chainChanged', message.result);
       }
     }
+    announceConnectIfReady();
     if (entry.method === 'eth_requestAccounts' && Array.isArray(message.result)) {
       const previousAddress = provider.selectedAddress;
       const nextAddress = message.result[0] || null;
