@@ -71,8 +71,12 @@ its CLI/tools. It does not own or serve the browser bridge.
 
 Unsupported methods return an EIP-1193-style error object with code `4200`.
 
-`personal_sign`, `eth_sendTransaction`, broad signing, hardware wallets, Kohaku, native messaging, and
-store distribution are intentionally not implemented in this PR.
+The injected provider also exposes `isConnected()`, `on`, and `removeListener` with a minimal event
+surface for `accountsChanged`, `chainChanged`, `connect`, and `disconnect`.
+
+`personal_sign`, `eth_sendTransaction`, broad signing, hardware wallets, native messaging, and store
+distribution are intentionally not implemented in this bridge slice. Kohaku remains useful for
+wallet-internal provider/backend integration, not as the browser-facing dapp provider.
 
 ## Dapp sessions
 

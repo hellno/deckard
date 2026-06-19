@@ -29,15 +29,26 @@ test('local dapp can connect through the extension to a real unlocked daemon', a
       if (!provider) {
         throw new Error('window.ethereum missing');
       }
+      const events: Array<{ name: string; payload: unknown }> = [];
+      const removedEvents: unknown[] = [];
+      const removedListener = (payload: unknown) => removedEvents.push(payload);
+      provider.on('accountsChanged', (payload) => events.push({ name: 'accountsChanged', payload }));
+      provider.on('accountsChanged', removedListener);
+      provider.removeListener('accountsChanged', removedListener);
       const accountsBefore = await provider.request({ method: 'eth_accounts' });
+      const connectedBefore = provider.isConnected();
       const requestAccounts = await provider.request({ method: 'eth_requestAccounts' });
       const accountsAfter = await provider.request({ method: 'eth_accounts' });
       const chainId = await provider.request({ method: 'eth_chainId' });
       return {
         accountsBefore,
+        connectedBefore,
         requestAccounts,
         accountsAfter,
         chainId,
+        connectedAfter: provider.isConnected(),
+        events,
+        removedEvents,
         isDeckard: Boolean(provider.isDeckard),
         selectedAddress: provider.selectedAddress,
       };
@@ -45,9 +56,13 @@ test('local dapp can connect through the extension to a real unlocked daemon', a
 
     expect(providerState).toEqual({
       accountsBefore: [],
+      connectedBefore: true,
       requestAccounts: [realDaemonAccount],
       accountsAfter: [realDaemonAccount],
       chainId: realDaemonChainId,
+      connectedAfter: true,
+      events: [{ name: 'accountsChanged', payload: [realDaemonAccount] }],
+      removedEvents: [],
       isDeckard: true,
       selectedAddress: realDaemonAccount,
     });
@@ -86,7 +101,7 @@ for (const failure of [
     message: 'different chain',
   },
 ]) {
-  test(`real daemon bridge reports ${failure.name}`, async ({}, testInfo) => {
+  test(`real daemon bridge reports ${failure.name}`, async ({ page }, testInfo) => {
     const runtime = await startRealDaemonBridge(failure.scenario, testInfo.title);
     try {
       const chainId = await requestBridge('eth_chainId', 1);
@@ -101,6 +116,51 @@ for (const failure of [
         code: 4900,
       });
       expect(requestAccounts.error.message).toContain(failure.message);
+
+      await page.goto('/');
+      await expect(page.locator('#output')).toContainText('window.ethereum detected');
+
+      const providerState = await page.evaluate(async () => {
+        const provider = window.ethereum;
+        if (!provider) {
+          throw new Error('window.ethereum missing');
+        }
+        const disconnects: Array<{ code?: number; message?: string }> = [];
+        provider.on('disconnect', (error) => {
+          const providerError = error as Error & { code?: number };
+          disconnects.push({
+            code: error instanceof Error ? providerError.code : undefined,
+            message: error instanceof Error ? providerError.message : undefined,
+          });
+        });
+        let requestError: { code?: number; message?: string } | undefined;
+        try {
+          await provider.request({ method: 'eth_requestAccounts' });
+        } catch (error) {
+          const providerError = error as Error & { code?: number };
+          requestError = {
+            code: error instanceof Error ? providerError.code : undefined,
+            message: error instanceof Error ? providerError.message : undefined,
+          };
+        }
+        return {
+          connected: provider.isConnected(),
+          disconnects,
+          requestError,
+        };
+      });
+
+      expect(providerState.connected).toBe(false);
+      expect(providerState.disconnects).toEqual([
+        expect.objectContaining({
+          code: 4900,
+        }),
+      ]);
+      expect(providerState.disconnects[0]?.message).toContain(failure.message);
+      expect(providerState.requestError).toMatchObject({
+        code: 4900,
+      });
+      expect(providerState.requestError?.message).toContain(failure.message);
     } finally {
       await runtime.stop();
     }
@@ -112,6 +172,9 @@ declare global {
     ethereum?: {
       isDeckard?: boolean;
       selectedAddress?: string | null;
+      isConnected(): boolean;
+      on(eventName: string, listener: (payload: unknown) => void): Window['ethereum'];
+      removeListener(eventName: string, listener: (payload: unknown) => void): Window['ethereum'];
       request(args: { method: string; params?: unknown[] }): Promise<unknown>;
     };
   }
