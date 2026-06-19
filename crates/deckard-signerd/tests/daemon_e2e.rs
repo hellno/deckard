@@ -11,7 +11,7 @@ use std::os::unix::fs::PermissionsExt;
 use alloy_primitives::{Address, Bytes, U256};
 use deckard_contract::{
     ApprovalMode, ApprovalStatus, Decision, ExecuteResult, Intent, IntentKind, Policy,
-    SignerRequest, SignerResponse, UnlockOutcome,
+    ProposalOrigin, SignerRequest, SignerResponse, UnlockOutcome,
 };
 use deckard_signerd::SignerClient;
 
@@ -69,7 +69,10 @@ async fn propose_decision_matrix() {
 
     // Locked → Deny{locked}.
     assert_eq!(
-        client.propose(&send(to, 1_000)).await.unwrap(),
+        client
+            .propose(&send(to, 1_000), ProposalOrigin::App)
+            .await
+            .unwrap(),
         Decision::Deny {
             reason: "locked".into()
         }
@@ -78,13 +81,19 @@ async fn propose_decision_matrix() {
 
     // Within cap → Allow.
     assert_eq!(
-        client.propose(&send(to, 1_000)).await.unwrap(),
+        client
+            .propose(&send(to, 1_000), ProposalOrigin::App)
+            .await
+            .unwrap(),
         Decision::Allow
     );
 
     // Over per-tx cap → NeedsApproval.
     assert!(matches!(
-        client.propose(&send(to, PER_TX_CAP + 1)).await.unwrap(),
+        client
+            .propose(&send(to, PER_TX_CAP + 1), ProposalOrigin::App)
+            .await
+            .unwrap(),
         Decision::NeedsApproval { .. }
     ));
 
@@ -92,7 +101,10 @@ async fn propose_decision_matrix() {
     let mut wrong_chain = send(to, 1_000);
     wrong_chain.chain_id = 1;
     assert_eq!(
-        client.propose(&wrong_chain).await.unwrap(),
+        client
+            .propose(&wrong_chain, ProposalOrigin::App)
+            .await
+            .unwrap(),
         Decision::Deny {
             reason: "chain_mismatch".into()
         }
@@ -105,7 +117,7 @@ async fn propose_decision_matrix() {
     shield.kind = IntentKind::Shield;
     shield.calldata = Bytes::from_static(&[0xde, 0xad, 0xbe, 0xef]); // stand-in RelayAdapt call
     assert_eq!(
-        client.propose(&shield).await.unwrap(),
+        client.propose(&shield, ProposalOrigin::App).await.unwrap(),
         Decision::Deny {
             reason: "shield_to_mismatch".into()
         }
@@ -117,7 +129,10 @@ async fn propose_decision_matrix() {
     let mut empty_shield = send(to, 1_000);
     empty_shield.kind = IntentKind::Shield; // calldata stays empty (from send())
     assert_eq!(
-        client.propose(&empty_shield).await.unwrap(),
+        client
+            .propose(&empty_shield, ProposalOrigin::App)
+            .await
+            .unwrap(),
         Decision::Deny {
             reason: "shield_to_mismatch".into()
         }
@@ -127,7 +142,10 @@ async fn propose_decision_matrix() {
     let mut unshield = send(to, 1_000);
     unshield.kind = IntentKind::Unshield;
     assert_eq!(
-        client.propose(&unshield).await.unwrap(),
+        client
+            .propose(&unshield, ProposalOrigin::App)
+            .await
+            .unwrap(),
         Decision::Deny {
             reason: "unsupported_v1".into()
         }
@@ -137,7 +155,7 @@ async fn propose_decision_matrix() {
     let mut erc20 = send(to, 1_000);
     erc20.token = Some(Address::repeat_byte(0xEE));
     assert_eq!(
-        client.propose(&erc20).await.unwrap(),
+        client.propose(&erc20, ProposalOrigin::App).await.unwrap(),
         Decision::Deny {
             reason: "erc20_unsupported_v1".into()
         }
@@ -160,7 +178,10 @@ async fn locked_wrong_chain_denies_chain_mismatch_not_locked() {
     let mut wrong_chain = send(to, 1_000);
     wrong_chain.chain_id = 1;
     assert_eq!(
-        client.propose(&wrong_chain).await.unwrap(),
+        client
+            .propose(&wrong_chain, ProposalOrigin::App)
+            .await
+            .unwrap(),
         Decision::Deny {
             reason: "chain_mismatch".into()
         },
@@ -169,7 +190,10 @@ async fn locked_wrong_chain_denies_chain_mismatch_not_locked() {
 
     // Sanity: a SAME-chain intent on the still-locked daemon does report `locked`.
     assert_eq!(
-        client.propose(&send(to, 1_000)).await.unwrap(),
+        client
+            .propose(&send(to, 1_000), ProposalOrigin::App)
+            .await
+            .unwrap(),
         Decision::Deny {
             reason: "locked".into()
         }
@@ -201,7 +225,10 @@ async fn off_allowlist_denies() {
     let client = SignerClient::new(d.socket_path.clone());
     client.unlock(PASS).await.unwrap();
     assert_eq!(
-        client.propose(&send(to, 1_000)).await.unwrap(),
+        client
+            .propose(&send(to, 1_000), ProposalOrigin::App)
+            .await
+            .unwrap(),
         Decision::Deny {
             reason: "off_allowlist".into()
         }
@@ -255,7 +282,10 @@ async fn stop_zeroizes_and_re_arms() {
 
     // An Allowed within-cap request, then STOP.
     let intent = send(to, 1_000);
-    assert_eq!(client.propose(&intent).await.unwrap(), Decision::Allow);
+    assert_eq!(
+        client.propose(&intent, ProposalOrigin::App).await.unwrap(),
+        Decision::Allow
+    );
     let id = SignerClient::request_id_for_intent(&intent);
     ack(&client, SignerRequest::RevokeAll).await;
 
@@ -278,7 +308,10 @@ async fn stop_zeroizes_and_re_arms() {
         UnlockOutcome::Unlocked { address: wallet }
     );
     assert_eq!(
-        client.propose(&send(to, 1_000)).await.unwrap(),
+        client
+            .propose(&send(to, 1_000), ProposalOrigin::App)
+            .await
+            .unwrap(),
         Decision::Allow
     );
 }
@@ -363,15 +396,21 @@ async fn re_propose_is_idempotent() {
 
     // (a) within-cap: re-propose returns the same Allow.
     let within = send(to, 1_000);
-    assert_eq!(client.propose(&within).await.unwrap(), Decision::Allow);
-    assert_eq!(client.propose(&within).await.unwrap(), Decision::Allow);
+    assert_eq!(
+        client.propose(&within, ProposalOrigin::App).await.unwrap(),
+        Decision::Allow
+    );
+    assert_eq!(
+        client.propose(&within, ProposalOrigin::App).await.unwrap(),
+        Decision::Allow
+    );
 
     // (b) a user Deny is sticky — re-propose does NOT re-raise the card.
     let denied = send(to, PER_TX_CAP + 1);
     let id = needs_approval_id(&client, &denied).await;
     d.resolve(id, false);
     assert_eq!(
-        client.propose(&denied).await.unwrap(),
+        client.propose(&denied, ProposalOrigin::App).await.unwrap(),
         Decision::Deny {
             reason: "user_denied".into()
         }
@@ -381,7 +420,13 @@ async fn re_propose_is_idempotent() {
     let approved = send(to, PER_TX_CAP + 2);
     let id2 = needs_approval_id(&client, &approved).await;
     d.resolve(id2, true);
-    assert_eq!(client.propose(&approved).await.unwrap(), Decision::Allow);
+    assert_eq!(
+        client
+            .propose(&approved, ProposalOrigin::App)
+            .await
+            .unwrap(),
+        Decision::Allow
+    );
 }
 
 #[tokio::test]
@@ -403,7 +448,10 @@ async fn two_clients_interleave_app_and_mcp_sessions() {
         UnlockOutcome::Unlocked { address: wallet }
     );
     let within = send(to, 1_000);
-    assert_eq!(mcp.propose(&within).await.unwrap(), Decision::Allow);
+    assert_eq!(
+        mcp.propose(&within, ProposalOrigin::Agent).await.unwrap(),
+        Decision::Allow
+    );
     let within_id = SignerClient::request_id_for_intent(&within);
 
     // 2. An over-cap MCP request raises a card; the APP resolves it over its private capability
@@ -452,7 +500,9 @@ async fn two_clients_interleave_app_and_mcp_sessions() {
     }
     // And the fresh session is live again for new work.
     assert_eq!(
-        mcp.propose(&send(to, 2_000)).await.unwrap(),
+        mcp.propose(&send(to, 2_000), ProposalOrigin::Agent)
+            .await
+            .unwrap(),
         Decision::Allow
     );
 }
@@ -460,7 +510,9 @@ async fn two_clients_interleave_app_and_mcp_sessions() {
 // --- small request helpers -----------------------------------------------------------------
 
 async fn needs_approval_id(client: &SignerClient, intent: &Intent) -> deckard_contract::RequestId {
-    match client.propose(intent).await.unwrap() {
+    // Origin is inbox-display only and never changes the verdict or the derived id, so this
+    // shared helper tags App; the scenarios that assert on the agent origin propose directly.
+    match client.propose(intent, ProposalOrigin::App).await.unwrap() {
         Decision::NeedsApproval { request_id } => request_id,
         other => panic!("expected NeedsApproval, got {other:?}"),
     }

@@ -7,8 +7,8 @@ mod common;
 
 use alloy_primitives::{Address, Bytes, U256};
 use deckard_contract::{
-    ApprovalMode, ApprovalStatus, Decision, ExecuteResult, Intent, IntentKind, Policy,
-    SignerRequest, SignerResponse, SwapOrder,
+    ActivityLifecycle, ApprovalMode, ApprovalStatus, BreachedLimit, Decision, ExecuteResult,
+    Intent, IntentKind, Policy, ProposalOrigin, SignerRequest, SignerResponse, SwapOrder,
 };
 use deckard_signerd::SignerClient;
 
@@ -45,7 +45,10 @@ async fn within_cap_send_broadcasts_with_receipt() {
 
     let value: u128 = 10_000_000_000_000_000; // 0.01 ETH, within cap
     let intent = send(recipient, value);
-    assert_eq!(client.propose(&intent).await.unwrap(), Decision::Allow);
+    assert_eq!(
+        client.propose(&intent, ProposalOrigin::App).await.unwrap(),
+        Decision::Allow
+    );
     let id = SignerClient::request_id_for_intent(&intent);
 
     let before = balance(&anvil.url(), recipient).await;
@@ -91,7 +94,7 @@ async fn over_cap_approve_then_execute_broadcasts() {
 
     let value: u128 = PER_TX_CAP + 10_000_000_000_000_000; // 0.06 ETH > cap
     let intent = send(recipient, value);
-    let id = match client.propose(&intent).await.unwrap() {
+    let id = match client.propose(&intent, ProposalOrigin::App).await.unwrap() {
         Decision::NeedsApproval { request_id } => request_id,
         other => panic!("expected NeedsApproval, got {other:?}"),
     };
@@ -157,8 +160,14 @@ async fn daily_cap_enforced_at_execute() {
 
     let first = send(recipient, 40_000_000_000_000_000); // 0.04 ETH
     let second = send(recipient, 39_000_000_000_000_000); // 0.039 ETH (distinct id)
-    assert_eq!(client.propose(&first).await.unwrap(), Decision::Allow);
-    assert_eq!(client.propose(&second).await.unwrap(), Decision::Allow);
+    assert_eq!(
+        client.propose(&first, ProposalOrigin::App).await.unwrap(),
+        Decision::Allow
+    );
+    assert_eq!(
+        client.propose(&second, ProposalOrigin::App).await.unwrap(),
+        Decision::Allow
+    );
 
     // First executes (spends 0.04); the second now exceeds the 0.05 daily cap at sign time.
     assert!(matches!(
@@ -199,6 +208,66 @@ fn contract_call(to: Address, calldata: Bytes) -> Intent {
         calldata,
         kind: IntentKind::ContractCall,
     }
+}
+
+#[tokio::test]
+async fn activity_feed_executed_carries_tx_hash() {
+    // #60 acceptance 1: an auto-allowed within-cap AGENT action, once broadcast, appears in the
+    // activity feed as `Executed` with the real `tx_hash` + a daemon timestamp + actor=agent +
+    // no breached cap. (A native send stands in for the shield: it exercises the identical feed
+    // path — propose → auto-allow → execute → broadcast — without needing a Railgun fork RPC.)
+    if !anvil_available() {
+        eprintln!("SKIP activity_feed_executed_carries_tx_hash: anvil not on PATH");
+        return;
+    }
+    let anvil = start_anvil();
+    wait_anvil_ready(&anvil.url()).await;
+
+    let dir = TempDir::new("anvil-feed-exec");
+    let (_wallet, recipient) = seal_account0(dir.path());
+    let d = spawn_daemon(dir.path(), &anvil.url(), CHAIN, &[]);
+    let client = SignerClient::new(d.socket_path.clone());
+    client.unlock(PASS).await.unwrap();
+
+    let intent = send(recipient, 10_000_000_000_000_000); // 0.01 ETH, within cap → auto-allow
+    assert_eq!(
+        client
+            .propose(&intent, ProposalOrigin::Agent)
+            .await
+            .unwrap(),
+        Decision::Allow
+    );
+    let id = SignerClient::request_id_for_intent(&intent);
+    let tx_hash = match client.execute(id).await.unwrap() {
+        ExecuteResult::Broadcast { tx_hash } => tx_hash,
+        other => panic!("expected Broadcast, got {other:?}"),
+    };
+    wait_receipt(&anvil.url(), tx_hash)
+        .await
+        .expect("a receipt");
+
+    let feed = client.activity_feed().await.unwrap();
+    let rec = feed
+        .iter()
+        .find(|r| r.request_id == id)
+        .expect("the executed action must appear in the feed");
+    assert_eq!(
+        rec.lifecycle,
+        ActivityLifecycle::Executed,
+        "broadcast → Executed"
+    );
+    assert_eq!(
+        rec.tx_hash,
+        Some(tx_hash),
+        "the feed surfaces the real tx hash"
+    );
+    assert_eq!(rec.origin, ProposalOrigin::Agent, "actor=agent");
+    assert_eq!(
+        rec.reason,
+        BreachedLimit::None,
+        "within cap → no breached fence"
+    );
+    assert!(rec.timestamp_ms > 0, "the row carries a daemon timestamp");
 }
 
 /// Regression: a user must be able to swap the SAME amount any number of times. Each swap
@@ -242,13 +311,20 @@ async fn repeat_same_amount_swap_approve_is_not_replay_blocked() {
         app_data: deckard_core::APP_DATA_HASH,
     };
     assert!(matches!(
-        client.propose_order(&ord).await.unwrap(),
+        client
+            .propose_order(&ord, ProposalOrigin::App)
+            .await
+            .unwrap(),
         Decision::NeedsApproval { .. }
     ));
 
     // First swap's approve: propose → resolve → execute → on-chain (broadcast recorded).
     let approve = contract_call(sell_token, approve_calldata(relayer, sell_amount));
-    let approve_id = match client.propose(&approve).await.unwrap() {
+    let approve_id = match client
+        .propose(&approve, ProposalOrigin::Agent)
+        .await
+        .unwrap()
+    {
         Decision::NeedsApproval { request_id } => request_id,
         other => panic!("expected NeedsApproval for the first approve, got {other:?}"),
     };
@@ -262,7 +338,10 @@ async fn repeat_same_amount_swap_approve_is_not_replay_blocked() {
     // `already_executed` replay — it starts a fresh approval cycle (NeedsApproval again).
     assert!(
         matches!(
-            client.propose(&approve).await.unwrap(),
+            client
+                .propose(&approve, ProposalOrigin::Agent)
+                .await
+                .unwrap(),
             Decision::NeedsApproval { .. }
         ),
         "repeating the same-amount swap approve must be allowed, not replay-blocked"
@@ -281,14 +360,17 @@ async fn repeat_same_amount_swap_approve_is_not_replay_blocked() {
     // The strict replay guard is PRESERVED for fund-moving sends: re-proposing a broadcast send
     // is still refused as `already_executed`.
     let s = send(recipient, 10_000_000_000_000_000); // 0.01 ETH, within cap → Allow
-    assert_eq!(client.propose(&s).await.unwrap(), Decision::Allow);
+    assert_eq!(
+        client.propose(&s, ProposalOrigin::Agent).await.unwrap(),
+        Decision::Allow
+    );
     let send_id = SignerClient::request_id_for_intent(&s);
     assert!(matches!(
         client.execute(send_id).await.unwrap(),
         ExecuteResult::Broadcast { .. }
     ));
     assert_eq!(
-        client.propose(&s).await.unwrap(),
+        client.propose(&s, ProposalOrigin::Agent).await.unwrap(),
         Decision::Deny {
             reason: "already_executed".into()
         }

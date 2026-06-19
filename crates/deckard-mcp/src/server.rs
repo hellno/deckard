@@ -1,8 +1,9 @@
 //! The MCP stdio server: the `mcp.v0.1` launch profile — exactly **6 tools**, every name
 //! `deckard_`-prefixed (Claude Desktop's tool namespace is shared across servers; a bare
 //! `execute` invites cross-server confusion). Raw `propose` and `simulate` are deliberately
-//! NOT exposed (cut at the launch gate): app-native review is the v0.1 simulation surface,
-//! and a raw `propose` would let an untrusted client submit arbitrary intents.
+//! NOT exposed (cut at the launch gate): human review happens app-natively in the Deckard
+//! app's Approvals queue + clear-signing review card, and a raw `propose` would let an
+//! untrusted client submit arbitrary intents.
 //!
 //! The tool DESCRIPTIONS are the agent's documentation — units, preconditions, sequencing,
 //! and the do-not-retry safety notes live there, and the acceptance suite (T1) asserts they
@@ -117,12 +118,11 @@ impl DeckardMcp {
                        not wei, and not a JSON number. Nothing is signed or broadcast by \
                        this call. Sequencing: returns decision 'allow' + request_id → call \
                        deckard_execute with that request_id; or 'needs_approval' → a human \
-                       must approve in the Deckard app first (the approval UI is not in \
-                       this alpha — lower the amount under the policy per-tx cap, see \
-                       deckard_policy_get, or a human edits policy.json). Human review \
-                       happens app-natively: the Deckard app's review card is the v0.1 \
-                       simulation surface. Precondition: app running + wallet unlocked + \
-                       public funds available."
+                       must approve it first in the Deckard app's Approvals queue (⌘⇧A), \
+                       then deckard_execute can run (or lower the amount under the policy \
+                       per-tx cap, see deckard_policy_get, or a human edits policy.json). \
+                       Human review happens app-natively in the clear-signing review card. \
+                       Precondition: app running + wallet unlocked + public funds available."
     )]
     async fn shield(&self, args: Parameters<ShieldArgs>) -> Result<CallToolResult, McpError> {
         render(self.sidecar.shield(&args.0.amount_eth).await)

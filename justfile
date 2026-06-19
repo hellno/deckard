@@ -177,11 +177,22 @@ demo:
     fi
     echo "→ anvil ready (chain id ${CHAIN_ID} = {{demo_chain_id}}, Sepolia fork)."
 
+    # 7c. Seal a throwaway QA vault for anvil account 0 so the app boots straight to Unlock
+    #     (no hand-onboarding) and the headless agent (`just demo-agent`) can drive it. Only
+    #     seals if absent — a re-run never clobbers a vault you already unlocked.
+    if [[ ! -f "${DEMO_DIR}/vault.bin" ]]; then
+        just demo-vault
+    else
+        echo "→ demo vault already present at ${DEMO_DIR}/vault.bin (left as-is)"
+    fi
+
     echo
     echo "  Demo world:  config=${DEMO_DIR}  socket={{demo_socket}}"
-    echo "  Next: create a THROWAWAY wallet in the app, then in another terminal:"
-    echo "        just demo-fund        # funds the wallet the app onboarded"
-    echo "        deckard-mcp install --demo   # register the sidecar with Claude/CLI"
+    echo "  Next: in the app, Unlock with: deckard-demo   (anvil account 0). Then, in another terminal:"
+    echo "        just demo-deposit     # send a real 0.02 ETH inbound transfer (a positive delta)"
+    echo "        just demo-agent       # run the headless 'watch & shield' agent loop"
+    echo "        just demo-fund        # (optional) top the wallet up with 10 ETH"
+    echo "        deckard-mcp install --demo   # (optional) register the sidecar with Claude/CLI"
     echo
 
     # 8. Build the daemon (sibling binary the app spawns), then run the app with the
@@ -249,6 +260,112 @@ demo-fund addr="":
     BAL="$(cast balance "${ADDR}" --rpc-url "{{demo_rpc_url}}" 2>/dev/null || echo "?")"
     echo "→ done. ${ADDR} balance now ${BAL} wei (${FUND_ETH} ETH)."
     echo "  In the app the public balance should refresh shortly (reads are raw/Unsynced on the fork)."
+
+# The passphrase is fixed and printed below — this is a PUBLIC dev key on a local fork, never
+# a real keystore. `just demo` calls this for you; run it standalone only to (re)create the vault.
+# Seal a throwaway QA vault (anvil account 0) so the app boots straight to Unlock (no onboarding).
+demo-vault:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{demo_dir}}"
+    cargo run -q -p deckard-core --example seal_qa_vault -- "{{demo_dir}}" deckard-demo
+    echo "→ sealed demo vault (anvil account 0) at {{demo_dir}}/vault.bin"
+    echo "  Unlock passphrase: deckard-demo"
+
+# Unlike `just demo-fund` (anvil_setBalance, which SETS the balance and yields no repeatable
+# delta), this is a genuine value transfer from anvil account 1, so you can fire it again and
+# again to drive successive shields:
+#   just demo-deposit          # 0.02 ETH — within the cap → the auto-shield hero beat
+#   just demo-deposit 0.15     # over the 0.1 ETH per-tx cap → the human-approval beat
+# Send a REAL inbound transfer to the demo wallet (a positive balance delta the agent notices).
+demo-deposit amount='0.02':
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # The demo wallet (anvil account 0) and the funding key (anvil account 1) come from anvil's
+    # well-known dev mnemonic "test test test test …junk" — public test keys, safe to hardcode.
+    WALLET="0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+    FUNDER_KEY="0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+
+    # anvil must be up.
+    if ! cast block-number --rpc-url "{{demo_rpc_url}}" >/dev/null 2>&1; then
+        echo "error: no demo anvil on {{demo_anvil_port}}. Start it first: just demo" >&2
+        exit 1
+    fi
+
+    # SAFETY: never broadcast a transfer with a well-known dev key on a real chain. ALLOWLIST the
+    # exact demo chain — a chain-1-only denylist would still pass any OTHER real network fronted at
+    # :8545 (a forwarded Sepolia/Holesky node, a tunnel) and broadcast a real tx with a public key.
+    # (Matches the `demo` recipe's own `CHAIN_ID == demo_chain_id` enforcement.)
+    CHAIN_ID="$(cast chain-id --rpc-url "{{demo_rpc_url}}" 2>/dev/null || echo "?")"
+    if [[ "${CHAIN_ID}" != "{{demo_chain_id}}" ]]; then
+        echo "error: refusing to run — {{demo_rpc_url}} reports chain ${CHAIN_ID}, not the demo chain {{demo_chain_id}}." >&2
+        echo "  demo-deposit signs with a PUBLIC anvil dev key; broadcasting it on any real chain is unsafe." >&2
+        echo "  Point {{demo_rpc_url}} at the local demo fork (just demo) and retry." >&2
+        exit 1
+    fi
+
+    # The demo wallet is anvil's PUBLIC account-0 key. On the forked Sepolia it carries an
+    # inherited EIP-7702 delegation (its on-chain code is `0xef0100<delegate>`, set by someone on
+    # real Sepolia using that public key). A plain ETH transfer to a 7702-delegated account runs
+    # the DELEGATE contract instead of crediting the EOA — so the balance never rises and the
+    # agent's "did a deposit arrive?" delta-detector never fires (shields, which only SIGN, still
+    # work). Clear the delegation back to a plain EOA so deposits land. Local-fork only — guarded
+    # by the chain-id≠1 refusal above; `anvil_setCode` is an anvil cheatcode, not a real tx.
+    if [[ -n "$(cast code "${WALLET}" --rpc-url "{{demo_rpc_url}}" 2>/dev/null | sed 's/^0x//')" ]]; then
+        echo "→ clearing an inherited EIP-7702 delegation on ${WALLET} (so the deposit credits the EOA)…"
+        cast rpc anvil_setCode "${WALLET}" 0x --rpc-url "{{demo_rpc_url}}" >/dev/null 2>&1
+    fi
+
+    WEI="$(cast to-wei "{{amount}}" ether)"
+    echo "→ sending {{amount}} ETH (${WEI} wei) to ${WALLET} on the demo fork (chain ${CHAIN_ID})…"
+    cast send "${WALLET}" --value "${WEI}" --private-key "${FUNDER_KEY}" --rpc-url "{{demo_rpc_url}}" >/dev/null
+    BAL="$(cast balance "${WALLET}" --rpc-url "{{demo_rpc_url}}" 2>/dev/null || echo "?")"
+    echo "→ done. ${WALLET} public balance now ${BAL} wei."
+    echo "  Watch the agent pick it up:   just demo-agent"
+    echo "  One-shot smoke (asserts a broadcast): just demo-smoke"
+
+# Drives ONLY the key-less deckard-mcp CLI — same authority as the Claude-Desktop prompt, no
+# keys here. Needs `just demo` running with the wallet UNLOCKED (passphrase: deckard-demo).
+# Pass through extra flags:
+#   just demo-agent            # watch forever; shield deposits within the cap, wait on over-cap
+#   just demo-agent --once     # one iteration against the LIVE baseline (a no-op unless you also
+#                              #   set DECKARD_AGENT_BASELINE_WEI) — use `just demo-smoke` to assert
+#   just demo-agent --capture  # print propose→decision→broadcast millis per shield
+# Run the headless watch-and-shield agent loop (scripts/demo-agent.sh) against the demo daemon.
+demo-agent *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Build the CLI once so the agent (and its sub-second poll) never pays a cold compile.
+    cargo build -q -p deckard-mcp
+    # NOTE: the one-shot that ASSERTS a broadcast is `just demo-smoke` — it captures the pre-deposit
+    # balance and pins the agent's baseline to it, so `--once` shields EXACTLY the fresh deposit.
+    # We deliberately do NOT default `--once`'s baseline to 0 here: the demo wallet is anvil account
+    # 0, which is PREFUNDED (≈10 ETH on the fork), so a baseline of 0 would treat the whole balance
+    # as surplus and try to shield all of it — busting the per-tx cap and failing the smoke. With no
+    # pin the runner reads the live balance as baseline (a bare `--once` is then a safe no-op), and
+    # `demo-smoke` supplies the correct pre-deposit baseline via DECKARD_AGENT_BASELINE_WEI.
+    DECKARD_SOCKET_PATH="{{demo_socket}}" \
+    DECKARD_CONFIG_DIR="{{demo_dir}}" \
+    DECKARD_CHAIN_ID="{{demo_chain_id}}" \
+    DECKARD_MCP_BIN="${DECKARD_MCP_BIN:-{{justfile_directory()}}/target/debug/deckard-mcp}" \
+        bash "{{justfile_directory()}}/scripts/demo-agent.sh" {{args}}
+
+# One-shot CI smoke that ACTUALLY asserts a broadcast: capture the demo wallet's CURRENT balance,
+# send a within-cap deposit, then run ONE agent iteration pinned to that pre-deposit baseline so the
+# agent shields EXACTLY the fresh deposit and broadcasts (exit 0), or fails (exit 1). This is the
+# deposit-aware wrapper a bare `just demo-agent --once` cannot be: a single iteration has no memory
+# of the pre-deposit balance, so it can't tell the deposit apart from the (prefunded) baseline.
+# Needs `just demo` running with the wallet UNLOCKED. Amount must be within the per-tx cap (0.1 ETH).
+demo-smoke amount='0.02':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    WALLET="0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"   # demo wallet = anvil account 0
+    B0="$(cast balance "${WALLET}" --rpc-url "{{demo_rpc_url}}")"
+    echo "→ pre-deposit baseline: $(cast from-wei "${B0}") ETH ($(cast to-wei "{{amount}}" ether) wei deposit incoming)"
+    just demo-deposit {{amount}}
+    # Pin the agent's baseline to the pre-deposit balance so surplus == exactly the deposit.
+    DECKARD_AGENT_BASELINE_WEI="${B0}" just demo-agent --once
 
 # Exit codes: 0 ready · 10 foundry missing · 11 RPC_URL_SEPOLIA · 12 local anvil · 13 signerd
 # build · 14 app not running/unlocked · 15 chain-identity mismatch · 16 policy drift.

@@ -20,9 +20,10 @@ use tokio::sync::Mutex as AsyncMutex;
 use zeroize::Zeroizing;
 
 use deckard_contract::{
-    deny_reasons, evaluate, evaluate_order, ApprovalStatus, BalanceReport, Decision, ExecuteResult,
-    Intent, IntentKind, PendingPayloadView, PendingRecord, Policy, ReadStatus, RequestId,
-    SignOrderResult, SignerRequest, SignerResponse, SwapOrder, UnlockOutcome,
+    deny_reasons, evaluate, evaluate_order, ActivityLifecycle, ActivityRecord, ApprovalStatus,
+    BalanceReport, BreachedLimit, Decision, ExecuteResult, Intent, IntentKind, PendingPayloadView,
+    PendingRecord, Policy, ProposalOrigin, ReadStatus, RequestId, SignOrderResult, SignerRequest,
+    SignerResponse, SwapOrder, UnlockOutcome,
 };
 // Only the `shield`-gated view-grant handler constructs this; an unconditional import would
 // warn in the no-default-features build (e.g. deckard-mcp's dependency edge).
@@ -106,11 +107,38 @@ struct PendingReq {
     broadcast: Option<B256>,
     signature: Option<Bytes>,
     approved: bool,
+    /// Who proposed this record (a foreground human app action vs an autonomous agent).
+    /// Inbox-display only — it never affects the policy verdict, the TTL, or signing.
+    origin: ProposalOrigin,
+    /// Unix epoch **millis** stamped when the record was first proposed — surfaced as
+    /// `ActivityRecord::timestamp_ms`. Display-only; `expires_at` (an `Instant`) still drives
+    /// the TTL. The wall clock is read once, here, never trusted for security.
+    created_ms: u64,
+    /// A monotonic insertion sequence — the activity feed sorts by it descending to give a
+    /// stable newest-first order (`requests` is an unordered `HashMap`, so it can't).
+    seq: u64,
+    /// Which fence this proposal breached, recomputed off the verdict path at propose time so
+    /// the feed cites the actual cap hit. `None` for a within-cap auto-allow or guardrail hold.
+    breached: BreachedLimit,
+    /// True once this record's only on-chain broadcast was an `invalidateOrder` CANCEL (a STOP
+    /// pass or an explicit `cancel_order`), not a successful execute. Keeps the feed from reading
+    /// a cancelled swap as `Executed` — a cancel is the opposite of the order going through.
+    cancelled: bool,
+    /// True ONLY when this record was auto-allowed hands-free at propose time (within cap, off
+    /// mainnet). A mainnet-guardrail hold and an over-cap card are both `false` (a human is in the
+    /// loop) even though neither breached a cap — so the feed can say "auto-approved within cap"
+    /// vs "you approved" HONESTLY, instead of inferring it from the (absent) breach reason.
+    auto_allowed: bool,
 }
 
 /// Upper bound on a single broadcast round-trip. A hung/blackholed RPC fails after this
 /// rather than wedging the daemon (and STOP) forever behind the held state lock.
 const BROADCAST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Cap on the activity feed the daemon returns — the newest this many records. Session-scoped
+/// in memory, so this just bounds the response size; the underlying `requests` table is itself
+/// cleared on every `Unlock`.
+const ACTIVITY_FEED_CAP: usize = 200;
 
 /// Which channel a request arrived on — the load-bearing distinction for resolver
 /// authentication (PRD-01). Same-uid peer-cred proves *who* connected, never *which role*;
@@ -191,6 +219,10 @@ pub struct Daemon {
     /// Lifetime of a `NeedsApproval` record.
     approval_ttl: Duration,
     requests: HashMap<RequestId, PendingReq>,
+    /// Monotonic counter handed to each new request's `seq`, so the activity feed can recover
+    /// insertion order from the unordered `requests` map. Never reset (a re-unlock clears
+    /// `requests`, but a fresh `seq` window only ever moves forward — order stays correct).
+    seq_counter: u64,
     /// The daemon's embedded Helios verified-read path, held in a SEPARATELY-locked
     /// [`HeliosCell`] so its slow bootstrap never blocks the daemon mutex (see the cell's
     /// docs). The server primes it off the daemon lock before a `Balance` dispatch; the
@@ -211,6 +243,7 @@ impl Daemon {
             spent_day: current_utc_day(),
             approval_ttl: approval_ttl(),
             requests: HashMap::new(),
+            seq_counter: 0,
             #[cfg(feature = "verified-reads")]
             helios: HeliosCell::new(),
         }
@@ -271,7 +304,9 @@ impl Daemon {
                 self.resolve(request_id, approved);
                 SignerResponse::Ack
             }
-            SignerRequest::Propose { intent } => SignerResponse::Decision(self.propose(&intent)),
+            SignerRequest::Propose { intent, origin } => {
+                SignerResponse::Decision(self.propose(&intent, origin))
+            }
             SignerRequest::Execute { request_id } => {
                 SignerResponse::Execute(self.execute(request_id).await)
             }
@@ -293,8 +328,8 @@ impl Daemon {
             SignerRequest::RailgunViewGrant { chain_id, index } => {
                 self.railgun_view_grant(chain_id, index)
             }
-            SignerRequest::ProposeOrder { order } => {
-                SignerResponse::Decision(self.propose_order(&order))
+            SignerRequest::ProposeOrder { order, origin } => {
+                SignerResponse::Decision(self.propose_order(&order, origin))
             }
             SignerRequest::SignOrder { request_id } => {
                 SignerResponse::SignOrder(self.sign_order(request_id).await)
@@ -303,6 +338,7 @@ impl Daemon {
                 SignerResponse::Execute(self.cancel_order(request_id).await)
             }
             SignerRequest::PendingList => SignerResponse::Pending(self.pending_list()),
+            SignerRequest::ActivityFeed => SignerResponse::Activity(self.activity_feed()),
         }
     }
 
@@ -422,8 +458,9 @@ impl Daemon {
 
     /// Policy check only — NEVER signs. Process-level pre-checks first, then the shared
     /// `evaluate`. On `NeedsApproval`/`Allow` a pending record is stored under the intent's
-    /// deterministic id; on `Deny` nothing is stored.
-    fn propose(&mut self, intent: &Intent) -> Decision {
+    /// deterministic id; on `Deny` nothing is stored. `origin` is threaded into the stored
+    /// record for the inbox display only; it never changes the verdict.
+    fn propose(&mut self, intent: &Intent, origin: ProposalOrigin) -> Decision {
         self.rollover();
         self.expire_stale();
 
@@ -462,7 +499,7 @@ impl Daemon {
                 // and "every swap raises an approval card"). Pass `always_needs_card = true` so it
                 // is stored `Pending` and NEVER auto-broadcast — even off mainnet, where the Send
                 // caps path would otherwise auto-allow a value-0 ContractCall hands-free.
-                return self.finish_propose(intent, true);
+                return self.finish_propose(intent, true, origin);
             }
         }
         // v1 admits a native Send and a Shield (the privacy hero). The Shield's RelayAdapt
@@ -491,7 +528,7 @@ impl Daemon {
             };
         }
 
-        self.finish_propose(intent, false)
+        self.finish_propose(intent, false, origin)
     }
 
     /// The shared tail of `propose`: derive the id, honour an idempotent re-propose, decide the
@@ -505,7 +542,15 @@ impl Daemon {
     /// skip `evaluate` (allowlist/caps gate value transfers, not the relayer approval) and only
     /// honour the STOP brake. When `false` (Send/Shield) the ONE shared `evaluate` (+ mainnet
     /// guardrail) decides as before.
-    fn finish_propose(&mut self, intent: &Intent, always_needs_card: bool) -> Decision {
+    ///
+    /// `origin` is stored on the new record for the inbox display only — it never changes the
+    /// stored status or the verdict.
+    fn finish_propose(
+        &mut self,
+        intent: &Intent,
+        always_needs_card: bool,
+        origin: ProposalOrigin,
+    ) -> Decision {
         let id = request_id_for(intent);
 
         // Idempotent re-propose: an identical intent maps to the same id, so an existing record
@@ -575,6 +620,21 @@ impl Daemon {
                 Decision::NeedsApproval { .. } => ApprovalStatus::Pending,
             }
         };
+        // Cite the breached fence for the feed (display-only; recomputed off the verdict path).
+        // `None` for a within-cap auto-allow or a guardrail-downgraded hold. The shaped-approve
+        // card (`always_needs_card`) cites NO cap: its `intent.to` is the ERC-20 token, which the
+        // value-transfer `allow_to` does not gate, so running `breach_for` on it would mis-cite
+        // OffAllowlist — match the swap order record, which also stores `None`.
+        let breached = if always_needs_card {
+            BreachedLimit::None
+        } else {
+            breach_for(intent, &self.policy)
+        };
+        // Hands-free ONLY when the genuine within-cap auto-allow stored `Allowed` (the mainnet
+        // guardrail and over-cap both store `Pending`, the shaped-approve card forces `Pending`),
+        // so a later human `Resolve` to `Allowed` never flips this true.
+        let auto_allowed = status == ApprovalStatus::Allowed;
+        let seq = self.next_seq();
         self.requests.insert(
             id,
             PendingReq {
@@ -584,6 +644,12 @@ impl Daemon {
                 broadcast: None,
                 signature: None,
                 approved: false,
+                origin,
+                created_ms: now_ms(),
+                seq,
+                breached,
+                cancelled: false,
+                auto_allowed,
             },
         );
 
@@ -650,7 +716,11 @@ impl Daemon {
     /// never trusted (a client-supplied owner could otherwise make the daemon sign an order
     /// that pays out to someone else). A valid order is ALWAYS `NeedsApproval` (swaps never
     /// auto-allow in v1). The record is stored `Pending` under [`request_id_for_order`].
-    fn propose_order(&mut self, order: &SwapOrder) -> Decision {
+    ///
+    /// `origin` records WHO proposed (a foreground human GUI swap vs an agent) for the inbox/feed
+    /// display only — it never affects the verdict. A user-driven GUI swap passes `App` so the
+    /// order row reads "You", not "Atlas".
+    fn propose_order(&mut self, order: &SwapOrder, origin: ProposalOrigin) -> Decision {
         self.rollover();
         self.expire_stale();
 
@@ -700,6 +770,7 @@ impl Daemon {
         match evaluate_order(&bound, &self.policy, wallet, now_secs()) {
             deny @ Decision::Deny { .. } => deny,
             Decision::NeedsApproval { .. } | Decision::Allow => {
+                let seq = self.next_seq();
                 self.requests.insert(
                     id,
                     PendingReq {
@@ -709,6 +780,17 @@ impl Daemon {
                         broadcast: None,
                         signature: None,
                         approved: false,
+                        // WHO proposed (display-only). A GUI swap is App-origin → the feed reads
+                        // "You", not "Atlas"; an agent-driven order (future sidecar path) passes Agent.
+                        origin,
+                        created_ms: now_ms(),
+                        seq,
+                        // A swap card cites no spend cap (orders gate on token/receiver/validity,
+                        // not the ETH per-tx/daily caps), so the feed shows no breached-limit line.
+                        breached: BreachedLimit::None,
+                        cancelled: false,
+                        // Swaps never auto-allow in v1 — always a human card.
+                        auto_allowed: false,
                     },
                 );
                 Decision::NeedsApproval { request_id: id }
@@ -904,9 +986,12 @@ impl Daemon {
             }
         };
 
-        // Record the cancel tx hash (pins the record; a second cancel/execute is refused).
+        // Record the cancel tx hash (pins the record; a second cancel/execute is refused). Mark
+        // it `cancelled` so the activity feed reads this as a STOP/cancel, NOT a successful
+        // execute — the cancel hash is an `invalidateOrder`, the opposite of the order landing.
         if let Some(req) = self.requests.get_mut(&request_id) {
             req.broadcast = Some(tx_hash);
+            req.cancelled = true;
         }
         ExecuteResult::Broadcast { tx_hash }
     }
@@ -921,23 +1006,13 @@ impl Daemon {
     /// the on-chain cancel outcome, so `sign_order`/`execute` refuse from here on.
     async fn stop(&mut self) {
         // Collect the order ids to cancel up front (an immutable borrow that ends before the
-        // mutable cancel calls). Only SIGNED, un-cancelled, non-expired orders are worth a
-        // cancel: an unsigned order was never submitted to the orderbook.
-        let to_cancel: Vec<RequestId> = self
-            .requests
-            .iter()
-            .filter_map(|(id, req)| {
-                let is_order = matches!(req.payload, PendingPayload::Order(_));
-                let signed = req.signature.is_some();
-                let not_cancelled = req.broadcast.is_none();
-                let not_expired = !matches!(req.status, ApprovalStatus::Expired);
-                if is_order && signed && not_cancelled && not_expired {
-                    Some(*id)
-                } else {
-                    None
-                }
-            })
-            .collect();
+        // mutable cancel calls). Only SIGNED, un-cancelled orders are loose on the CoW orderbook
+        // and worth an on-chain invalidate (an unsigned order was never submitted).
+        //
+        // The selection (which signed orders are still settleable) is extracted to
+        // `select_orders_to_cancel` so it can be unit-tested without a chain — see its doc for why
+        // it gates on the order's real `valid_to`, NOT the daemon's local approval-TTL `Expired`.
+        let to_cancel = select_orders_to_cancel(&self.requests, now_secs());
 
         for id in to_cancel {
             // The key is still live here (we lock AFTER this pass). Swallow + log errors so one
@@ -1087,13 +1162,68 @@ impl Daemon {
     /// show "approve X to the CoW relayer"); any other `Tx` rides as the raw intent. Returns
     /// regardless of lock state — statuses already reflect `revoked`, and order/intent fields
     /// are not secret (no key, passphrase, or viewing key crosses here).
-    fn pending_list(&self) -> Vec<PendingRecord> {
+    fn pending_list(&mut self) -> Vec<PendingRecord> {
+        // Expire FIRST so a Pending row past its 120s TTL is never surfaced as still-pending —
+        // the inbox sees `Expired` (with `remaining_ms == 0`), matching `status`/`execute`.
+        self.expire_stale();
+        let now = Instant::now();
         self.requests
             .iter()
-            .map(|(id, req)| PendingRecord {
+            .map(|(id, req)| {
+                // Panic-free: `checked_duration_since` can't underflow (a past `expires_at`
+                // yields `None` → 0); the `.min(u64::MAX)` clamp makes the `as u64` cast lossless.
+                let remaining_ms = match req.status {
+                    ApprovalStatus::Pending | ApprovalStatus::Allowed => req
+                        .expires_at
+                        .checked_duration_since(now)
+                        .map(|d| d.as_millis().min(u128::from(u64::MAX)) as u64)
+                        .unwrap_or(0),
+                    ApprovalStatus::Denied { .. } | ApprovalStatus::Expired => 0,
+                };
+                PendingRecord {
+                    request_id: *id,
+                    status: req.status.clone(),
+                    payload: payload_view(&req.payload),
+                    remaining_ms,
+                    origin: req.origin,
+                }
+            })
+            .collect()
+    }
+
+    /// Hand out the next monotonic insertion sequence for a new request.
+    fn next_seq(&mut self) -> u64 {
+        let seq = self.seq_counter;
+        self.seq_counter = self.seq_counter.wrapping_add(1);
+        seq
+    }
+
+    /// The **activity feed**: every tracked action as an [`ActivityRecord`], newest-first,
+    /// capped at [`ACTIVITY_FEED_CAP`]. Unlike `pending_list`, this is the surface the GUI feed
+    /// reads — it retains auto-allowed and executed rows (with their `tx_hash` + `timestamp_ms`)
+    /// so the human can see what the agent *did*, not only what is pending.
+    ///
+    /// Expires stale rows FIRST (matching `pending_list`/`status`), so a lapsed `Pending` card is
+    /// never shown as still proposed. The lifecycle is derived from the live record state, so a
+    /// resolve / execute / STOP is reflected the next time the feed is read. Like `pending_list`,
+    /// it returns regardless of lock state (the statuses already reflect `revoked`; no key,
+    /// passphrase, or viewing key crosses here).
+    fn activity_feed(&mut self) -> Vec<ActivityRecord> {
+        self.expire_stale();
+        let mut rows: Vec<(&RequestId, &PendingReq)> = self.requests.iter().collect();
+        // Newest-first by insertion sequence (the unordered map can't give this on its own).
+        rows.sort_by_key(|(_, req)| std::cmp::Reverse(req.seq));
+        rows.into_iter()
+            .take(ACTIVITY_FEED_CAP)
+            .map(|(id, req)| ActivityRecord {
                 request_id: *id,
-                status: req.status.clone(),
+                origin: req.origin,
                 payload: payload_view(&req.payload),
+                timestamp_ms: req.created_ms,
+                tx_hash: if req.cancelled { None } else { req.broadcast },
+                lifecycle: activity_lifecycle(req),
+                reason: req.breached,
+                auto_allowed: req.auto_allowed,
             })
             .collect()
     }
@@ -1244,6 +1374,34 @@ impl Daemon {
     }
 }
 
+/// STOP's on-chain-cancel selection, extracted from `stop()` so it is unit-testable without a
+/// chain. Returns the SIGNED, un-cancelled orders that are STILL settleable at `now` (unix secs)
+/// — the ones loose on the CoW orderbook that an `invalidateOrder` must kill before the key is
+/// zeroized.
+///
+/// It gates on the order's REAL `valid_to`, NEVER the daemon's local approval-TTL
+/// `ApprovalStatus::Expired`. Those are different clocks: a signed order whose 120s approval
+/// record has lapsed is still settleable by a solver until `valid_to` (up to 24h), so STOP must
+/// still cancel it. (Skipping locally-`Expired` orders was a STOP-integrity hole — they could
+/// settle after the kill switch.) Unsigned orders (never submitted), already-cancelled/broadcast
+/// orders, plain `Tx` records, and orders whose `valid_to` is already in the past (genuinely
+/// unsettleable — a cancel would be wasted gas) are all skipped.
+fn select_orders_to_cancel(requests: &HashMap<RequestId, PendingReq>, now: u64) -> Vec<RequestId> {
+    requests
+        .iter()
+        .filter_map(|(id, req)| {
+            let order = match &req.payload {
+                PendingPayload::Order(o) => o,
+                PendingPayload::Tx(_) => return None,
+            };
+            let signed = req.signature.is_some();
+            let not_cancelled = req.broadcast.is_none();
+            let still_settleable = u64::from(order.valid_to) > now;
+            (signed && not_cancelled && still_settleable).then_some(*id)
+        })
+        .collect()
+}
+
 /// Map a stored [`PendingPayload`] to its wire [`PendingPayloadView`] for the inbox. A `Tx`
 /// whose calldata decodes as an exact `approve(spender, amount)` is surfaced as the structured
 /// `Approve` view; any other `Tx` rides as the raw intent; an `Order` rides as-is.
@@ -1271,6 +1429,67 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// Wall-clock unix **millis** — stamped onto a new record as `created_ms` for the activity
+/// feed's timestamp. Display-only (the TTL runs off a monotonic `Instant`), so a clock before
+/// the epoch harmlessly yields `0`.
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
+}
+
+/// Recompute, OFF the frozen verdict path, which fence a proposal breached — so the feed can
+/// cite the actual cap hit instead of a hardcoded "over per-tx cap". Mirrors the order of
+/// [`deckard_contract::evaluate`]'s own checks (allowlist, then the `spent_today + value`
+/// projection against the per-tx then daily cap) WITHOUT changing its single-`over`-bool
+/// verdict. Returns [`BreachedLimit::None`] for a within-cap intent (an auto-allow, or a
+/// guardrail-downgraded hold) and for the value-0 shaped-approve card.
+fn breach_for(intent: &Intent, policy: &Policy) -> BreachedLimit {
+    if !policy.allow_to.is_empty() && !policy.allow_to.contains(&intent.to) {
+        return BreachedLimit::OffAllowlist;
+    }
+    let projected = policy.spent_today_wei.saturating_add(intent.value);
+    if projected > policy.per_tx_cap_wei {
+        BreachedLimit::PerTxCap
+    } else if projected > policy.daily_cap_wei {
+        BreachedLimit::DailyCap
+    } else {
+        BreachedLimit::None
+    }
+}
+
+/// Derive a record's feed lifecycle from its live state. A broadcast tx is `Executed` regardless
+/// of status; otherwise the `ApprovalStatus` maps onto the lifecycle. A lapsed `Expired` card maps
+/// to its own `ActivityLifecycle::Expired` (NOT `Decided{approved:false}`) so the feed can render
+/// it neutrally — no human acted on a window that simply timed out, so it must not carry the amber
+/// "you acted" tint that a human denial / STOP revoke does.
+fn activity_lifecycle(req: &PendingReq) -> ActivityLifecycle {
+    // A cancelled order's only broadcast was an `invalidateOrder` — the order did NOT go through,
+    // so read it as a non-approval (stopped), never `Executed`. Check this BEFORE the broadcast
+    // branch (a cancel sets `broadcast`). A STOP revoke IS a human action → `Decided{false}`.
+    if req.cancelled {
+        return ActivityLifecycle::Decided { approved: false };
+    }
+    if req.broadcast.is_some() {
+        return ActivityLifecycle::Executed;
+    }
+    match req.status {
+        ApprovalStatus::Pending => ActivityLifecycle::Proposed,
+        ApprovalStatus::Allowed => ActivityLifecycle::Decided { approved: true },
+        // A human denial or STOP revoke (both `Denied`) → a human acted.
+        ApprovalStatus::Denied { .. } => ActivityLifecycle::Decided { approved: false },
+        // The window lapsed AFTER a human approved it (resolve set `approved`) but before execute
+        // fired — a human DID act, so keep it `Decided{approved:true}` (amber "you approved"), never
+        // the neutral Expired that would erase the human-action signal. `expire_stale` flips both
+        // Pending and Allowed past-TTL records to `Expired`, so a human-approved-but-not-executed
+        // over-cap card reaches here as Expired with `approved == true`.
+        ApprovalStatus::Expired if req.approved => ActivityLifecycle::Decided { approved: true },
+        // The window lapsed with nobody acting → neutral, human-absent close.
+        ApprovalStatus::Expired => ActivityLifecycle::Expired,
+    }
+}
+
 /// Collapse a multi-line error into one short, **redacted** line for a `reason` string or a
 /// log. Transport errors can echo the full RPC URL — which carries the API key in its
 /// path/query — so every embedded URL is scrubbed to `scheme://host[:port]`
@@ -1283,4 +1502,91 @@ fn one_line(e: &anyhow::Error) -> String {
         .chars()
         .take(160)
         .collect()
+}
+
+#[cfg(test)]
+mod stop_selection_tests {
+    //! Regression guard for the STOP-integrity fix: STOP must cancel a SIGNED order on-chain even
+    //! when its local approval record has lapsed to `Expired`, because the order is still
+    //! settleable on the CoW orderbook until its real `valid_to`. Drives the extracted
+    //! `select_orders_to_cancel` directly — no socket, no chain.
+    use super::*;
+
+    fn order(valid_to: u32) -> SwapOrder {
+        SwapOrder {
+            chain_id: 11_155_111,
+            owner: Address::ZERO,
+            sell_token: Address::repeat_byte(0x11),
+            buy_token: Address::repeat_byte(0x22),
+            sell_amount: U256::from(1u64),
+            buy_amount_min: U256::from(1u64),
+            receiver: Address::ZERO,
+            valid_to,
+            app_data: deckard_core::APP_DATA_HASH,
+        }
+    }
+
+    /// A record carrying `payload`, optionally signed / already-broadcast. Its local `status` is
+    /// `Expired` on purpose: the selection must IGNORE it and consult `valid_to` instead.
+    fn req(payload: PendingPayload, signed: bool, broadcast: bool) -> PendingReq {
+        PendingReq {
+            payload,
+            status: ApprovalStatus::Expired,
+            expires_at: Instant::now(),
+            broadcast: broadcast.then(|| B256::repeat_byte(0xbb)),
+            signature: signed.then(|| Bytes::from_static(b"sig")),
+            approved: true,
+            origin: ProposalOrigin::App,
+            created_ms: 0,
+            seq: 0,
+            breached: BreachedLimit::None,
+            cancelled: false,
+            auto_allowed: false,
+        }
+    }
+
+    #[test]
+    fn cancels_a_signed_order_even_when_locally_expired() {
+        // now = 1000s; the order is valid_to = 2000s (still settleable) but its local record is
+        // `Expired`. Before the fix the `not_expired` filter dropped it — STOP must select it.
+        let id = request_id_for_order(&order(2000));
+        let mut reqs = HashMap::new();
+        reqs.insert(id, req(PendingPayload::Order(order(2000)), true, false));
+        assert_eq!(select_orders_to_cancel(&reqs, 1000), vec![id]);
+    }
+
+    #[test]
+    fn skips_unsettleable_unsigned_cancelled_and_tx_records() {
+        let now = 1000u64;
+        let mut reqs = HashMap::new();
+        // (a) valid_to already in the past → unsettleable → skip (a cancel would be wasted gas).
+        reqs.insert(
+            B256::repeat_byte(0x01),
+            req(PendingPayload::Order(order(500)), true, false),
+        );
+        // (b) unsigned → never posted to the orderbook → skip.
+        reqs.insert(
+            B256::repeat_byte(0x02),
+            req(PendingPayload::Order(order(2000)), false, false),
+        );
+        // (c) already cancelled/broadcast → skip (its only broadcast was the invalidate).
+        reqs.insert(
+            B256::repeat_byte(0x03),
+            req(PendingPayload::Order(order(2000)), true, true),
+        );
+        // (d) a plain Tx (Send/Shield/shaped-approve) is not an order → skip.
+        let intent = Intent {
+            chain_id: 11_155_111,
+            to: Address::ZERO,
+            token: None,
+            value: U256::ZERO,
+            calldata: Bytes::new(),
+            kind: IntentKind::ContractCall,
+        };
+        reqs.insert(
+            B256::repeat_byte(0x04),
+            req(PendingPayload::Tx(intent), true, false),
+        );
+        assert!(select_orders_to_cancel(&reqs, now).is_empty());
+    }
 }

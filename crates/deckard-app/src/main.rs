@@ -7,6 +7,7 @@
 //! Fork checklist: rename the crate in `Cargo.toml`, change `APP_NAME` and the
 //! bundle identifier, swap `assets/icon.png`, then start editing the views.
 
+mod activity_view;
 mod capture;
 mod commit_flow;
 mod commit_view;
@@ -52,6 +53,7 @@ gpui::actions!(
         Quit,
         About,
         OpenSettings,
+        OpenApprovals,
         ToggleTheme,
         NewItem,
         GoBack,
@@ -107,6 +109,7 @@ fn main() {
                 KeyBinding::new("secondary-q", Quit, None),
                 KeyBinding::new("secondary-n", NewItem, None),
                 KeyBinding::new("secondary-,", OpenSettings, None),
+                KeyBinding::new("secondary-shift-a", OpenApprovals, None),
                 KeyBinding::new("secondary-shift-d", ToggleTheme, None),
                 KeyBinding::new("secondary-[", GoBack, None),
                 KeyBinding::new("secondary-k", TogglePalette, None),

@@ -166,7 +166,10 @@ async fn shield_e2e_privacy_property() {
     assert!(!intent.calldata.is_empty());
 
     // 2. propose → the daemon admits the Shield (within cap → Allow).
-    let decision = client.propose(&intent).await.expect("propose");
+    let decision = client
+        .propose(&intent, deckard_contract::ProposalOrigin::App)
+        .await
+        .expect("propose");
     assert_eq!(
         decision,
         Decision::Allow,

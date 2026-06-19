@@ -39,8 +39,9 @@ pub use mock::MockSigner;
 pub use policy::{evaluate, evaluate_order, ApprovalMode, Policy};
 pub use read_status::ReadStatus;
 pub use rpc::{
-    ApprovalStatus, BalanceReport, ExecuteResult, PendingPayloadView, PendingRecord,
-    RailgunViewGrant, SignOrderResult, SignerRequest, SignerResponse, UnlockOutcome,
+    ActivityLifecycle, ActivityRecord, ApprovalStatus, BalanceReport, BreachedLimit, ExecuteResult,
+    PendingPayloadView, PendingRecord, ProposalOrigin, RailgunViewGrant, SignOrderResult,
+    SignerRequest, SignerResponse, UnlockOutcome,
 };
 pub use shield_status::ShieldStatus;
 pub use signer::Signer;
@@ -185,6 +186,11 @@ mod roundtrip_tests {
         });
         roundtrip(&SignerRequest::Propose {
             intent: sample_intent(IntentKind::Shield),
+            origin: ProposalOrigin::App,
+        });
+        roundtrip(&SignerRequest::Propose {
+            intent: sample_intent(IntentKind::Send),
+            origin: ProposalOrigin::Agent,
         });
         roundtrip(&SignerRequest::Execute {
             request_id: B256::repeat_byte(0x02),
@@ -203,6 +209,11 @@ mod roundtrip_tests {
         });
         roundtrip(&SignerRequest::ProposeOrder {
             order: sample_swap_order(),
+            origin: ProposalOrigin::App,
+        });
+        roundtrip(&SignerRequest::ProposeOrder {
+            order: sample_swap_order(),
+            origin: ProposalOrigin::Agent,
         });
         roundtrip(&SignerRequest::SignOrder {
             request_id: B256::repeat_byte(0x06),
@@ -211,6 +222,7 @@ mod roundtrip_tests {
             request_id: B256::repeat_byte(0x07),
         });
         roundtrip(&SignerRequest::PendingList);
+        roundtrip(&SignerRequest::ActivityFeed);
     }
 
     #[test]
@@ -263,11 +275,15 @@ mod roundtrip_tests {
                 request_id: B256::repeat_byte(0x01),
                 status: ApprovalStatus::Pending,
                 payload: PendingPayloadView::Order(sample_swap_order()),
+                remaining_ms: 119_000,
+                origin: ProposalOrigin::Agent,
             },
             PendingRecord {
                 request_id: B256::repeat_byte(0x02),
                 status: ApprovalStatus::Allowed,
                 payload: PendingPayloadView::Tx(sample_intent(IntentKind::Send)),
+                remaining_ms: 0,
+                origin: ProposalOrigin::App,
             },
         ]));
     }
@@ -286,6 +302,82 @@ mod roundtrip_tests {
             reason: "revoked".into(),
         });
         roundtrip(&ApprovalStatus::Expired);
+    }
+
+    #[test]
+    fn activity_wire_types_roundtrip() {
+        // Lifecycle: every state, both `approved` polarities of `Decided`, plus the lapsed-window
+        // `Expired` (the human-absent closed state, split out from `Decided{false}`).
+        roundtrip(&ActivityLifecycle::Proposed);
+        roundtrip(&ActivityLifecycle::Decided { approved: true });
+        roundtrip(&ActivityLifecycle::Decided { approved: false });
+        roundtrip(&ActivityLifecycle::Expired);
+        roundtrip(&ActivityLifecycle::Executed);
+
+        // The breached-limit cite: every variant, and the safe default (no cap breached).
+        for reason in [
+            BreachedLimit::None,
+            BreachedLimit::PerTxCap,
+            BreachedLimit::DailyCap,
+            BreachedLimit::OffAllowlist,
+        ] {
+            roundtrip(&reason);
+        }
+        assert_eq!(BreachedLimit::default(), BreachedLimit::None);
+
+        // An executed agent shield: tx hash present, no cap breached, hands-free auto-allowed.
+        let executed = ActivityRecord {
+            request_id: B256::repeat_byte(0x07),
+            origin: ProposalOrigin::Agent,
+            payload: PendingPayloadView::Tx(sample_intent(IntentKind::Shield)),
+            timestamp_ms: 1_700_000_000_123,
+            tx_hash: Some(B256::repeat_byte(0x6e)),
+            lifecycle: ActivityLifecycle::Executed,
+            reason: BreachedLimit::None,
+            auto_allowed: true,
+        };
+        roundtrip(&executed);
+
+        // A pending over-daily-cap card: no tx hash, the daily-cap cite, NOT auto-allowed (a human
+        // is in the loop), u64::MAX timestamp (full wire width) over the structured Approve payload.
+        roundtrip(&ActivityRecord {
+            request_id: B256::repeat_byte(0x08),
+            origin: ProposalOrigin::App,
+            payload: PendingPayloadView::Approve {
+                token: Address::repeat_byte(0xA1),
+                spender: Address::repeat_byte(0xC9),
+                amount: U256::MAX,
+            },
+            timestamp_ms: u64::MAX,
+            tx_hash: None,
+            lifecycle: ActivityLifecycle::Proposed,
+            reason: BreachedLimit::DailyCap,
+            auto_allowed: false,
+        });
+
+        // The `#[serde(default)]` path: an ActivityRecord JSON without `auto_allowed` decodes to
+        // the safe `false` (= a human was involved), never a phantom hands-free auto-allow.
+        let without: ActivityRecord = serde_json::from_str(
+            r#"{"request_id":"0x0707070707070707070707070707070707070707070707070707070707070707","origin":"Agent","payload":{"Tx":{"chain_id":1,"to":"0x2222222222222222222222222222222222222222","token":null,"value":"0x1","calldata":"0x","kind":"Send"}},"timestamp_ms":1,"tx_hash":null,"lifecycle":"Proposed","reason":"None"}"#,
+        )
+        .expect("decode without auto_allowed");
+        assert!(
+            !without.auto_allowed,
+            "missing auto_allowed defaults to false"
+        );
+
+        // The full request/response round-trip for the new feed variant.
+        roundtrip(&SignerRequest::ActivityFeed);
+        roundtrip(&SignerResponse::Activity(vec![executed]));
+        roundtrip(&SignerResponse::Activity(Vec::new()));
+    }
+
+    #[test]
+    fn proposal_origin_roundtrip_and_default() {
+        roundtrip(&ProposalOrigin::App);
+        roundtrip(&ProposalOrigin::Agent);
+        // The safe default is App: an un-tagged proposal must never masquerade as an agent.
+        assert_eq!(ProposalOrigin::default(), ProposalOrigin::App);
     }
 
     #[test]
@@ -312,6 +404,8 @@ mod roundtrip_tests {
             request_id: B256::repeat_byte(0x01),
             status: ApprovalStatus::Pending,
             payload: PendingPayloadView::Order(sample_swap_order()),
+            remaining_ms: 60_000,
+            origin: ProposalOrigin::Agent,
         });
         roundtrip(&PendingRecord {
             request_id: B256::repeat_byte(0x02),
@@ -321,6 +415,9 @@ mod roundtrip_tests {
                 spender: Address::repeat_byte(0xC9),
                 amount: U256::MAX,
             },
+            // u64::MAX exercises the wire's full width for the new field.
+            remaining_ms: u64::MAX,
+            origin: ProposalOrigin::App,
         });
     }
 

@@ -12,8 +12,9 @@ use tokio::net::UnixStream;
 use zeroize::Zeroize;
 
 use deckard_contract::{
-    ApprovalStatus, Decision, ExecuteResult, Intent, PendingRecord, RailgunViewGrant, RequestId,
-    SignOrderResult, SignerRequest, SignerResponse, SwapOrder, UnlockOutcome,
+    ActivityRecord, ApprovalStatus, Decision, ExecuteResult, Intent, PendingRecord, ProposalOrigin,
+    RailgunViewGrant, RequestId, SignOrderResult, SignerRequest, SignerResponse, SwapOrder,
+    UnlockOutcome,
 };
 
 use crate::frame;
@@ -122,10 +123,16 @@ impl SignerClient {
     }
 
     /// Blocking [`propose`](Self::propose) — policy check, no signing, for callers
-    /// without a tokio runtime (the app's GUI background thread).
-    pub fn propose_blocking(&self, intent: &Intent) -> anyhow::Result<Decision> {
+    /// without a tokio runtime (the app's GUI background thread). `origin` records WHO
+    /// proposed (app vs agent) for the inbox display; it never affects the verdict.
+    pub fn propose_blocking(
+        &self,
+        intent: &Intent,
+        origin: ProposalOrigin,
+    ) -> anyhow::Result<Decision> {
         match self.request_blocking(&SignerRequest::Propose {
             intent: intent.clone(),
+            origin,
         })? {
             SignerResponse::Decision(d) => Ok(d),
             other => Err(unexpected("Propose", other)),
@@ -171,11 +178,17 @@ impl SignerClient {
     }
 
     /// Propose an intent → a `Decision`. Note: the returned `request_id` for an `Allow` is
-    /// derivable locally via [`request_id_for_intent`](Self::request_id_for_intent).
-    pub async fn propose(&self, intent: &Intent) -> anyhow::Result<Decision> {
+    /// derivable locally via [`request_id_for_intent`](Self::request_id_for_intent). `origin`
+    /// records WHO proposed (app vs agent) for the inbox display; it never affects the verdict.
+    pub async fn propose(
+        &self,
+        intent: &Intent,
+        origin: ProposalOrigin,
+    ) -> anyhow::Result<Decision> {
         match self
             .request(&SignerRequest::Propose {
                 intent: intent.clone(),
+                origin,
             })
             .await?
         {
@@ -204,10 +217,15 @@ impl SignerClient {
     /// never auto-allow in v1). The daemon binds the order's owner/receiver to the unlocked
     /// wallet, so the returned id is for the BOUND order — derive it locally via
     /// [`request_id_for_swap_order`](Self::request_id_for_swap_order) only after binding.
-    pub async fn propose_order(&self, order: &SwapOrder) -> anyhow::Result<Decision> {
+    pub async fn propose_order(
+        &self,
+        order: &SwapOrder,
+        origin: ProposalOrigin,
+    ) -> anyhow::Result<Decision> {
         match self
             .request(&SignerRequest::ProposeOrder {
                 order: order.clone(),
+                origin,
             })
             .await?
         {
@@ -216,10 +234,16 @@ impl SignerClient {
         }
     }
 
-    /// Blocking [`propose_order`](Self::propose_order).
-    pub fn propose_order_blocking(&self, order: &SwapOrder) -> anyhow::Result<Decision> {
+    /// Blocking [`propose_order`](Self::propose_order). `origin` records WHO proposed (a
+    /// foreground GUI swap is `App`); it never affects the verdict, only the feed's two-actor chain.
+    pub fn propose_order_blocking(
+        &self,
+        order: &SwapOrder,
+        origin: ProposalOrigin,
+    ) -> anyhow::Result<Decision> {
         match self.request_blocking(&SignerRequest::ProposeOrder {
             order: order.clone(),
+            origin,
         })? {
             SignerResponse::Decision(d) => Ok(d),
             other => Err(unexpected("ProposeOrder", other)),
@@ -277,6 +301,34 @@ impl SignerClient {
         match self.request_blocking(&SignerRequest::PendingList)? {
             SignerResponse::Pending(records) => Ok(records),
             other => Err(unexpected("PendingList", other)),
+        }
+    }
+
+    /// Read the activity feed — every tracked action (auto-allowed, pending, denied, executed)
+    /// as an [`ActivityRecord`], newest-first. The GUI activity surface drives this.
+    pub async fn activity_feed(&self) -> anyhow::Result<Vec<ActivityRecord>> {
+        match self.request(&SignerRequest::ActivityFeed).await? {
+            SignerResponse::Activity(records) => Ok(records),
+            other => Err(unexpected("ActivityFeed", other)),
+        }
+    }
+
+    /// Blocking [`activity_feed`](Self::activity_feed).
+    pub fn activity_feed_blocking(&self) -> anyhow::Result<Vec<ActivityRecord>> {
+        match self.request_blocking(&SignerRequest::ActivityFeed)? {
+            SignerResponse::Activity(records) => Ok(records),
+            other => Err(unexpected("ActivityFeed", other)),
+        }
+    }
+
+    /// STOP / panic brake: zeroize the key, lock the daemon, deny every in-flight request
+    /// (including already-approved ones) and best-effort cancel any signed swap order on-chain.
+    /// Same daemon effect as [`lock_blocking`](Self::lock_blocking) — both unify in the daemon's
+    /// `stop()` — but a distinct verb so the feed's STOP control reads as the kill switch it is.
+    pub fn revoke_all_blocking(&self) -> anyhow::Result<()> {
+        match self.request_blocking(&SignerRequest::RevokeAll)? {
+            SignerResponse::Ack => Ok(()),
+            other => Err(unexpected("RevokeAll", other)),
         }
     }
 

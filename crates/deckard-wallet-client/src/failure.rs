@@ -157,8 +157,9 @@ pub fn from_deny_reason(reason: &str, config_dir: Option<&Path>) -> Failure {
             "this request needs a human approval before it can execute",
             "the policy (or the mainnet guardrail) classified it NeedsApproval and no \
              human has approved it yet",
-            "a human must approve in the Deckard app; the approval UI is not in this \
-             alpha — lower the amount under the policy per-tx cap or edit policy.json",
+            "a human must approve this in the Deckard app's Approvals queue (⌘⇧A); then \
+             retry deckard_execute, or lower the amount under the policy per-tx cap or \
+             edit policy.json",
         ),
         deny_reasons::USER_DENIED => Failure::new(
             "a human denied this request",

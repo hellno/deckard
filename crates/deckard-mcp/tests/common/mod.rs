@@ -170,7 +170,9 @@ impl MockState {
                 }
                 SignerResponse::Ack
             }
-            SignerRequest::Propose { intent } => SignerResponse::Decision(self.propose(&intent)),
+            SignerRequest::Propose { intent, .. } => {
+                SignerResponse::Decision(self.propose(&intent))
+            }
             SignerRequest::Execute { request_id } => {
                 SignerResponse::Execute(self.execute(request_id))
             }
@@ -224,6 +226,9 @@ impl MockState {
                 reason: "swap_unsupported_in_mock".into(),
             }),
             SignerRequest::PendingList => SignerResponse::Pending(Vec::new()),
+            // The MCP surface never reads the activity feed (it's a GUI-only surface); the mock
+            // just answers an empty ledger so the request shape stays covered.
+            SignerRequest::ActivityFeed => SignerResponse::Activity(Vec::new()),
         }
     }
 

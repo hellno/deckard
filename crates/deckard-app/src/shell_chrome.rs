@@ -3,18 +3,16 @@
 //! 25px bottom status strip, plus the shared neutral network pill.
 //!
 //! These are deliberately NOT gpui-component's heavyweight `Sidebar`/`Breadcrumb`
-//! components — the demo scope is a single project / wallet / agent, so the tree
-//! is a plain `v_flex` of rows. Color law (DESIGN §Color): ~95% grayscale; the
-//! selected row is a brightness lift (`secondary`), NEVER a colored keyline; amber
-//! is reserved for Receive's keyline + focus rings; cyan appears ONLY on the agent
-//! squircle glyph.
-
-use std::time::Duration;
+//! components — the demo scope is a single project / wallet, so the tree is a plain
+//! `v_flex` of rows. Color law (DESIGN §Color): ~95% grayscale; the selected row is a
+//! brightness lift (`secondary`), NEVER a colored keyline; amber is reserved for
+//! Receive's keyline + focus rings; cyan appears ONLY on the agent squircle glyph
+//! (in the wallet home's policy fence + the activity feed).
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, pulsating_between, px, Animation, AnimationExt, AnyElement, Context, FontWeight, Hsla,
-    InteractiveElement, IntoElement, ParentElement, Pixels, StatefulInteractiveElement, Styled,
+    div, px, AnyElement, Context, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement,
+    Pixels, StatefulInteractiveElement, Styled,
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
@@ -36,20 +34,16 @@ pub(crate) fn short_addr(a: &str) -> String {
 }
 
 /// The agent's cyan squircle monogram — the ONE cyan surface (DESIGN §Actor model): a
-/// rounded square (NEVER `rounded_full`) with the "A" monogram. When `acting`, its cyan
-/// keyline breathes on the sanctioned ~1.2s pulse — the single ambient motion in the
-/// whole app, shown only while the agent is mid-action (everywhere else renders
-/// instantly). Shared by the sidebar row and the agent-home header. `id` must be unique
-/// per live instance so GPUI keys the animation state correctly.
+/// rounded square (NEVER `rounded_full`) with the "A" monogram. Always static — the cyan
+/// glyph is the two-signal identity marker; it carries no pulse or ambient motion. Shared
+/// by the sidebar row, the wallet-home fence header, the palette, and the activity feed.
 pub(crate) fn agent_squircle(
     size: Pixels,
     radius: Pixels,
-    acting: bool,
     agent: Hsla,
     agent_tint: Hsla,
-    id: &'static str,
 ) -> AnyElement {
-    let base = div()
+    div()
         .size(size)
         .rounded(radius)
         .bg(agent_tint)
@@ -64,19 +58,8 @@ pub(crate) fn agent_squircle(
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(agent)
                 .child("A"),
-        );
-    if acting {
-        base.with_animation(
-            id,
-            Animation::new(Duration::from_millis(1200))
-                .repeat()
-                .with_easing(pulsating_between(0.35, 1.0)),
-            move |el, delta| el.border_color(agent.alpha(delta)),
         )
         .into_any_element()
-    } else {
-        base.into_any_element()
-    }
 }
 
 impl Shell {
@@ -87,19 +70,20 @@ impl Shell {
             Surface::Receive => "Receive",
             Surface::Send => "Send",
             Surface::Shield => "Shield",
+            Surface::Activity => "Activity",
             Surface::Swap => "Swap",
             Surface::Home => match self.selection {
                 Selection::Project => "Personal",
                 Selection::Wallet => "Wallet",
-                Selection::Agent => "Atlas",
             },
         }
     }
 
     /// The hand-built sidebar tree: a PROJECTS label, one project row, a Wallets
-    /// group + one wallet row, an Agents group + one agent row, a flex spacer, and
-    /// a footer gear that opens Settings. Neutral throughout; cyan only on the
-    /// agent squircle.
+    /// group + one wallet row, a flex spacer, an Activity ledger row, and a footer
+    /// gear that opens Settings. Neutral throughout. (Atlas is key-less automation ON
+    /// the wallet — same EOA — so it lives in the wallet home's policy fence, not as a
+    /// separate sidebar entity.)
     pub fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let fg = theme.foreground;
@@ -109,13 +93,16 @@ impl Shell {
         let mono = theme.mono_font_family.clone();
         let is_dark = theme.is_dark();
         let id_square = theme::identity_square(is_dark);
-        let agent = theme::agent(is_dark);
-        let agent_tint = theme::agent_tint(is_dark);
+        let amber = theme::amber(is_dark);
+        let amber_tint = theme::amber_tint(is_dark);
+        // The live "needs you" count (amber = "awaiting you") — the still-proposed rows in the
+        // Activity feed, which form its NEEDS YOU triage band. Surfaced on the Activity nav row.
+        let needs_you_count = crate::activity_view::activity_pending(&self.activity).len();
+        let activity_active = self.surface == Surface::Activity;
 
         let project_selected =
             self.surface == Surface::Home && self.selection == Selection::Project;
         let wallet_selected = self.surface == Surface::Home && self.selection == Selection::Wallet;
-        let agent_selected = self.surface == Surface::Home && self.selection == Selection::Agent;
 
         let addr = short_addr(&self.wallet_address_string());
         let balance = self
@@ -203,44 +190,41 @@ impl Shell {
                     )
                     .on_click(cx.listener(|this, _, _, cx| this.select(Selection::Wallet, cx))),
             )
-            // Agents group.
-            .child(group_label("Agents"))
+            // Spacer pushes the footer rows to the bottom.
+            .child(div().flex_1())
+            // Activity ledger — a sibling of Settings (bottom): the full cross-agent record AND
+            // the triage queue for what still needs you (its NEEDS YOU band). A live amber count
+            // badge ("awaiting you") surfaces the still-proposed rows; ⌘⇧A summons it from anywhere.
             .child(
                 div()
-                    .id("nav-agent")
+                    .id("nav-activity")
                     .mx_2()
                     .px_2()
                     .py_1p5()
                     .rounded_md()
-                    .when(agent_selected, |e| e.bg(lift))
+                    .when(activity_active, |e| e.bg(lift))
                     .cursor_pointer()
                     .child(
                         h_flex()
                             .w_full()
                             .items_center()
+                            .justify_between()
                             .gap_2()
-                            // The cyan squircle monogram — breathes when Atlas is acting.
-                            .child(agent_squircle(
-                                px(16.0),
-                                px(5.0),
-                                self.agent_acting,
-                                agent,
-                                agent_tint,
-                                "agent-pulse-sidebar",
-                            ))
-                            .child(div().flex_1().text_sm().text_color(fg).child("Atlas"))
-                            // Status dot: a neutral brightness lift while acting (the cyan
-                            // breathing squircle is the sole cyan surface — DESIGN actor model).
-                            .child(div().size(px(6.0)).rounded_full().bg(if self.agent_acting {
-                                fg
-                            } else {
-                                muted
-                            })),
+                            .child(div().text_sm().text_color(muted).child("Activity"))
+                            .when(needs_you_count > 0, |row| {
+                                row.child(
+                                    div()
+                                        .px_1p5()
+                                        .rounded_md()
+                                        .bg(amber_tint)
+                                        .text_xs()
+                                        .text_color(amber)
+                                        .child(format!("{needs_you_count}")),
+                                )
+                            }),
                     )
-                    .on_click(cx.listener(|this, _, _, cx| this.select(Selection::Agent, cx))),
+                    .on_click(cx.listener(|this, _, window, cx| this.open_activity(window, cx))),
             )
-            // Spacer pushes the footer gear to the bottom.
-            .child(div().flex_1())
             // Footer gear → Settings.
             .child(
                 div()

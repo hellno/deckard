@@ -66,7 +66,7 @@ async fn t1_list_tools_is_the_six_tool_launch_profile() {
                 "decimal ETH string",
                 "request_id",
                 "deckard_execute",
-                "simulation surface",
+                "Approvals queue",
             ],
         ),
         (

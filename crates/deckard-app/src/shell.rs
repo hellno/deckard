@@ -35,8 +35,8 @@ use crate::signer::{self, AppSigner};
 use crate::theme;
 use crate::wallet;
 use crate::{
-    GoBack, NewItem, OpenSettings, PaletteNext, PalettePrev, ToggleMask, TogglePalette,
-    ToggleTheme, APP_NAME,
+    GoBack, NewItem, OpenApprovals, OpenSettings, PaletteNext, PalettePrev, ToggleMask,
+    TogglePalette, ToggleTheme, APP_NAME,
 };
 
 /// Auto-refresh the public wallet balance every this many seconds while the home view is open.
@@ -62,13 +62,13 @@ fn write_then_unlock(
 }
 
 /// What the sidebar tree selects — the contextual-view driver. The home surface
-/// renders differently per selection (wallet / project / agent). Demo scope is a
-/// single project, wallet, and agent (see deckard-demo-ux-locked.md).
+/// renders differently per selection (project / wallet). Demo scope is a single
+/// project + wallet; Atlas (key-less automation on the SAME wallet EOA) is not a
+/// separate entity — its policy fence lives in the wallet home.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Selection {
     Project,
     Wallet,
-    Agent,
 }
 
 /// Transient full-pane surfaces opened FROM a selection. `Home` = the contextual
@@ -83,6 +83,10 @@ pub enum Surface {
     Send,
     /// The shield trigger flow (T5): compose a deposit → review card → hold-to-confirm.
     Shield,
+    /// The session activity feed (#60): the see-and-stop ledger of every tracked action —
+    /// auto-allowed, pending, decided, and executed — newest-first, read from the daemon's
+    /// `ActivityFeed`. Pending rows are inline-approvable; a header STOP control is the brake.
+    Activity,
     /// The CoW swap flow (#25): compose (sell amount + token pickers) → get a quote → review the
     /// priced order → hold-to-confirm (propose + approve + resolve + sign + submit). The daemon
     /// signs the EIP-712 order; the app posts it to the orderbook. The app holds no key.
@@ -167,15 +171,49 @@ pub struct Shell {
     /// figure (DESIGN §Trust). Initialised from `Settings.mask_balances` and persisted on
     /// every toggle — the inverse of the seed reveal's momentary, default-hidden model.
     pub mask: bool,
-    /// Demo stand-in for "Atlas is currently acting": drives the one sanctioned ambient
-    /// motion (the ~1.2s breathing pulse on the agent squircle). Not persisted — it's a
-    /// narrated demo toggle until the daemon exposes an activity feed.
-    pub agent_acting: bool,
-    /// The signer's live policy fence, rendered on the agent home so the card shows the
-    /// SAME numbers `deckard_policy_get` returns. Fetched from the daemon (`PolicyGet`
-    /// deliberately succeeds while locked — the fence is config, not a secret); `None`
-    /// until the first fetch lands or when the daemon is unreachable.
+    /// The signer's live policy fence, rendered on the wallet home's "What Atlas may do"
+    /// card so it shows the SAME numbers `deckard_policy_get` returns. Fetched from the
+    /// daemon (`PolicyGet` deliberately succeeds while locked — the fence is config, not a
+    /// secret); `None` until the first fetch lands or when the daemon is unreachable.
     pub agent_policy: Option<Policy>,
+
+    // --- activity feed (#60: the see-and-stop ledger) ---
+    /// The latest `ActivityFeed` snapshot — every tracked action (auto-allowed, pending, denied,
+    /// executed), newest-first, with `tx_hash`/`timestamp_ms`/breached-cap. The Activity surface
+    /// renders this; refreshed by `refresh_activity` + the poller. It is the feed's sole source —
+    /// the still-proposed rows form the "NEEDS YOU" band (the inline triage queue), and the feed
+    /// also retains executed/auto-allowed rows the pending-only view would drop.
+    pub activity: Vec<deckard_contract::ActivityRecord>,
+    /// The highlighted feed row, 0-based into the APPROVABLE (still-proposed) subset of
+    /// `activity` — clamped on every refresh so it never points past a now-shorter list. j/k move
+    /// it; the feed renders all rows but only proposed ones are selectable/approvable.
+    pub activity_selected: usize,
+    /// `Some` ⇒ the inline clear-signing review is open on the feed for that request id. Cleared
+    /// on cancel / approve / deny. `pub(crate)` so the read-only `activity_view` can dispatch on it.
+    pub(crate) activity_reviewing: Option<deckard_contract::RequestId>,
+    /// True while an `ActivityFeed` round-trip is in flight (drives a first-load skeleton only).
+    pub activity_loading: bool,
+    /// Fail-loud one-liner when an `ActivityFeed` fetch fails (shown in `danger`, never a silent
+    /// empty feed).
+    pub activity_error: Option<String>,
+    /// Bumped on each `refresh_activity` so a slow reply for a superseded fetch can't install a
+    /// stale snapshot.
+    activity_epoch: u64,
+    /// The Activity surface's focus handle — `track_focus`'d so its `key_context("Activity")`
+    /// listener owns the in-feed keys (j/k/x/Enter/⌘Enter/Esc) without leaking to a global behind it.
+    activity_focus: gpui::FocusHandle,
+    /// True while the recurring activity-feed poller loop is alive, so opening the surface twice
+    /// can't spawn a second loop (the loop self-terminates when the feed is no longer active).
+    activity_poller_running: bool,
+    /// STOP confirm arming: a first click on the feed's STOP control arms it (shows "confirm"),
+    /// a second confirms — so the irreversible key-zeroize is never a single click. Esc disarms.
+    /// `pub` so the read-only `activity_view` can render the armed state.
+    pub activity_stop_arming: bool,
+    /// Set once a STOP from the feed succeeded — drives the "Stopped — key zeroized, unlock to
+    /// re-arm" banner. The feed stays visible (the daemon answers `ActivityFeed` while locked) so
+    /// the revoked rows are seen; the next unlock clears it. `pub` so the view can render it.
+    pub activity_stopped: bool,
+
     /// The capture-block state last pushed to the OS, so `render` only re-issues the
     /// native `setSharingType` call when `capture_block && mask` actually changes.
     capture_applied: bool,
@@ -571,8 +609,17 @@ impl Shell {
             palette_usage: crate::palette_usage::PaletteUsage::load(),
             palette_matcher: nucleo_matcher::Matcher::new(nucleo_matcher::Config::DEFAULT),
             mask,
-            agent_acting: false,
             agent_policy: None,
+            activity: Vec::new(),
+            activity_selected: 0,
+            activity_reviewing: None,
+            activity_loading: false,
+            activity_error: None,
+            activity_epoch: 0,
+            activity_focus: cx.focus_handle(),
+            activity_poller_running: false,
+            activity_stop_arming: false,
+            activity_stopped: false,
             capture_applied: false,
             allow_screen_capture,
             shield,
@@ -691,6 +738,11 @@ impl Shell {
         self.swap_quoting = false;
         self.swap_uid = None;
         self.swap_quote_epoch = self.swap_quote_epoch.wrapping_add(1);
+        // Clear the feed's STOP banner + arming + any open inline review (a fresh unlock re-arms
+        // the wallet, so a stale "Stopped" banner or half-open review must not survive).
+        self.activity_stopped = false;
+        self.activity_stop_arming = false;
+        self.activity_reviewing = None;
         self.auth = AuthStep::Unlock;
         self.palette_open = false;
         cx.notify();
@@ -988,10 +1040,10 @@ impl Shell {
         self.start_balance_poll(cx);
     }
 
-    /// Fetch the daemon's live policy for the agent home (off the UI thread). Key-less:
-    /// `PolicyGet` is a read of the fence the daemon enforces — the daemon answers it even
-    /// while locked, so this works from the unlock gate too. On any failure the card keeps
-    /// its previous snapshot (or honestly shows none); it never fabricates numbers.
+    /// Fetch the daemon's live policy for the wallet home's "What Atlas may do" fence (off
+    /// the UI thread). Key-less: `PolicyGet` is a read of the fence the daemon enforces — the
+    /// daemon answers it even while locked, so this works from the unlock gate too. On any
+    /// failure the card keeps its previous snapshot (or honestly shows none); never fabricates.
     fn kick_agent_policy(&mut self, cx: &mut Context<Self>) {
         let client = self.signer.client();
         let task = cx.background_spawn(async move {
@@ -1362,9 +1414,10 @@ impl Shell {
     pub fn select(&mut self, sel: Selection, cx: &mut Context<Self>) {
         self.selection = sel;
         self.surface = Surface::Home;
-        // The agent home renders the daemon's live policy fence — re-fetch on every visit
-        // so an out-of-band edit to policy.json (or a STOP) shows up without a relaunch.
-        if sel == Selection::Agent {
+        // The wallet home now carries the "What Atlas may do" policy fence — re-fetch the
+        // daemon's live policy on every visit so an out-of-band edit to policy.json (or a
+        // STOP) shows up without a relaunch.
+        if sel == Selection::Wallet {
             self.kick_agent_policy(cx);
         }
         cx.notify();
@@ -1387,6 +1440,13 @@ impl Shell {
         if surface != Surface::Swap && self.swap.holding {
             self.swap.cancel_hold();
         }
+        // Drop a clear-signing review left open on the surface we're leaving. Its card only renders
+        // on its OWN surface, so a stale `activity_reviewing` set on a now-hidden surface could
+        // otherwise be resolved blind from the palette while a different surface is shown — the
+        // second/blind approval path codex flagged. Clearing on every surface change closes it.
+        if surface != Surface::Activity {
+            self.activity_reviewing = None;
+        }
         self.surface = surface;
         cx.notify();
     }
@@ -1406,14 +1466,6 @@ impl Shell {
     /// gesture, and the palette row all route here). Persists the new state.
     pub fn toggle_mask(&mut self, cx: &mut Context<Self>) {
         self.set_mask(!self.mask, cx);
-    }
-
-    /// Flip the demo "agent currently acting" state (the breathing-pulse driver). Not
-    /// persisted — a narrated demo toggle until the daemon exposes an activity feed the
-    /// pulse can bind to (the policy card itself is already live via `PolicyGet`).
-    pub fn toggle_agent_acting(&mut self, cx: &mut Context<Self>) {
-        self.agent_acting = !self.agent_acting;
-        cx.notify();
     }
 
     // --- shield trigger flow (T5) ---
@@ -1469,7 +1521,9 @@ impl Shell {
         let chain_id = self.chain_id;
         let task = cx.background_spawn(async move {
             let intent = signer::build_shield_intent(chain_id, &recipient, value_wei)?;
-            let decision = client.propose_blocking(&intent)?;
+            // The user's foreground shield from the app → App-origin (the wire requires origin).
+            let decision =
+                client.propose_blocking(&intent, deckard_contract::ProposalOrigin::App)?;
             // The recipient SNAPSHOT inside the signed intent: the 0zk string the user reviewed —
             // never a value they could have since edited in the input.
             Ok::<(Intent, String, Decision), anyhow::Error>((intent, recipient_snapshot, decision))
@@ -1709,7 +1763,9 @@ impl Shell {
                     .map_err(|e| anyhow::anyhow!("couldn't resolve name — {}", short_err(e)))?,
             };
             let intent = signer::build_native_send_intent(chain_id, to, value_wei);
-            let decision = client.propose_blocking(&intent)?;
+            // The user's foreground send from the app → App-origin (the wire requires origin).
+            let decision =
+                client.propose_blocking(&intent, deckard_contract::ProposalOrigin::App)?;
             // The recipient SNAPSHOT inside the signed intent: the checksummed destination — never
             // the raw `0x…`/ENS text the user could have since edited.
             Ok::<(Intent, String, Decision), anyhow::Error>((
@@ -2027,8 +2083,10 @@ impl Shell {
         cx.notify();
         let client = self.signer.client();
         let order_for_task = order.clone();
-        let task =
-            cx.background_spawn(async move { client.propose_order_blocking(&order_for_task) });
+        // App-origin: the user's foreground GUI swap → the feed labels the order "You", not "Atlas".
+        let task = cx.background_spawn(async move {
+            client.propose_order_blocking(&order_for_task, deckard_contract::ProposalOrigin::App)
+        });
         cx.spawn(async move |this, cx| {
             let res = task.await;
             this.update(cx, |this, cx| {
@@ -2236,6 +2294,325 @@ impl Shell {
         self.set_mode(next, cx);
     }
 
+    // --- activity feed (#60: the see-and-stop ledger) ---
+
+    /// Open the Activity feed (#60): the see-and-stop ledger of what the agent + you did, and the
+    /// triage queue for what still needs you (the "NEEDS YOU" band). It is keyboard-first (proposed
+    /// rows are inline-approvable), so it captures focus for its `key_context("Activity")` handler
+    /// and kicks a fresh `ActivityFeed` fetch + the recurring poller.
+    pub fn open_activity(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.activity_reviewing = None;
+        self.activity_stop_arming = false;
+        self.open(Surface::Activity, cx);
+        window.focus(&self.activity_focus, cx);
+        self.refresh_activity(cx);
+        self.start_activity_poller(cx);
+    }
+
+    /// Fetch the latest `ActivityFeed` off the UI thread and fold it into `self.activity`,
+    /// epoch-guarded (a slow reply for a superseded fetch can't clobber a newer snapshot) and
+    /// clamping `activity_selected` to the new approvable-row count. This is the feed's sole
+    /// source — the "NEEDS YOU" band derives its rows from `activity`, never a separate list.
+    pub fn refresh_activity(&mut self, cx: &mut Context<Self>) {
+        self.activity_epoch = self.activity_epoch.wrapping_add(1);
+        let epoch = self.activity_epoch;
+        self.activity_loading = true;
+        cx.notify();
+        let client = self.signer.client();
+        let task = cx.background_spawn(async move { client.activity_feed_blocking() });
+        cx.spawn(async move |this, cx| {
+            let res = task.await;
+            this.update(cx, |this, cx| {
+                if this.activity_epoch != epoch {
+                    return;
+                }
+                this.activity_loading = false;
+                match res {
+                    Ok(records) => {
+                        this.activity_error = None;
+                        // Preserve the highlight by request_id, NOT by raw index. The ~2s poller
+                        // can insert/remove proposed rows between renders, so a stale numeric index
+                        // could point at a DIFFERENT record than the operator sees selected — and
+                        // `x`/deny + the palette deny-selected resolve the SELECTED record. Capture
+                        // the id from the old snapshot, then re-key to it in the new pending subset;
+                        // if it's gone (settled/expired), clamp. This closes a wrong-deny race.
+                        let selected_id = crate::activity_view::activity_pending(&this.activity)
+                            .get(this.activity_selected)
+                            .map(|r| r.request_id);
+                        this.activity = records;
+                        let pending = crate::activity_view::activity_pending(&this.activity);
+                        this.activity_selected = selected_id
+                            .and_then(|id| pending.iter().position(|r| r.request_id == id))
+                            .unwrap_or_else(|| {
+                                this.activity_selected.min(pending.len().saturating_sub(1))
+                            });
+                        // CRITICAL: if the row whose review is OPEN has settled/expired (left the
+                        // pending set), clear `activity_reviewing` IN THE SAME swap. The render is
+                        // `&self` so it can't clear it — it just falls through to the feed — and a
+                        // stale reviewing id would make a one-key APPROVE blind-approve the now-
+                        // highlighted DIFFERENT row (`approve_activity` skips re-review while
+                        // `reviewing.is_some()`). Clearing forces approve to re-open the highlighted
+                        // row's own clear-signing review first — the no-blind-approve invariant.
+                        if let Some(id) = this.activity_reviewing {
+                            if !pending.iter().any(|r| r.request_id == id) {
+                                this.activity_reviewing = None;
+                            }
+                        }
+                    }
+                    Err(e) => this.activity_error = Some(short_err(e)),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Move the feed highlight down one approvable (still-proposed) row, clamped (no wrap, no
+    /// panic on an all-terminal feed). j / ↓ route here.
+    pub fn activity_select_next(&mut self) {
+        let len = crate::activity_view::activity_pending(&self.activity).len();
+        if len > 0 {
+            self.activity_selected = (self.activity_selected + 1).min(len - 1);
+        }
+    }
+
+    /// Move the feed highlight up one row (saturating at the top). k / ↑ route here.
+    pub fn activity_select_prev(&mut self) {
+        self.activity_selected = self.activity_selected.saturating_sub(1);
+    }
+
+    /// Open the inline clear-signing review for the highlighted approvable feed row. No-op when
+    /// there are no proposed rows / the selection points past them (guarded via `.get`).
+    pub fn open_selected_activity_review(&mut self, cx: &mut Context<Self>) {
+        let pending = crate::activity_view::activity_pending(&self.activity);
+        if let Some(rec) = pending.get(self.activity_selected) {
+            self.activity_reviewing = Some(rec.request_id);
+            cx.notify();
+        }
+    }
+
+    /// Open the inline review for a specific feed row (a click on a proposed row), aligning the
+    /// keyboard selection with it so a subsequent ⌘Enter/Esc targets the same record. Sets
+    /// `activity_reviewing` ONLY when the clicked row is STILL pending — a click can land a frame
+    /// after a background poll settled the row, and opening a phantom review for a settled id would
+    /// leave `activity_reviewing` stale.
+    pub fn review_activity_row(
+        &mut self,
+        request_id: deckard_contract::RequestId,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(i) = crate::activity_view::activity_pending(&self.activity)
+            .iter()
+            .position(|r| r.request_id == request_id)
+        {
+            self.activity_selected = i;
+            self.activity_reviewing = Some(request_id);
+            cx.notify();
+        }
+    }
+
+    /// Leave the feed's inline review (Esc, or a completed approve/deny). Pure UI state.
+    pub fn cancel_activity_review(&mut self, cx: &mut Context<Self>) {
+        self.activity_reviewing = None;
+        cx.notify();
+    }
+
+    /// Approve the reviewed feed row. Approval resolves ONLY the actively-reviewed, STILL-PENDING
+    /// record — NEVER the highlighted-row fallback that deny uses. If there is no valid open review
+    /// (none, or the reviewed row settled/expired under a background poll, or a click that raced a
+    /// settle left a stale id), `⌘Enter` instead opens the highlighted row's clear-signing review,
+    /// so the operator must SEE that row's card before a second `⌘Enter` approves. This makes a
+    /// blind-approve of an unreviewed spend STRUCTURALLY impossible no matter how `activity_reviewing`
+    /// came to be stale. The agent executes its own write once the record flips to `Allowed` — the
+    /// app never broadcasts.
+    pub fn approve_activity(&mut self, cx: &mut Context<Self>) {
+        let pending = crate::activity_view::activity_pending(&self.activity);
+        match crate::activity_view::approve_target(self.activity_reviewing, &pending) {
+            // The reviewed record is still pending → its clear-signing card is exactly what the
+            // render shows (it keys the same id), so approving it is never blind.
+            Some(id) => self.resolve_activity_id(id, true, cx),
+            // No valid open review → resolve NOTHING. Drop any stale id and open the highlighted
+            // row's review first; the operator approves only after seeing that row's card.
+            None => {
+                self.activity_reviewing = None;
+                self.open_selected_activity_review(cx);
+            }
+        }
+    }
+
+    /// Deny the target feed row: the reviewed record while still pending, else the highlighted
+    /// proposed row. Unlike approve, deny is one-key by design (it only REFUSES — the fail-safe
+    /// direction), so it MAY fall back to the highlighted, on-screen row.
+    pub fn deny_activity(&mut self, cx: &mut Context<Self>) {
+        let pending = crate::activity_view::activity_pending(&self.activity);
+        let target = self
+            .activity_reviewing
+            .filter(|id| pending.iter().any(|r| r.request_id == *id))
+            .or_else(|| pending.get(self.activity_selected).map(|r| r.request_id));
+        if let Some(request_id) = target {
+            self.resolve_activity_id(request_id, false, cx);
+        }
+    }
+
+    /// Drive `Resolve(request_id, approved)` over the capability channel off-thread and reconcile
+    /// against the daemon's reply; on success leave the review and re-fetch the feed (the now-
+    /// decided row updates in place); on a control-channel failure fail loud and stay put. No
+    /// `Execute` ever — the agent/daemon broadcasts.
+    fn resolve_activity_id(
+        &mut self,
+        request_id: deckard_contract::RequestId,
+        approved: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let control = self.signer.control();
+        self.activity_loading = true;
+        cx.notify();
+        let task =
+            cx.background_spawn(
+                async move { signer::resolve_blocking(&control, request_id, approved) },
+            );
+        cx.spawn(async move |this, cx| {
+            let res = task.await;
+            this.update(cx, |this, cx| match res {
+                Ok(()) => {
+                    this.activity_reviewing = None;
+                    this.refresh_activity(cx);
+                }
+                Err(e) => {
+                    this.activity_loading = false;
+                    this.activity_error = Some(short_err(e));
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The feed's STOP control: a deliberate two-step so the irreversible key-zeroize is never a
+    /// single click — the first call arms it (the button flips to "Confirm STOP"), the second
+    /// fires [`stop_revoke_all`](Self::stop_revoke_all). Esc on the surface disarms.
+    pub fn stop_button_clicked(&mut self, cx: &mut Context<Self>) {
+        if self.activity_stop_arming {
+            self.activity_stop_arming = false;
+            self.stop_revoke_all(cx);
+        } else {
+            self.activity_stop_arming = true;
+            cx.notify();
+        }
+    }
+
+    /// STOP / panic brake from the feed (or the ⌘K command): zeroize the key + deny in-flight via
+    /// `revoke_all` off-thread, then refresh so the feed SHOWS the revoke (the daemon answers
+    /// `ActivityFeed` while locked). The wallet is now locked; a banner tells the operator to
+    /// unlock to re-arm. We deliberately stay on the feed (not jump to the unlock gate) so the
+    /// kill is visible — #60 acceptance 3.
+    pub fn stop_revoke_all(&mut self, cx: &mut Context<Self>) {
+        self.activity_stop_arming = false;
+        let client = self.signer.client();
+        self.activity_loading = true;
+        cx.notify();
+        let task = cx.background_spawn(async move { client.revoke_all_blocking() });
+        cx.spawn(async move |this, cx| {
+            let res = task.await;
+            this.update(cx, |this, cx| match res {
+                Ok(()) => {
+                    this.activity_stopped = true;
+                    this.refresh_activity(cx);
+                    // Re-fetch the policy so the wallet-home fence's STOP-brake row flips to
+                    // "engaged" without waiting for a re-select (the fence lives in the wallet
+                    // cockpit now; a STOP from the feed must not leave it reading "ready").
+                    this.kick_agent_policy(cx);
+                }
+                Err(e) => {
+                    this.activity_loading = false;
+                    this.activity_error = Some(short_err(e));
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The Activity feed's per-surface key handler: j/↓ k/↑ move the highlight, x denies, Enter
+    /// opens the selected row's review, ⌘Enter approves, Esc disarms STOP then leaves an open
+    /// review. Scoped via `key_context("Activity")` + the focused `activity_focus`, and
+    /// `stop_propagation` keeps a bare key off the globals.
+    fn on_activity_key(
+        &mut self,
+        ev: &gpui::KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ks = &ev.keystroke;
+        let key = ks.key.as_str();
+        let m = ks.modifiers;
+        match key {
+            "j" | "down" => {
+                self.activity_select_next();
+                cx.notify();
+            }
+            "k" | "up" => {
+                self.activity_select_prev();
+                cx.notify();
+            }
+            "x" => self.deny_activity(cx),
+            "escape" => {
+                if self.activity_stop_arming {
+                    self.activity_stop_arming = false;
+                    cx.notify();
+                } else if self.activity_reviewing.is_some() {
+                    self.cancel_activity_review(cx);
+                }
+            }
+            "enter" => {
+                if m.platform {
+                    self.approve_activity(cx);
+                } else {
+                    self.open_selected_activity_review(cx);
+                }
+            }
+            _ => return,
+        }
+        cx.stop_propagation();
+    }
+
+    /// Start the recurring `ActivityFeed` poller: a ~2s loop that re-fetches while the Activity
+    /// surface is open, so an agent-parked record (or a settled outcome) shows up in the feed
+    /// without a manual refresh. Idempotent — guarded by `activity_poller_running` so a second
+    /// open never spawns a second loop. The loop self-terminates the moment the feed is no longer
+    /// the active surface (and clears the flag so the next open restarts it). Mirrors
+    /// `watch_shielded_sync`.
+    fn start_activity_poller(&mut self, cx: &mut Context<Self>) {
+        if self.activity_poller_running {
+            return;
+        }
+        self.activity_poller_running = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(2)).await;
+                let keep = this.update(cx, |this, cx| {
+                    if this.surface == Surface::Activity {
+                        this.refresh_activity(cx);
+                        true
+                    } else {
+                        // Off the feed: stop polling and let the next open restart the loop.
+                        this.activity_poller_running = false;
+                        false
+                    }
+                });
+                match keep {
+                    Ok(true) => continue,
+                    // Either the view is gone (Err) or we left the feed (Ok(false)) — stop.
+                    _ => break,
+                }
+            }
+        })
+        .detach();
+    }
+
     // --- Action handlers (wired in `render`) ---
     //
     // While the palette is open it OWNS the keyboard: gpui dispatches these global ⌘-shortcuts
@@ -2259,6 +2636,20 @@ impl Shell {
         self.open(Surface::Settings, cx);
     }
 
+    /// ⌘⇧A — opens the Activity feed. The Approvals surface collapsed into the feed's "NEEDS YOU"
+    /// triage band, so the old `OpenApprovals` action (and its keybinding) now opens Activity.
+    fn on_open_approvals(
+        &mut self,
+        _: &OpenApprovals,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.palette_open {
+            return;
+        }
+        self.open_activity(window, cx);
+    }
+
     fn on_go_back(&mut self, _: &GoBack, _: &mut Window, cx: &mut Context<Self>) {
         if self.palette_open {
             return;
@@ -2266,6 +2657,12 @@ impl Shell {
         // Back = leave any action surface and return to the selection's Home view.
         if self.surface != Surface::Home {
             self.open(Surface::Home, cx);
+            // Landing on the wallet cockpit via back (not a re-select) must still freshen the
+            // agent fence — otherwise a STOP fired from the feed, then ⌘[ back, shows a stale
+            // "ready" brake. select() does this on click; do it here for the back-path too.
+            if self.selection == Selection::Wallet {
+                self.kick_agent_policy(cx);
+            }
         }
     }
 
@@ -2337,6 +2734,33 @@ impl Shell {
             "receive" => self.open(Surface::Receive, cx),
             "shield" => self.open_shield(cx),
             "swap" => self.open_swap(cx),
+            // "Approvals" collapsed into the Activity feed — its triage queue is the feed's
+            // "NEEDS YOU" band — so this id now opens Activity, same as "activity".
+            "approvals" => self.open_activity(window, cx),
+            "activity" => self.open_activity(window, cx),
+            // APPROVE requires the deliberate two-step (open the row's review, then a second
+            // approve) — you can NEVER blind-approve a SPEND from a list row or the palette. DENY is
+            // one-key by design (deny only REFUSES a spend — the fail-safe direction); it resolves
+            // the highlighted record, which refresh_activity re-keys by request_id so it can't hit
+            // the wrong row under poll churn. Open the feed FIRST (mirroring STOP) so the operator
+            // triages against a fresh, on-screen snapshot — never a stale off-feed one.
+            "approve-selected" => {
+                self.open_activity(window, cx);
+                self.approve_activity(cx);
+            }
+            "deny-selected" => {
+                self.open_activity(window, cx);
+                self.deny_activity(cx);
+            }
+            // STOP / panic brake — its OWN id. The ⌘K selection is itself the deliberate act, so
+            // this fires the kill directly. Route to the Activity feed FIRST so the kill is visible
+            // there (the revoked rows + the "Stopped" banner) — otherwise firing it from
+            // Portfolio/Send would zeroize the key with no on-screen feedback (the daemon is now
+            // locked but the surface looks Ready).
+            "revoke-all" => {
+                self.open_activity(window, cx);
+                self.stop_revoke_all(cx);
+            }
             "settings" => self.open(Surface::Settings, cx),
             "copy" => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(
@@ -2346,7 +2770,6 @@ impl Shell {
             }
             "theme" => self.toggle_mode(cx),
             "mask" => self.toggle_mask(cx),
-            "agent" => self.toggle_agent_acting(cx),
             // `lock` returns to the unlock gate and already clears `palette_open`; closing again
             // below is a harmless no-op (the prev-focus restore targets a now-replaced view).
             "lock" => self.lock(cx),
@@ -2503,6 +2926,17 @@ impl Render for Shell {
                 (_, Surface::Shield) => self
                     .render_commit(&crate::shield_view::SHIELD_VIEW, cx)
                     .into_any_element(),
+                // Activity owns its OWN scroll INSIDE the feed body (so the heading + STOP stay
+                // pinned — the panic brake must never scroll off screen); this outer just holds the
+                // focus + the j/k/x/Enter/⌘Enter key handling.
+                (_, Surface::Activity) => v_flex()
+                    .id("activity-surface")
+                    .size_full()
+                    .track_focus(&self.activity_focus)
+                    .key_context("Activity")
+                    .on_key_down(cx.listener(Self::on_activity_key))
+                    .child(self.render_activity(cx))
+                    .into_any_element(),
                 // Swap is a bespoke render (token pickers + a quote summary the generic
                 // `render_commit` can't express); wrap it in its own scroll surface since the
                 // compose arm (pickers + summary) can run taller than the pane.
@@ -2525,12 +2959,6 @@ impl Render for Shell {
                     .size_full()
                     .overflow_y_scrollbar()
                     .child(self.render_project_home(cx))
-                    .into_any_element(),
-                (Selection::Agent, Surface::Home) => div()
-                    .id("scroll-agent")
-                    .size_full()
-                    .overflow_y_scrollbar()
-                    .child(self.render_agent_home(cx))
                     .into_any_element(),
             };
             v_flex()
@@ -2579,6 +3007,7 @@ impl Render for Shell {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::on_new_item))
             .on_action(cx.listener(Self::on_open_settings))
+            .on_action(cx.listener(Self::on_open_approvals))
             .on_action(cx.listener(Self::on_go_back))
             .on_action(cx.listener(Self::on_toggle_theme))
             .on_action(cx.listener(Self::on_toggle_palette))

@@ -12,7 +12,8 @@ use serde_json::json;
 use zeroize::Zeroizing;
 
 use deckard_contract::{
-    ApprovalMode, Decision, ExecuteResult, Policy, ReadStatus, SignerRequest, SignerResponse,
+    ApprovalMode, Decision, ExecuteResult, Policy, ProposalOrigin, ReadStatus, SignerRequest,
+    SignerResponse,
 };
 use deckard_wallet_client::{failure, unexpected, Failure, SignerClient, WalletClient};
 
@@ -185,6 +186,7 @@ impl Sidecar {
         match self
             .request(&SignerRequest::Propose {
                 intent: intent.clone(),
+                origin: ProposalOrigin::Agent,
             })
             .await?
         {
@@ -200,10 +202,10 @@ impl Sidecar {
             SignerResponse::Decision(Decision::NeedsApproval { request_id }) => Ok(json!({
                 "decision": "needs_approval",
                 "request_id": format!("{request_id:#x}"),
-                "next": "a human must approve in the Deckard app before deckard_execute \
-                         can run; the approval UI is not in this alpha — lower the amount \
-                         under the policy per-tx cap (deckard_policy_get) or edit \
-                         policy.json",
+                "next": "a human must approve this in the Deckard app's Approvals queue \
+                         (⌘⇧A) before deckard_execute can run; once approved, call \
+                         deckard_execute with this request_id — or lower the amount under \
+                         the policy per-tx cap (deckard_policy_get) or edit policy.json",
             })),
             SignerResponse::Decision(Decision::Deny { reason }) => {
                 Err(failure::from_deny_reason(&reason, self.config_dir()))

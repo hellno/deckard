@@ -26,8 +26,8 @@ pub struct Ranked {
     pub positions: Vec<usize>, // char positions to bold in the TITLE (empty when an alias matched)
 }
 
-/// The static registry. Dynamic display labels for mask/theme/agent are applied
-/// by palette.rs at render time; ranking always uses these static titles + aliases,
+/// The static registry. Dynamic display labels for mask/theme are applied by
+/// palette.rs at render time; ranking always uses these static titles + aliases,
 /// so the alternate sense (e.g. "show" for the masked state) stays reachable via
 /// aliases regardless of current state.
 pub const COMMANDS: &[Command] = &[
@@ -111,26 +111,67 @@ pub const COMMANDS: &[Command] = &[
         icon: Some(IconName::EyeOff), // palette.rs swaps Eye/EyeOff + label live
     },
     Command {
-        id: "agent",
-        title: "Simulate agent activity (demo)",
-        // "stop agent activity" = the live label while acting, so a phrase query matches it too.
-        aliases: &[
-            "demo",
-            "atlas",
-            "pause",
-            "stop",
-            "agent",
-            "stop agent activity",
-        ],
-        shortcut: None,
-        icon: None, // palette.rs draws the cyan squircle
-    },
-    Command {
         id: "lock",
         title: "Lock wallet",
         aliases: &["lock", "logout", "sign out"],
         shortcut: None,
         icon: None, // no lock glyph in the bundled subset
+    },
+    Command {
+        // The Approvals surface collapsed into the Activity feed's "NEEDS YOU" triage band, so
+        // this id now opens Activity. Kept reachable under its old name + queue/approve synonyms so
+        // an operator who types "approvals" still lands on the triage queue.
+        id: "approvals",
+        title: "Approvals (needs you)",
+        aliases: &[
+            "approvals",
+            "queue",
+            "pending",
+            "approve",
+            "review",
+            "needs you",
+        ],
+        shortcut: Some("⌘⇧A"),
+        icon: None, // no inbox glyph in the bundled subset
+    },
+    Command {
+        id: "activity",
+        title: "Activity",
+        aliases: &["history", "log", "feed", "timeline", "needs you"],
+        shortcut: None,
+        icon: None,
+    },
+    Command {
+        id: "approve-selected",
+        title: "Approve selected",
+        aliases: &["approve", "accept", "allow"],
+        shortcut: None,
+        icon: None,
+    },
+    Command {
+        id: "deny-selected",
+        title: "Deny selected",
+        aliases: &["deny", "reject", "x"],
+        shortcut: None,
+        icon: None,
+    },
+    Command {
+        // The panic brake: zeroize the key, lock the daemon, deny every in-flight request. Its
+        // OWN id — never overloads the demo `agent` toggle (whose "stop" means "stop the demo
+        // animation"). "stop"/"panic"/"kill" all land here so the operator reaches it fast.
+        id: "revoke-all",
+        title: "STOP — lock & revoke all",
+        aliases: &[
+            "stop",
+            "panic",
+            "kill",
+            "revoke",
+            "halt",
+            "emergency",
+            "freeze",
+        ],
+        shortcut: None,
+        icon: None,
     },
 ];
 
@@ -311,17 +352,21 @@ mod tests {
     }
 
     #[test]
-    fn empty_query_returns_all_commands() {
+    fn empty_query_returns_every_command() {
         let mut m = matcher();
         let usage = empty_usage();
         let results = rank("", COMMANDS, &usage, 0, &mut m);
 
         assert_eq!(results.len(), COMMANDS.len());
-        assert_eq!(COMMANDS.len(), 12);
-        // The swap command joined the registry (#25); membership is asserted below.
+        // The swap command (#25) and the activity/approvals/STOP commands all joined the
+        // registry; assert membership rather than a brittle hardcoded count.
         assert!(
             COMMANDS.iter().any(|c| c.id == "swap"),
             "the swap command must be in the registry"
+        );
+        assert!(
+            COMMANDS.iter().any(|c| c.id == "activity"),
+            "the activity command must be in the registry"
         );
         for r in &results {
             assert!(r.positions.is_empty());
@@ -350,9 +395,9 @@ mod tests {
             return;
         }
         let results = rank("", COMMANDS, &usage, 0, &mut m);
-        // Flat frecency ⇒ stable registry order.
+        // Flat frecency ⇒ stable registry order: first + last entries of the registry.
         assert_eq!(id_at(&results, 0), "portfolio");
-        assert_eq!(id_at(&results, COMMANDS.len() - 1), "lock");
+        assert_eq!(id_at(&results, COMMANDS.len() - 1), "revoke-all");
     }
 
     #[test]

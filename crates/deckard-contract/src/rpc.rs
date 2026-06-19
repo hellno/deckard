@@ -11,6 +11,17 @@ use crate::policy::Policy;
 use crate::read_status::ReadStatus;
 use crate::swap_order::SwapOrder;
 
+/// WHO proposed a pending record: a foreground human action in the app (`App`), or an
+/// autonomous agent (the MCP sidecar, `Agent`). Drives the Approvals agent header band and
+/// Activity's two-actor chain. `App` is the safe default (the `#[default]` variant) so an
+/// un-tagged proposal never masquerades as an agent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProposalOrigin {
+    #[default]
+    App,
+    Agent,
+}
+
 /// `deckard-mcp` → `deckard-signerd`. The key-less client only proposes; it never signs.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum SignerRequest {
@@ -30,8 +41,13 @@ pub enum SignerRequest {
         request_id: RequestId,
         approved: bool,
     },
-    /// Policy check, NO signing yet → [`Decision`].
-    Propose { intent: Intent },
+    /// Policy check, NO signing yet → [`Decision`]. `origin` records WHO proposed (a
+    /// foreground human app action vs an autonomous agent) so the GUI inbox can render the
+    /// agent band / two-actor chain; it never affects the policy verdict.
+    Propose {
+        intent: Intent,
+        origin: ProposalOrigin,
+    },
     /// Sign + broadcast, only if `Allow`/approved → [`ExecuteResult`].
     Execute { request_id: RequestId },
     /// Poll for the native-card result → [`ApprovalStatus`].
@@ -48,14 +64,26 @@ pub enum SignerRequest {
     /// sync → [`SignerResponse::RailgunView`]. The daemon refuses unless it's unlocked AND the
     /// derivation known-answer test passes (no grant from an unverified derivation).
     RailgunViewGrant { chain_id: u64, index: u32 },
-    /// Propose a swap order (policy check only, NO signing) → [`Decision`].
-    ProposeOrder { order: SwapOrder },
+    /// Propose a swap order (policy check only, NO signing) → [`Decision`]. `origin` records WHO
+    /// proposed (a foreground human GUI swap vs an autonomous agent), mirroring [`Propose`]'s
+    /// origin — display-only (drives the feed's two-actor chain), never affects the verdict. A
+    /// user-driven GUI swap MUST pass `App` so the order row doesn't masquerade as the agent.
+    ProposeOrder {
+        order: SwapOrder,
+        origin: ProposalOrigin,
+    },
     /// Sign a stored, approved order's EIP-712 digest → [`SignOrderResult`]. No HTTP.
     SignOrder { request_id: RequestId },
     /// Broadcast an `invalidateOrder` cancel for a stored order → [`ExecuteResult`].
     CancelOrder { request_id: RequestId },
     /// List all in-flight pending records WITH payloads (the GUI approval inbox) → [`SignerResponse::Pending`].
     PendingList,
+    /// Read the **activity feed**: every tracked action (auto-allowed, pending, denied, and
+    /// executed) as an [`ActivityRecord`], newest-first → [`SignerResponse::Activity`]. Unlike
+    /// `PendingList` this retains auto-allowed/executed rows (with their `tx_hash` + timestamp),
+    /// so the GUI can show what the agent *did*, not only what is pending. The handler expires
+    /// stale rows first, so the feed never shows a lapsed card as still pending.
+    ActivityFeed,
 }
 
 /// `deckard-signerd` → `deckard-mcp`. One variant per request shape.
@@ -77,6 +105,8 @@ pub enum SignerResponse {
     SignOrder(SignOrderResult),
     /// Reply to `PendingList`: every in-flight record with its full payload.
     Pending(Vec<PendingRecord>),
+    /// Reply to `ActivityFeed`: the activity ledger, newest-first.
+    Activity(Vec<ActivityRecord>),
 }
 
 /// A read-only Railgun grant: the 0zk `address` + the `viewing_key` (hex). NOT the spending
@@ -157,6 +187,11 @@ pub struct PendingRecord {
     pub request_id: RequestId,
     pub status: ApprovalStatus,
     pub payload: PendingPayloadView,
+    /// Millis until the approval TTL elapses, computed by the daemon from `expires_at: Instant`
+    /// at list time. `0` for terminal (Allowed/Denied/Expired) or already past TTL. A snapshot.
+    pub remaining_ms: u64,
+    /// Who proposed this — drives the agent band + Activity two-actor chain.
+    pub origin: ProposalOrigin,
 }
 
 /// The wire view of a pending record's payload.
@@ -169,4 +204,88 @@ pub enum PendingPayloadView {
         spender: Address,
         amount: U256,
     },
+}
+
+/// Where an [`ActivityRecord`] sits in its lifecycle: `Proposed` (stored, awaiting a human
+/// decision — an over-cap or mainnet-guardrail card, still approvable), `Decided` (a verdict
+/// landed — `approved: true` for an auto-allow-within-cap or a human approval; `approved:
+/// false` for a denial or a STOP revoke — both cases where **a human acted**), `Expired` (the
+/// approval window lapsed with **no human action**), or `Executed` (signed + broadcast, so the
+/// record's `tx_hash` is `Some`).
+///
+/// `Expired` is split out from `Decided{approved:false}` on purpose: the feed's amber tint means
+/// "a human acted here" (DESIGN §the actor model), and a lapsed window is the one closed state
+/// where nobody acted — so it must render neutral, never amber. A human denial and a STOP revoke
+/// stay `Decided{approved:false}` (pressing deny / STOP *is* a human action).
+///
+/// This is its OWN enum, deliberately NOT extra [`ApprovalStatus`] variants: the feed needs a
+/// distinct shape (auto-allowed/executed rows that never wait in `PendingList`), and new
+/// `ApprovalStatus` variants would ripple through every exhaustive match in the daemon + app.
+/// `ApprovalStatus` and `PendingRecord` stay untouched (#28/#31 additive-evolution rule).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ActivityLifecycle {
+    /// Stored and waiting on a human — approvable from the feed (and the Approvals queue).
+    Proposed,
+    /// A decision landed by a human (or an auto-allow). `approved == true`: auto-allowed within
+    /// cap, or a human approval. `approved == false`: a human denial or a STOP/`revoke_all` — in
+    /// both a human acted.
+    Decided { approved: bool },
+    /// The approval window lapsed before anyone acted — a closed, never-approved card with NO
+    /// human in the loop. Rendered neutral (never the amber "you acted" tint).
+    Expired,
+    /// Signed + broadcast — the record's `tx_hash` is `Some`.
+    Executed,
+}
+
+/// Which spending fence a proposal breached, recomputed by the daemon at record-write time
+/// (a read of data it already holds) so the feed can cite the **actual** cap hit — never a
+/// hardcoded "over per-tx cap". `None` for a within-cap auto-allow or a mainnet-guardrail hold
+/// (no cap was breached; the hold is the guardrail, not a cap). This is display-only and lives
+/// OFF the verdict path: [`evaluate`](crate::evaluate) still collapses both caps into one
+/// `over` bool and returns no reason — that frozen function is unchanged.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BreachedLimit {
+    /// No cap breached — a within-cap auto-allow, or a mainnet-guardrail hold.
+    #[default]
+    None,
+    /// The per-transaction ceiling.
+    PerTxCap,
+    /// The rolling daily ceiling.
+    DailyCap,
+    /// The recipient is not in the (non-empty) allow-list.
+    OffAllowlist,
+}
+
+/// One row in the **activity feed** — what an actor (agent or human) *did*, not only what is
+/// pending. Unlike [`PendingRecord`], the feed retains auto-allowed and executed actions that
+/// never wait in `PendingList`, so it is a true session ledger.
+///
+/// - `origin` is the two-signal actor (agent = cyan, human = amber).
+/// - `timestamp_ms` is daemon-stamped unix **millis** at propose time (consistent with
+///   `remaining_ms`; supports a clock/relative-time render).
+/// - `tx_hash` is `Some` once the action was signed + broadcast.
+/// - `reason` cites the breached fence for a pending/decided card (display-only).
+///
+/// Reuses the generic [`PendingPayloadView`] so non-shield activity (send/swap/approve) drops
+/// in later without a record-shape change.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ActivityRecord {
+    pub request_id: RequestId,
+    /// WHO acted — drives the feed's two-actor chain (agent cyan, human amber).
+    pub origin: ProposalOrigin,
+    pub payload: PendingPayloadView,
+    /// Unix epoch **millis**, daemon-stamped when the record was first proposed.
+    pub timestamp_ms: u64,
+    /// `Some` once the action was signed + broadcast.
+    pub tx_hash: Option<B256>,
+    pub lifecycle: ActivityLifecycle,
+    /// The breached fence (display-only; `None` for a within-cap auto-allow / guardrail hold).
+    pub reason: BreachedLimit,
+    /// `true` only when the daemon auto-allowed this hands-free at propose (within cap, off
+    /// mainnet). A mainnet-guardrail hold and an over-cap card are both `false` even though
+    /// neither breached a cap, so the feed can honestly say "auto-approved within cap" vs
+    /// "you approved" instead of inferring it from the absent breach `reason`. `#[serde(default)]`
+    /// keeps an older producer (no field) decoding to the safe `false` (= a human was involved).
+    #[serde(default)]
+    pub auto_allowed: bool,
 }

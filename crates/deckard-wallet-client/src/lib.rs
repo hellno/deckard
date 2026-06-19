@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use alloy_primitives::{Address, Bytes, U256};
-use deckard_contract::{deny_reasons, Decision, Intent, IntentKind, SignerRequest, SignerResponse};
+use deckard_contract::{
+    deny_reasons, Decision, Intent, IntentKind, ProposalOrigin, SignerRequest, SignerResponse,
+};
 pub use deckard_signerd::SignerClient;
 
 pub mod failure;
@@ -93,7 +95,12 @@ impl WalletClient {
             kind: IntentKind::Send,
         };
         match self
-            .request(&SignerRequest::Propose { intent: probe })
+            .request(&SignerRequest::Propose {
+                intent: probe,
+                // The agent sidecar's connect-time probe — tag it Agent (the daemon's
+                // chain/locked pre-checks run before the policy gate, so this is side-effect-free).
+                origin: ProposalOrigin::Agent,
+            })
             .await?
         {
             SignerResponse::Decision(Decision::Deny { reason })
