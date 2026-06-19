@@ -80,6 +80,61 @@ test('local dapp can connect through the injected provider', async ({ page }, te
   });
 });
 
+test('local dapp can discover Deckard through EIP-6963', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.locator('#output')).toContainText('window.ethereum detected');
+
+  const discoveryState = await page.evaluate(async () => {
+    type Eip6963ProviderDetail = {
+      info: {
+        uuid: string;
+        name: string;
+        icon: string;
+        rdns: string;
+      };
+      provider: NonNullable<Window['ethereum']>;
+    };
+
+    const announcedProviders: Eip6963ProviderDetail[] = [];
+    window.addEventListener('eip6963:announceProvider', (event) => {
+      announcedProviders.push((event as CustomEvent<Eip6963ProviderDetail>).detail);
+    });
+    window.dispatchEvent(new Event('eip6963:requestProvider'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const detail = announcedProviders.find((providerDetail) => (
+      providerDetail.info.rdns === 'com.deckard.wallet'
+    ));
+    if (!detail) {
+      throw new Error('Deckard EIP-6963 provider announcement missing');
+    }
+
+    const chainId = await detail.provider.request({ method: 'eth_chainId' });
+    return {
+      announcementCount: announcedProviders.length,
+      detailFrozen: Object.isFrozen(detail),
+      infoFrozen: Object.isFrozen(detail.info),
+      sameProvider: detail.provider === window.ethereum,
+      chainId,
+      info: detail.info,
+    };
+  });
+
+  expect(discoveryState).toEqual({
+    announcementCount: 1,
+    detailFrozen: true,
+    infoFrozen: true,
+    sameProvider: true,
+    chainId: '0xaa36a7',
+    info: {
+      uuid: '3f2e4f7c-5e49-4d7d-8e2c-0d9a7c4f1193',
+      name: 'Deckard',
+      icon: expect.stringMatching(/^data:image\/svg\+xml,/),
+      rdns: 'com.deckard.wallet',
+    },
+  });
+});
+
 declare global {
   interface Window {
     ethereum?: {

@@ -74,6 +74,15 @@ Unsupported methods return an EIP-1193-style error object with code `4200`.
 The injected provider also exposes `isConnected()`, `on`, and `removeListener` with a minimal event
 surface for `accountsChanged`, `chainChanged`, `connect`, and `disconnect`.
 
+## Provider discovery
+
+The injected provider supports EIP-6963 multi-wallet discovery in addition to the legacy
+`window.ethereum` path:
+
+- announces `eip6963:announceProvider` on page load
+- re-announces when the dapp dispatches `eip6963:requestProvider`
+- uses `name: "Deckard"`, `rdns: "com.deckard.wallet"`, and a self-contained SVG data URI icon
+
 `personal_sign`, `eth_sendTransaction`, broad signing, hardware wallets, native messaging, and store
 distribution are intentionally not implemented in this bridge slice. Kohaku remains useful for
 wallet-internal provider/backend integration, not as the browser-facing dapp provider.
@@ -195,7 +204,6 @@ Open <http://127.0.0.1:8777/> in the browser where the unpacked extension is loa
 
 - Decide native messaging vs hardened localhost using the PRD-04 spike evidence.
 - Add a real approval UI for `eth_requestAccounts` and per-origin revocation.
-- Add EIP-6963 provider announcement.
 - Persist permissions safely.
 - Consider a small integration test for the loopback `/rpc` HTTP boundary.
 - Add clear-signing/message-signing only after Deckard has the reviewed intent model for it.

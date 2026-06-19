@@ -2,6 +2,19 @@
   let nextId = 1;
   const pending = new Map();
   const listeners = new Map();
+  const deckardIconSvg = [
+    '<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96">',
+    '<rect width="96" height="96" rx="18" fill="#090b0b"/>',
+    '<path d="M28 22h20c16 0 28 11 28 26S64 74 48 74H28V22Zm14 13v26h6c8 0 14-5 14-13s-6-13-14-13h-6Z" fill="#f4d58d"/>',
+    '<circle cx="70" cy="26" r="7" fill="#4dd8d8"/>',
+    '</svg>',
+  ].join('');
+  const deckardProviderInfo = Object.freeze({
+    uuid: '3f2e4f7c-5e49-4d7d-8e2c-0d9a7c4f1193',
+    name: 'Deckard',
+    icon: `data:image/svg+xml,${encodeURIComponent(deckardIconSvg)}`,
+    rdns: 'com.deckard.wallet',
+  });
 
   class DeckardProvider {
     constructor() {
@@ -81,6 +94,18 @@
   }
 
   const provider = new DeckardProvider();
+  const providerDetail = Object.freeze({
+    info: deckardProviderInfo,
+    provider,
+  });
+
+  function announceProvider() {
+    window.dispatchEvent(
+      new CustomEvent('eip6963:announceProvider', {
+        detail: providerDetail,
+      }),
+    );
+  }
 
   window.addEventListener('message', (event) => {
     if (event.source !== window) return;
@@ -136,5 +161,7 @@
     configurable: true,
   });
 
+  window.addEventListener('eip6963:requestProvider', announceProvider);
+  announceProvider();
   window.dispatchEvent(new Event('ethereum#initialized'));
 })();
