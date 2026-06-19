@@ -1,0 +1,13 @@
+{
+  "name": "deckard",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "qa:browser:install": "playwright install chromium",
+    "qa:extension": "playwright test --config=playwright.extension.config.ts",
+    "qa:extension:headed": "playwright test --config=playwright.extension.config.ts --headed"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.0"
+  }
+}
