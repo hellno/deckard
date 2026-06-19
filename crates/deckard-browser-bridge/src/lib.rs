@@ -19,7 +19,7 @@ use deckard_wallet_client::WalletClient;
 
 const PERMISSION_ETH_ACCOUNTS: &str = "eth_accounts";
 const DEV_ACCOUNT_ENV: &str = "DECKARD_BRIDGE_DEV_ACCOUNT";
-const DEFAULT_DEV_ACCOUNT: &str = "0xdeC0ded0000000000000000000000000000001193";
+const DEFAULT_DEV_ACCOUNT: &str = "0xdec0ded000000000000000000000000000001193";
 
 /// Per-origin dapp session remembered by the bridge process.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

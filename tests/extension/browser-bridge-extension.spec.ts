@@ -1,6 +1,6 @@
 import { test, expect } from './fixtures';
 
-const mockAccount = '0xdeC0ded0000000000000000000000000000001193';
+const mockAccount = '0xdec0ded000000000000000000000000000001193';
 
 test('extension service worker loads', async ({ context, extensionId }) => {
   const worker = context
@@ -29,11 +29,15 @@ test('local dapp can connect through the injected provider', async ({ page }, te
       throw new Error('window.ethereum missing');
     }
     const events: Array<{ name: string; payload: unknown }> = [];
+    const connectEvents: unknown[] = [];
     const removedEvents: unknown[] = [];
     const removedListener = (payload: unknown) => removedEvents.push(payload);
+    provider.once('connect', (payload) => connectEvents.push(payload));
     provider.on('accountsChanged', (payload) => events.push({ name: 'accountsChanged', payload }));
     provider.on('accountsChanged', removedListener);
     provider.removeListener('accountsChanged', removedListener);
+    provider.on('disconnect', removedListener);
+    provider.removeAllListeners('disconnect');
     const accountsBefore = await provider.request({ method: 'eth_accounts' });
     const connectedBefore = provider.isConnected();
     const requestAccounts = await provider.request({ method: 'eth_requestAccounts' });
@@ -47,9 +51,12 @@ test('local dapp can connect through the injected provider', async ({ page }, te
       chainId,
       connectedAfter: provider.isConnected(),
       events,
+      connectEvents,
       removedEvents,
       isDeckard: Boolean(provider.isDeckard),
       selectedAddress: provider.selectedAddress,
+      hasOnce: typeof provider.once === 'function',
+      hasRemoveAllListeners: typeof provider.removeAllListeners === 'function',
     };
   });
 
@@ -61,9 +68,12 @@ test('local dapp can connect through the injected provider', async ({ page }, te
     chainId: '0xaa36a7',
     connectedAfter: true,
     events: [{ name: 'accountsChanged', payload: [mockAccount] }],
+    connectEvents: [{ chainId: '0xaa36a7' }],
     removedEvents: [],
     isDeckard: true,
     selectedAddress: mockAccount,
+    hasOnce: true,
+    hasRemoveAllListeners: true,
   });
   expect(pageErrors).toEqual([]);
 
@@ -142,7 +152,9 @@ declare global {
       selectedAddress?: string | null;
       isConnected(): boolean;
       on(eventName: string, listener: (payload: unknown) => void): Window['ethereum'];
+      once(eventName: string, listener: (payload: unknown) => void): Window['ethereum'];
       removeListener(eventName: string, listener: (payload: unknown) => void): Window['ethereum'];
+      removeAllListeners(eventName?: string): Window['ethereum'];
       request(args: { method: string; params?: unknown[] }): Promise<unknown>;
     };
   }
