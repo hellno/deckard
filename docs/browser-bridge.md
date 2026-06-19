@@ -108,6 +108,24 @@ cargo run -p deckard-browser-bridge -- --bind 127.0.0.1:8765
 
 ## Run against local Deckard
 
+For the automated real-daemon proof, run:
+
+```sh
+npm run qa:extension:real
+```
+
+That command creates a temporary throwaway QA vault, starts `deckard-signerd`, unlocks it with
+the fixed QA passphrase, starts the browser bridge without `--dev-mock-account`, loads the
+unpacked extension in Playwright Chromium, and verifies the local dapp account/chain flow. The
+expected address is `0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266`; the expected chain id is
+`0x7a69` from `DECKARD_CHAIN_ID=31337`.
+
+The same suite records the expected local failure behavior:
+
+- locked wallet -> `eth_requestAccounts` rejects with code `4900` and locked-wallet guidance
+- missing daemon socket -> code `4900` and daemon-not-running guidance
+- wrong chain configuration -> code `4900` and chain-mismatch guidance
+
 In one terminal, run Deckard's normal demo stack and unlock a throwaway wallet:
 
 ```sh
