@@ -300,6 +300,38 @@ async fn activity_feed_expires_before_read() {
     );
 }
 
+/// #60 amber-honesty: a card a human APPROVED (resolve → Allowed) that then lapses before execute
+/// fires must still read `Decided{approved:true}` — a human acted, so the row stays amber. Only a
+/// NEVER-approved lapse is the neutral `Expired` (see `activity_feed_expires_before_read`).
+/// `expire_stale` flips both Pending AND Allowed past-TTL records to `Expired`, so this guards that
+/// `activity_lifecycle` consults `req.approved` and does not erase the human-action signal.
+#[tokio::test]
+async fn activity_feed_human_approved_then_lapsed_stays_decided() {
+    let dir = TempDir::new("activity-approved-lapse");
+    let (_wallet, to) = seal_account0(dir.path());
+    let d = spawn_daemon(
+        dir.path(),
+        DUMMY_RPC,
+        CHAIN,
+        &[("DECKARD_APPROVAL_TTL_SECS", "1")],
+    );
+    let client = SignerClient::new(d.socket_path.clone());
+    client.unlock(PASS).await.unwrap();
+
+    let id = pending_id(&client, to, PER_TX_CAP + 1, ProposalOrigin::Agent).await;
+    d.resolve(id, true); // human approves: status → Allowed, approved = true
+    tokio::time::sleep(std::time::Duration::from_millis(1_500)).await; // lapse before execute
+
+    let feed = client.activity_feed().await.unwrap();
+    let rec = feed.iter().find(|r| r.request_id == id).unwrap();
+    assert_eq!(
+        rec.lifecycle,
+        ActivityLifecycle::Decided { approved: true },
+        "a human-approved card that lapsed before execute must stay Decided{{approved:true}} (a \
+         human acted → amber), never the neutral, human-absent Expired"
+    );
+}
+
 /// #60 acceptance 3: STOP (`RevokeAll`) flips an in-flight proposal to revoked, and the feed
 /// shows it — `Decided{approved:false}`, no tx hash. The feed is the surface that proves the kill.
 #[tokio::test]

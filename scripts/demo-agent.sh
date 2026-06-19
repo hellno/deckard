@@ -18,10 +18,11 @@
 #   DECKARD_CHAIN_ID      default 11155111 (Sepolia fork)
 #   DECKARD_MCP_BIN       the CLI to drive (else target/debug/deckard-mcp, else deckard-mcp on PATH)
 #   DECKARD_AGENT_BASELINE_WEI  pin the starting baseline instead of reading the live balance.
-#       Use it for the --once smoke: the wallet held ~0 before `just demo-deposit`, so pinning
-#       the baseline to 0 makes the just-deposited ETH the delta this one iteration shields.
-# Flags: --once (one iteration, CI smoke), --capture (print propose→decision→broadcast millis),
-#        --interval N (override the 2s poll).
+#       `just demo-smoke` sets this to the PRE-deposit balance so a `--once` iteration shields
+#       exactly the fresh deposit. Do NOT pin it to 0 against a prefunded wallet — that would treat
+#       the entire balance as surplus and try to shield all of it (busting the per-tx cap).
+# Flags: --once (one iteration; pair with DECKARD_AGENT_BASELINE_WEI — see `just demo-smoke`),
+#        --capture (print propose→decision→broadcast millis), --interval N (override the 2s poll).
 set -euo pipefail
 
 # ─── Configuration ───────────────────────────────────────────────────────────
@@ -84,6 +85,14 @@ mcp_says() { printf '%s\n%s' "${MCP_OUT}" "${MCP_ERR}" | grep -qiE "$1"; }
 # approved request reads `revoked` — both mean the key was zeroized.
 mcp_is_stop() { mcp_says 'locked|revoked|signer is stopped|revoke_all'; }
 
+# The daemon's PERSISTED terminal-negative verdicts for a request_id: `user_denied` (the human
+# refused) or `expired` (the 120s approval window lapsed). The daemon keeps these for the whole
+# session — only Unlock clears the request table — so retrying the SAME id, by execute OR by
+# re-propose, can NEVER succeed. The runner must give up on those funds (advance the baseline past
+# them) instead of chasing them forever and wedging the loop. NOTE: only the human COPY reaches us
+# (the daemon's `expired`/`user_denied` tags render to prose), so match that prose, not the tag.
+mcp_is_terminal_refusal() { mcp_says 'user_denied|a human denied|expired|request expired'; }
+
 # A LOCKED daemon does not FAIL `balance`/`policy` — it succeeds (exit 0) and renders the
 # locked balance as `read_status: "unsynced (unverified read): locked"`, public_wei "0". So a
 # clean exit code is NOT proof the wallet is armed; we have to inspect read_status for "locked".
@@ -141,10 +150,13 @@ fi
 
 say "read policy (cap $(cast from-wei "${CAP_WEI}") ETH, auto-shield floor $(cast from-wei "${AUTO_MIN_WEI}") ETH) · baseline $(cast from-wei "${BASELINE_WEI}") ETH · watching…"
 
-# Pending request_ids the human still has to approve. Parallel arrays: id + whether we've
-# already narrated the "waiting" line (so we say it once, not every poll).
+# Pending request_ids the human still has to approve. Parallel arrays: id + whether we've already
+# narrated the "waiting" line (so we say it once, not every poll) + the public balance observed when
+# the id was proposed (PENDING_BASE), used to advance the baseline past funds a TERMINAL verdict
+# (denied / expired) refuses — so we stop re-proposing the same dead funds.
 PENDING_IDS=()
 PENDING_NARRATED=()
+PENDING_BASE=()
 BROADCASTS=0   # how many shields actually broadcast this run (for --once exit code)
 
 # Empty-array expansion under `set -u` is an error in bash 3.2 (the macOS default), so every
@@ -158,13 +170,14 @@ pending_index() {
     done
     return 1
 }
-pending_add() { PENDING_IDS+=("$1"); PENDING_NARRATED+=(0); }
+# pending_add ID [BASE_WEI] — BASE_WEI is the public balance at propose time (default 0).
+pending_add() { PENDING_IDS+=("$1"); PENDING_NARRATED+=(0); PENDING_BASE+=("${2:-0}"); }
 pending_drop() {
     local i; i="$(pending_index "$1")" || return 0
-    unset 'PENDING_IDS[i]' 'PENDING_NARRATED[i]'
+    unset 'PENDING_IDS[i]' 'PENDING_NARRATED[i]' 'PENDING_BASE[i]'
     # Re-pack to close the index gap — but only when something remains (3.2-safe).
     if [[ "$(pending_count)" -gt 0 ]]; then
-        PENDING_IDS=("${PENDING_IDS[@]}"); PENDING_NARRATED=("${PENDING_NARRATED[@]}")
+        PENDING_IDS=("${PENDING_IDS[@]}"); PENDING_NARRATED=("${PENDING_NARRATED[@]}"); PENDING_BASE=("${PENDING_BASE[@]}")
     fi
 }
 
@@ -184,10 +197,27 @@ try_execute() {
         return 1
     fi
     if mcp_is_stop; then STOPPED=1; return 1; fi
-    if mcp_says 'a human denied|user_denied'; then
-        say "the human denied that request — dropping it."
+    # A persisted terminal refusal — the human denied it, or the approval window lapsed. The daemon
+    # will NEVER let this id through again, so give up on those funds: advance the baseline PAST the
+    # balance observed when this id was proposed (absorbing the refused deposit while preserving any
+    # ETH that arrived since), report, and drop the id. Without this the id would sit in PENDING_IDS
+    # forever and — because a new proposal is gated on `pending_count == 0` — wedge the whole loop.
+    if mcp_is_terminal_refusal; then
+        local idx; idx="$(pending_index "${id}")" || idx=""
+        if [[ -n "${idx}" ]]; then
+            local base="${PENDING_BASE[$idx]}"
+            [[ "$(wei_gt "${base}" "${BASELINE_WEI}")" == "1" ]] && BASELINE_WEI="${base}"
+        fi
+        if mcp_says 'expired|request expired'; then
+            say "that over-cap request expired before you approved it — moving on (unlock in the app to retry it)."
+        else
+            say "the human denied that request — moving on."
+        fi
         return 1
     fi
+    # `already_executed` — a duplicate of a broadcast that is settling; the funds are leaving, so
+    # just drop the id (no baseline move).
+    if mcp_says 'already_executed'; then return 1; fi
     # not_approved (or any other transient): keep waiting.
     return 0
 }
@@ -241,6 +271,16 @@ iterate() {
         t1="$(now_ms)"
         if [[ ${MCP_RC} -ne 0 ]]; then
             if mcp_is_stop; then STOPPED=1; return; fi
+            # A persisted terminal refusal on a re-propose (the human denied these funds, or the card
+            # lapsed): the daemon keeps that verdict all session, so re-proposing the SAME funds would
+            # loop forever. Give up on them — advance the baseline past the current balance so they
+            # stop being surplus — and move on. (try_execute normally absorbs them when it drops the
+            # card; this is the safety net for a refusal seen first via the propose path.)
+            if mcp_is_terminal_refusal; then
+                BASELINE_WEI="${public_wei}"
+                say "those funds were refused (denied or expired) — moving past them (unlock in the app to retry)."
+                return
+            fi
             # A broadcast still settling answers a re-propose with `already_executed` — that is
             # expected and silent (the funds are on their way out). Anything else is transient;
             # there is no state to unwind, so we just re-propose next poll.
@@ -264,12 +304,12 @@ iterate() {
                 STOPPED=1
             else
                 say "execute did not broadcast — saving ${req_id} to retry next poll."
-                pending_add "${req_id}"
+                pending_add "${req_id}" "${public_wei}"
             fi
         elif [[ "${decision}" == "needs_approval" ]]; then
             [[ ${CAPTURE} -eq 1 ]] && printf 'Atlas[capture]: propose→decision(needs_approval) %s ms\n' "$((t1 - t0))"
             say "over cap — waiting for you in the Deckard app — Activity feed, the 'Needs you' band (⌘⇧A). Saved ${req_id}."
-            pending_add "${req_id}"
+            pending_add "${req_id}" "${public_wei}"
         else
             say "unexpected shield decision '${decision}' — leaving it for the next poll."
         fi
@@ -303,7 +343,8 @@ if [[ ${ONCE} -eq 1 ]]; then
         exit 0
     fi
     if [[ ${BROADCASTS} -eq 0 ]]; then
-        echo "demo-agent --once: no shield broadcast this iteration (fund a deposit first: just demo-deposit)" >&2
+        echo "demo-agent --once: no shield broadcast this iteration. For an asserting one-shot use" >&2
+        echo "  just demo-smoke   (it captures the pre-deposit baseline, deposits, then runs --once)." >&2
         exit 1
     fi
     exit 0

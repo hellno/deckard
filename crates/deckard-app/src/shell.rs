@@ -2344,11 +2344,16 @@ impl Shell {
     /// on success it leaves the review and re-fetches the feed (the now-decided row updates in
     /// place); on a control-channel failure it fails loud and stays put. No `Execute` ever.
     fn resolve_activity_target(&mut self, approved: bool, cx: &mut Context<Self>) {
-        let target = self.activity_reviewing.or_else(|| {
-            crate::activity_view::activity_pending(&self.activity)
-                .get(self.activity_selected)
-                .map(|r| r.request_id)
-        });
+        // Honor the open review's id ONLY while that record is still pending. A background poll can
+        // settle/expire the reviewed record and the render then bypasses the review pane (it's
+        // `&self`, so it can't clear `activity_reviewing`) — falling back to the highlighted row
+        // keeps approve/deny pointed at what's actually on screen (re-keyed by request_id in
+        // refresh_activity), instead of resolving a stale off-screen id as a silent no-op.
+        let pending = crate::activity_view::activity_pending(&self.activity);
+        let target = self
+            .activity_reviewing
+            .filter(|id| pending.iter().any(|r| r.request_id == *id))
+            .or_else(|| pending.get(self.activity_selected).map(|r| r.request_id));
         let Some(request_id) = target else {
             return;
         };

@@ -309,13 +309,14 @@ demo-deposit amount='0.02':
     BAL="$(cast balance "${WALLET}" --rpc-url "{{demo_rpc_url}}" 2>/dev/null || echo "?")"
     echo "→ done. ${WALLET} public balance now ${BAL} wei."
     echo "  Watch the agent pick it up:   just demo-agent"
-    echo "  One-shot smoke (asserts a broadcast): just demo-agent --once"
+    echo "  One-shot smoke (asserts a broadcast): just demo-smoke"
 
 # Drives ONLY the key-less deckard-mcp CLI — same authority as the Claude-Desktop prompt, no
 # keys here. Needs `just demo` running with the wallet UNLOCKED (passphrase: deckard-demo).
 # Pass through extra flags:
 #   just demo-agent            # watch forever; shield deposits within the cap, wait on over-cap
-#   just demo-agent --once     # one iteration (CI smoke): shields one fresh deposit, else fails
+#   just demo-agent --once     # one iteration against the LIVE baseline (a no-op unless you also
+#                              #   set DECKARD_AGENT_BASELINE_WEI) — use `just demo-smoke` to assert
 #   just demo-agent --capture  # print propose→decision→broadcast millis per shield
 # Run the headless watch-and-shield agent loop (scripts/demo-agent.sh) against the demo daemon.
 demo-agent *args:
@@ -323,17 +324,34 @@ demo-agent *args:
     set -euo pipefail
     # Build the CLI once so the agent (and its sub-second poll) never pays a cold compile.
     cargo build -q -p deckard-mcp
-    # --once smoke: pin the baseline to 0 so the just-deposited ETH IS the delta this one
-    # iteration shields+broadcasts (CI can then assert the broadcast). On a LIVE read the deposit
-    # would already BE the baseline (delta 0 → nothing shields). The normal loop reads live.
-    case " {{args}} " in
-        *" --once "*) export DECKARD_AGENT_BASELINE_WEI="${DECKARD_AGENT_BASELINE_WEI:-0}" ;;
-    esac
+    # NOTE: the one-shot that ASSERTS a broadcast is `just demo-smoke` — it captures the pre-deposit
+    # balance and pins the agent's baseline to it, so `--once` shields EXACTLY the fresh deposit.
+    # We deliberately do NOT default `--once`'s baseline to 0 here: the demo wallet is anvil account
+    # 0, which is PREFUNDED (≈10 ETH on the fork), so a baseline of 0 would treat the whole balance
+    # as surplus and try to shield all of it — busting the per-tx cap and failing the smoke. With no
+    # pin the runner reads the live balance as baseline (a bare `--once` is then a safe no-op), and
+    # `demo-smoke` supplies the correct pre-deposit baseline via DECKARD_AGENT_BASELINE_WEI.
     DECKARD_SOCKET_PATH="{{demo_socket}}" \
     DECKARD_CONFIG_DIR="{{demo_dir}}" \
     DECKARD_CHAIN_ID="{{demo_chain_id}}" \
     DECKARD_MCP_BIN="${DECKARD_MCP_BIN:-{{justfile_directory()}}/target/debug/deckard-mcp}" \
         bash "{{justfile_directory()}}/scripts/demo-agent.sh" {{args}}
+
+# One-shot CI smoke that ACTUALLY asserts a broadcast: capture the demo wallet's CURRENT balance,
+# send a within-cap deposit, then run ONE agent iteration pinned to that pre-deposit baseline so the
+# agent shields EXACTLY the fresh deposit and broadcasts (exit 0), or fails (exit 1). This is the
+# deposit-aware wrapper a bare `just demo-agent --once` cannot be: a single iteration has no memory
+# of the pre-deposit balance, so it can't tell the deposit apart from the (prefunded) baseline.
+# Needs `just demo` running with the wallet UNLOCKED. Amount must be within the per-tx cap (0.1 ETH).
+demo-smoke amount='0.02':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    WALLET="0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"   # demo wallet = anvil account 0
+    B0="$(cast balance "${WALLET}" --rpc-url "{{demo_rpc_url}}")"
+    echo "→ pre-deposit baseline: $(cast from-wei "${B0}") ETH ($(cast to-wei "{{amount}}" ether) wei deposit incoming)"
+    just demo-deposit {{amount}}
+    # Pin the agent's baseline to the pre-deposit balance so surplus == exactly the deposit.
+    DECKARD_AGENT_BASELINE_WEI="${B0}" just demo-agent --once
 
 # Exit codes: 0 ready · 10 foundry missing · 11 RPC_URL_SEPOLIA · 12 local anvil · 13 signerd
 # build · 14 app not running/unlocked · 15 chain-identity mismatch · 16 policy drift.

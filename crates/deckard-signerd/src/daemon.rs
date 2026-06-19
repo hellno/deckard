@@ -1460,6 +1460,12 @@ fn activity_lifecycle(req: &PendingReq) -> ActivityLifecycle {
         ApprovalStatus::Allowed => ActivityLifecycle::Decided { approved: true },
         // A human denial or STOP revoke (both `Denied`) → a human acted.
         ApprovalStatus::Denied { .. } => ActivityLifecycle::Decided { approved: false },
+        // The window lapsed AFTER a human approved it (resolve set `approved`) but before execute
+        // fired — a human DID act, so keep it `Decided{approved:true}` (amber "you approved"), never
+        // the neutral Expired that would erase the human-action signal. `expire_stale` flips both
+        // Pending and Allowed past-TTL records to `Expired`, so a human-approved-but-not-executed
+        // over-cap card reaches here as Expired with `approved == true`.
+        ApprovalStatus::Expired if req.approved => ActivityLifecycle::Decided { approved: true },
         // The window lapsed with nobody acting → neutral, human-absent close.
         ApprovalStatus::Expired => ActivityLifecycle::Expired,
     }

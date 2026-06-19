@@ -55,13 +55,18 @@ You run this with the six tools from the quickstart — read them first if you h
 >    `already_executed`) — it can never double-shield.
 >    - `decision: "allow"` → call `deckard_execute` with the `request_id`. Report the `tx_hash`.
 >    - `decision: "needs_approval"` → the amount is over a cap (or you're on mainnet). **Do not
->      re-propose and do not lower the amount on your own.** Remember this `request_id`. Tell the
->      human it is waiting in the Deckard app's Activity feed — the **"Needs you"** band (⌘K →
->      Activity, or ⌘⇧A) — for them to approve. Keep polling, and on each poll retry
->      `deckard_execute` with that **saved request_id**: while it is still pending you'll get
->      `not_approved` (keep
->      waiting); once the human approves, `deckard_execute` broadcasts — report the `tx_hash` and
->      drop the saved id.
+>      re-propose and do not lower the amount on your own.** Remember this `request_id` **and the
+>      balance you saw when you proposed it**. Tell the human it is waiting in the Deckard app's
+>      Activity feed — the **"Needs you"** band (⌘K → Activity, or ⌘⇧A) — for them to approve. Keep
+>      polling, and on each poll retry `deckard_execute` with that **saved request_id**:
+>      - while it is still pending you'll get `not_approved` → keep waiting;
+>      - once the human approves, `deckard_execute` broadcasts → report the `tx_hash`, drop the id;
+>      - if the human **denies** it (`user_denied`) **or it `expired`** (the ~120s approval window
+>        lapsed), that `request_id` is **dead — the daemon will never let it through again this
+>        session.** Stop retrying it: drop the saved id AND set your `baseline` to the balance you
+>        recorded at propose time, so those refused funds stop counting as surplus and you don't
+>        re-propose them forever (which would just hit the same dead verdict and wedge your loop).
+>        Report it and keep watching for new deposits; a re-try needs a fresh unlock.
 > 4. If `deckard_shield` returns `locked`, or `deckard_execute` returns `revoked`, STOP was
 >    pressed (a propose after STOP reads `locked`; an execute of an already-approved request reads
 >    `revoked`). Either way the key is zeroized: report that the loop was stopped and that a human
@@ -123,8 +128,15 @@ to **wait**, not retry and not quietly shrink the amount:
   Instead, on each poll, call `deckard_execute(request_id)` with the saved id: while the human
   hasn't acted it returns `not_approved` (keep waiting); once they approve in the feed, the very
   same `deckard_execute` broadcasts and you report the `tx_hash`. (Without this retry the approved
-  request would just sit there — approval alone doesn't broadcast; execute does.) If they deny it,
-  `deckard_execute` returns `user_denied` — respect it and drop the id.
+  request would just sit there — approval alone doesn't broadcast; execute does.)
+- **Two answers are TERMINAL — stop chasing the id.** If the human denies it, `deckard_execute`
+  returns `user_denied`; if the approval window lapses (~120s), it returns `expired`. In **both**
+  the daemon has closed that `request_id` for the whole session (only a fresh unlock reopens it), so
+  retrying — or re-proposing the same funds — can never succeed and only spins. Drop the saved id
+  **and advance your `baseline` past those funds** (to the balance you recorded when you proposed),
+  so the refused deposit stops counting as surplus. Then keep watching for *new* deposits. Treating
+  `expired`/`user_denied` as "transient, keep trying" is the classic way to wedge the loop on a
+  single ignored card and silently miss every later deposit.
 
 This is the seam the demo is about: an over-cap deposit is exactly when the human is pulled into
 the loop, and the feed is where they do it.

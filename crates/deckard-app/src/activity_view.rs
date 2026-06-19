@@ -17,9 +17,11 @@
 //! **Two-signal fidelity (DESIGN §The actor model).** State is a small circular **glyph** that
 //! carries the color (green check = approved/executed, red x = denied/revoked); the outcome
 //! *label* stays `muted_foreground` so the log never floods green. The one exception is a row a
-//! **human acted on** (`!auto_allowed`, decided/executed) — its label tints amber, so "you acted
-//! here" reads warm against the cyan-glyph agent rows. An executed shield reads the *result*
-//! ("moved … ETH to your private balance"), the demo's payoff.
+//! **human acted on** (see `human_acted`: any non-hands-free approval/execution, plus EVERY denial
+//! or STOP revoke — a STOP is a human action even on a row that had auto-allowed) — its label tints
+//! amber, so "you acted here" reads warm against the cyan-glyph agent rows. A lapsed `Expired` row
+//! had no human and renders neutral. An executed shield reads the *result* ("moved … ETH to your
+//! private balance"), the demo's payoff.
 //!
 //! Each row carries the two-actor chain (the cyan agent squircle for Atlas, neutral for a
 //! foreground app action), the lifecycle glyph, the real broadcast `tx_hash`, a relative
@@ -690,7 +692,7 @@ impl Shell {
                 );
                 let label = settled_outcome_label(record, self.mask);
                 // The glyph carries the color; the label is muted unless a human acted (amber).
-                let label_color = if !record.auto_allowed { amber } else { muted };
+                let label_color = if human_acted(record) { amber } else { muted };
                 let glyph: gpui::AnyElement = if !approved {
                     Icon::new(IconName::CircleX)
                         .text_color(danger)
@@ -959,6 +961,19 @@ impl Shell {
         );
         rows
     }
+}
+
+/// Whether a HUMAN acted on this settled row — the amber "you acted here" tint (DESIGN §the actor
+/// model). True for ANY human-driven negative — a denial OR a STOP revoke, both `Decided{approved:
+/// false}` — EVEN when the record was auto-allowed before STOP flipped it (a STOP is a human action;
+/// keying purely off `!auto_allowed` would wrongly mute a STOP-revoked auto-allow). True for any
+/// non-hands-free approval/execution (`!auto_allowed`). A genuine hands-free within-cap auto-allow is
+/// the agent's work → muted. (A lapsed `Expired` row renders in its own neutral arm, never here.)
+fn human_acted(record: &ActivityRecord) -> bool {
+    matches!(
+        record.lifecycle,
+        ActivityLifecycle::Decided { approved: false }
+    ) || !record.auto_allowed
 }
 
 /// The settled-row outcome label, by lifecycle + whether it was auto-allowed hands-free + actor.
@@ -1272,6 +1287,45 @@ mod tests {
             settled_label(&lapsed),
             settled_label(&denied),
             "a lapsed window must not read identically to a human denial"
+        );
+    }
+
+    #[test]
+    fn human_acted_tints_amber_for_every_human_action() {
+        // Hands-free within-cap auto-allow → the agent's work → NOT human-acted (muted).
+        let auto = record(0x01, ActivityLifecycle::Executed, BreachedLimit::None, true);
+        assert!(
+            !human_acted(&auto),
+            "a hands-free auto-allow is the agent's work, not amber"
+        );
+        // Over-cap human approval (!auto_allowed) → a human acted → amber.
+        let approved = record(
+            0x02,
+            ActivityLifecycle::Executed,
+            BreachedLimit::PerTxCap,
+            false,
+        );
+        assert!(human_acted(&approved));
+        // A human denial → a human acted → amber.
+        let denied = record(
+            0x03,
+            ActivityLifecycle::Decided { approved: false },
+            BreachedLimit::PerTxCap,
+            false,
+        );
+        assert!(human_acted(&denied));
+        // The codex #6 case: a STOP revoke of a row that had AUTO-ALLOWED — lock() flips it to
+        // Decided{approved:false} but leaves `auto_allowed == true`. A STOP is a human action, so
+        // it MUST still be human-acted (amber). Keying purely off `!auto_allowed` would mute it.
+        let stop_revoked_auto = record(
+            0x04,
+            ActivityLifecycle::Decided { approved: false },
+            BreachedLimit::None,
+            true,
+        );
+        assert!(
+            human_acted(&stop_revoked_auto),
+            "a STOP revoke of an auto-allowed row is a human action and must tint amber"
         );
     }
 
