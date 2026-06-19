@@ -43,6 +43,17 @@ Before changing files, always establish the current branch and its source-of-tru
 4. If there are uncommitted changes, identify whether they are user changes before switching,
    rebasing, stashing, or applying patches.
 
+## PR workflow — required after implementation
+After implementing and verifying a task, do not leave the branch as uncommitted local work:
+
+1. Commit the changes in logical chunks. Keep unrelated workflow/docs updates separate from feature
+   code when the change is large enough to warrant it.
+2. Push the feature branch and open a pull request.
+3. Check CI status for the PR.
+4. If CI is green and the PR does not require human review/approval, merge it to `main` using the
+   repo's normal merge strategy.
+5. If CI is red or blocked, report the failing check and fix or ask for guidance before merging.
+
 ## Definition of done (all must hold; show command output as evidence)
 1. `cargo fmt --all --check` clean
 2. `just check` green (both feature configs)
