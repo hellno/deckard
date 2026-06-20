@@ -69,6 +69,11 @@ tokio = { version = "1", features = ["rt", "net", "io-util", "macros"] }
 [features]
 default = []
 tray = ["dep:tray-icon", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation"]
+# DEV/TEST ONLY — forwards to `deckard-signerd/dev-signerd-bin` (see that crate's note). Lets
+# `just run` / `just qa` / `just demo` keep the convenient `DECKARD_SIGNERD_BIN`→sibling→`$PATH`
+# daemon resolver. NEVER in `default`, so the bundled app (`just bundle`) ships the hardened,
+# verified-bundled-path resolver only (finding C1 / issue #106).
+dev-signerd-bin = ["deckard-signerd/dev-signerd-bin"]
 
 # objc2 is only used to hide the macOS dock icon — pull it on macOS only, so a
 # Linux/Windows `--features tray` build never tries to compile Apple crates.

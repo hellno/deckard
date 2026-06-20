@@ -34,6 +34,14 @@ shield = ["deckard-core/shield"]
 # the epic's "signerd has no CoW HTTP dependency" AC (reqwest itself is already in-tree via
 # alloy provider-http + helios + railgun, so a literal "0 reqwest" is impossible).
 cow-client = ["deckard-core/cow-client"]
+# DEV/TEST ONLY — deliberately NOT in `default`. Re-enables the loose daemon-binary resolver in
+# `supervise.rs` (the `DECKARD_SIGNERD_BIN` env override → app-sibling → bare-`$PATH` lookup) used
+# by `just run` / `just qa` / `just demo` and local harnesses. Because it is never in `default`, a
+# release artifact (`just bundle`, `release.yml` — both default-feature builds) physically cannot
+# compile that attacker-influenceable resolution; release builds resolve to the ONE verified bundled
+# path instead (ownership/permission/symlink checked before exec). This closes the binary-
+# substitution half of finding C1 (ADR 0003 / issue #106).
+dev-signerd-bin = []
 
 [dependencies]
 # The frozen wire contract (Intent / Decision / Policy / RPC + the shared `evaluate`).

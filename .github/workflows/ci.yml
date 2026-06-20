@@ -87,6 +87,10 @@ jobs:
       - run: cargo test --locked --workspace
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo clippy --locked -p deckard-app --all-targets --features tray -- -D warnings
+      # The dev-only daemon-binary resolver is feature-gated out of release builds (finding C1 /
+      # #106). Lint + test that arm so `just run`/`qa`/`demo` keep working.
+      - run: cargo clippy --locked -p deckard-signerd --all-targets --features dev-signerd-bin -- -D warnings
+      - run: cargo test --locked -p deckard-signerd --features dev-signerd-bin
 
   # Cross-platform compile proof. The app (Metal renderer) + the macOS-only objc2 tray are the only
   # things that genuinely need macOS coverage, and that's a compile/link concern, not a logic one

@@ -28,13 +28,16 @@ default:
     @just --list
 
 # Run the app (debug). This is the one you'll use 99% of the time.
-# Build the signer daemon first so the app can spawn it as a sibling binary (the app resolves
-# `deckard-signerd` next to its own binary, or via DECKARD_SIGNERD_BIN).
+# Build the signer daemon first so the app can spawn it as a sibling binary. Dev runs pass
+# `--features dev-signerd-bin` so the loose `DECKARD_SIGNERD_BIN`→sibling→PATH resolver is available
+# (a RELEASE build / `just bundle` has it compiled out and uses the verified bundled path — C1/#106).
 run:
     cargo build -p deckard-signerd
-    cargo run
+    cargo run --features dev-signerd-bin
 
-# Run optimized.
+# Run optimized. NOTE: no `dev-signerd-bin` here — that feature is dev/test-only and a release
+# profile rejects it at compile time (finding C1 / #106). The release resolver finds the daemon as a
+# verified sibling under target/release (built first below), so DECKARD_SIGNERD_BIN isn't needed.
 run-release:
     cargo build -p deckard-signerd --release
     cargo run --release
@@ -42,7 +45,7 @@ run-release:
 # Run as a menu-bar / tray app (no dock icon).
 run-tray:
     cargo build -p deckard-signerd
-    cargo run -p deckard-app --features tray
+    cargo run -p deckard-app --features tray,dev-signerd-bin
 
 # ─── QA fast-unlock vault (DevEx) ────────────────────────────────────────────
 # Skip onboarding (Create -> passphrase -> seed reveal -> backup challenge) on every
@@ -65,7 +68,7 @@ qa:
     DECKARD_CHAIN_ID="{{qa_chain_id}}" \
     DECKARD_RPC_URL="{{qa_rpc_url}}" \
     DECKARD_VERIFIED_READS="0" \
-        cargo run
+        cargo run --features dev-signerd-bin
 
 # Run the key-less browser bridge against the QA fast-unlock app's signer daemon.
 # Prereq: `just qa` running in another terminal, unlocked with passphrase `deckard-qa`.
@@ -204,7 +207,7 @@ demo:
     DECKARD_RPC_URL="{{demo_rpc_url}}" \
     DECKARD_VERIFIED_READS=0 \
     DECKARD_DEMO_FORK_BLOCK="${FORK_BLOCK}" \
-        cargo run
+        cargo run --features dev-signerd-bin
     # On `cargo run` exit (app closed), the EXIT trap stops anvil.
 
 # No arg: asks the demo daemon for the onboarded wallet's address (needs `just demo` running +
@@ -520,6 +523,9 @@ fmt:
 check:
     cargo clippy --locked --workspace --all-targets -- -D warnings
     cargo clippy --locked -p deckard-app --all-targets --features tray -- -D warnings
+    # The dev-only daemon-binary resolver (DECKARD_SIGNERD_BIN→sibling→PATH) is feature-gated out of
+    # release builds (finding C1 / #106); lint that arm too so `just run`/`qa`/`demo` can't rot.
+    cargo clippy --locked -p deckard-signerd --all-targets --features dev-signerd-bin -- -D warnings
 
 # Engine-only inner loop: checks + tests deckard-core WITHOUT building the gpui app. Use it while
 # iterating on keystore/eth/balances. (The heavy verified-reads/shield deps compile once, then it's

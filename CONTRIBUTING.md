@@ -166,13 +166,22 @@ is the odd one out — it's anvil's upstream fork source, read only by `just dem
 | `DECKARD_VERIFIED_READS` | core (app/daemon) | on (`1`) | No |
 | `DECKARD_DEMO_FORK_BLOCK` | core (app/daemon) | unset (live, unpinned) | No |
 | `DECKARD_ALLOW_SCREEN_CAPTURE` | app (capture block) | off (block honored per setting) | No |
-| `DECKARD_SIGNERD_BIN` | app (daemon resolution) | sibling of app binary | No |
+| `DECKARD_SIGNERD_BIN` | app (daemon resolution) — **`dev-signerd-bin` feature only** | verified bundled sibling (release) | No |
 | `RPC_URL_SEPOLIA` | `just demo` / `just demo-check` only (anvil `--fork-url`) | unset (required for demo) | **Yes** — archive RPC, may carry an API key |
 
 > Demo block (set by `just demo`, emitted by `deckard-mcp install --demo`):
 > `DECKARD_CONFIG_DIR=~/.deckard/demo`, `DECKARD_SOCKET_PATH=~/.deckard/demo/signerd.sock`,
 > `DECKARD_CHAIN_ID=11155111`, `DECKARD_RPC_URL=http://127.0.0.1:8545`. `just demo` also
 > sets `DECKARD_VERIFIED_READS=0` (Helios is mainnet-only) and `DECKARD_DEMO_FORK_BLOCK=10822990`.
+
+> **Daemon launch provenance (finding C1 / #106).** The app spawns `deckard-signerd` with a
+> **cleared environment** (`env_clear()`), then sets back only the control vars
+> (`DECKARD_SOCKET_PATH`/`DECKARD_RPC_URL`/`DECKARD_CHAIN_ID`/`DECKARD_CONFIG_DIR`/`DECKARD_RESOLVE_FD`)
+> plus a small allowlist of operator/demo toggles the daemon reads
+> (`FORWARDED_ENV_ALLOWLIST` in `supervise.rs`). Loader vars (`LD_PRELOAD`/`DYLD_INSERT_LIBRARIES`/…)
+> and `$PATH` never reach the key-holder. **If you add a new `DECKARD_*` var that the *daemon* (or
+> `deckard-core` inside it) reads, add it to `FORWARDED_ENV_ALLOWLIST`** or it will be silently
+> dropped at spawn.
 
 ## Definition of Done
 
