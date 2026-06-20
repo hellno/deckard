@@ -121,7 +121,7 @@ pub fn send_blocking(client: &SignerClient, intent: &Intent) -> anyhow::Result<S
 }
 
 /// Execute a reviewed proposal, key-less. For a `NeedsApproval` proposal (over-cap, or the
-/// daemon's mainnet guardrail downgrading an auto-allow), the completed hold-to-confirm IS
+/// daemon's auto-approval guardrail downgrading an auto-allow), the completed hold-to-confirm IS
 /// the human approval — the app is the wire contract's designated human-facing resolver — so
 /// this first sends `Resolve{approved: true}` over the **private capability channel** (the only
 /// channel the daemon authenticates approvals on, PRD-01) to flip the `Pending` record to

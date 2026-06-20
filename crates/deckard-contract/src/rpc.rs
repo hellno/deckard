@@ -207,7 +207,7 @@ pub enum PendingPayloadView {
 }
 
 /// Where an [`ActivityRecord`] sits in its lifecycle: `Proposed` (stored, awaiting a human
-/// decision — an over-cap or mainnet-guardrail card, still approvable), `Decided` (a verdict
+/// decision — an over-cap or auto-approval-guardrail card, still approvable), `Decided` (a verdict
 /// landed — `approved: true` for an auto-allow-within-cap or a human approval; `approved:
 /// false` for a denial or a STOP revoke — both cases where **a human acted**), `Expired` (the
 /// approval window lapsed with **no human action**), or `Executed` (signed + broadcast, so the
@@ -239,13 +239,13 @@ pub enum ActivityLifecycle {
 
 /// Which spending fence a proposal breached, recomputed by the daemon at record-write time
 /// (a read of data it already holds) so the feed can cite the **actual** cap hit — never a
-/// hardcoded "over per-tx cap". `None` for a within-cap auto-allow or a mainnet-guardrail hold
-/// (no cap was breached; the hold is the guardrail, not a cap). This is display-only and lives
+/// hardcoded "over per-tx cap". `None` for a within-cap auto-allow or an auto-approval-guardrail
+/// hold (no cap was breached; the hold is the guardrail, not a cap). This is display-only and lives
 /// OFF the verdict path: [`evaluate`](crate::evaluate) still collapses both caps into one
 /// `over` bool and returns no reason — that frozen function is unchanged.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BreachedLimit {
-    /// No cap breached — a within-cap auto-allow, or a mainnet-guardrail hold.
+    /// No cap breached — a within-cap auto-allow, or an auto-approval-guardrail hold.
     #[default]
     None,
     /// The per-transaction ceiling.
