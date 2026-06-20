@@ -241,6 +241,21 @@ data components must define **empty / loading / error**. Defaults:
 - **Kill switch / revocation** — Pause / Revoke / Rotate always one deliberate action away on any
   agent; a master "Pause all agents" belongs in Settings (agent governance), styled deliberate.
 
+## Per-chain trust tiers
+Verified reads are mainnet-only (embedded Helios). Every other chain reads from a trusted RPC. We show
+those chains in the one wallet, and we never let an unverified number wear the verified look.
+- **Tier 1 — mainnet:** Helios-checked. `Verified` on a fresh head, `Unsynced` otherwise.
+- **Tier 2 — verified L2 (future):** OP-stack via helios-opstack is sequencer-trusted, so it renders
+  `Degraded`, never `Verified` (#77).
+- **Tier 3 — raw-RPC (Arbitrum, Tempo, most L2s):** no light client, so every read is the existing
+  `Unsynced` / "NOT VERIFIED" state. Reuse that affordance, no new badge. A Tier-3 balance never gets
+  the same row treatment as a `Verified` one.
+- **Never fake it:** a non-mainnet read never reaches `Verified`. The downgrade is loud, not hidden.
+- **No native asset (Tempo):** gas paid in a stablecoin, no native balance. Deferred until the
+  portfolio can show "no native asset" instead of a placeholder dressed as real money.
+- **Guardrail is per-chain:** the human-approval brake fires on every real-value chain, not just
+  mainnet (#76).
+
 ## Onboarding flow
 A stepped, calm, full-bleed flow: **Welcome** (Create / Import) → **Secure** (passphrase + strength;
 Argon2id + XChaCha20-Poly1305, "we can't reset it") → **Back up** (recovery phrase, hold-to-reveal,
@@ -275,3 +290,4 @@ existing motion budget. Fonts bundle via GPUI assets. No web-font CDN.
 | 2026-06-05 | IA: Conductor sidebar tree (Projects → Wallets + Agents), 2-pane, contextual views, Splits-style wallet rows | Grounded in real Conductor + Splits product shots; gives agents a home without a separate console. |
 | 2026-06-05 | Re-grounded the whole language in REAL Linear/Conductor/Splits screenshots | First drafts were rumor-mill slop; active=brightness-lift, whitespace grouping, circular status glyphs, Lucide icons, amber <1% all come from the pixels. |
 | 2026-06-05 | Design-review pass applied | Neutral primary buttons (amber only for caution/hold/where-you-are/focus); thin threshold budget bars; agent title white (identity via glyph); no interior card grid-lines; collapsed clear-signing; desaturated identity/token colors off the amber + ok-green bands; light-mode contrast + segmented-state fixes; money $/precision/zero rules; required empty/loading/error/pending/failed/disabled states. |
+| 2026-06-20 | Multi-chain = one wallet with a loud, honest downgrade; mainnet stays the only `Verified` tier, every other chain reads NOT VERIFIED via the existing `Unsynced` tag | The moat is verified-or-honestly-labeled reads. Helios is mainnet-only and no embeddable L2 light client ships today, so the honest move is to show other chains and make the downgrade impossible to miss, reusing the `Unsynced` affordance rather than faking verification. Scope: `docs/research/multichain-scope.md`. |
