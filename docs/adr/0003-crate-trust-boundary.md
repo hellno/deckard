@@ -219,19 +219,21 @@ The first draft bundled C1+C5 and F1+F2 and proposed `cargo-deny` bans + "persis
 codex pre-flight review split those, corrected the mechanisms, and surfaced the rollback keystone. Net:
 **8 work items, not 5**, and a disclosure split (public repo).
 
-| Item | Existing issue | Action | Disclosure |
-|---|---|---|---|
-| Rollback-resistant security-state store (keystone) | **#71** | refine: make it the explicit foundation for C2 + C3 (monotonic epoch, atomic+fsync, fail-closed, single-writer) | public (design) |
-| C1 launch provenance | — | **new** (env_clear + tests; canonical/verified binary path; override compiled-out of release) | public, full detail |
-| C5 runtime memory hardening | — | **new, separate** (mlock-all/coredump/dumpable; fail-loud; macOS needs signing) | public |
-| C2 authenticated policy | **#72** | refine: **MAC** (not "signature") + monotonic version on the keystone; fail-closed; not-in-vault | public (design); keep poison detail thin |
-| C3 reserve-before-sign cap | — | **new** (durable reservation pre-broadcast + reconciliation, on the keystone) | public, full detail |
-| C4 per-chain guardrail | **#76** (+ **#97**) | refine: per-chain opt-in, **unknown chains fail-closed**, classification not RPC-trusted | public |
-| Architecture-fitness CI | **#75** (cargo-vet) | **new** custom feature-closure check (not cargo-deny bans while module-gated) | public |
-| Governance: CODEOWNERS + branch protection | — | **new, separate** from CI | public |
-| F1a keystore feature-gate | — | **new** (closure-aware acceptance) | public |
-| F1b keystore crate extraction | — | **new, optional follow-up** (own done-criterion) | public |
-| F2 seed-seal surface | — | **new** (scope honestly: surface-reduction *or* seed-never-in-GUI) | public |
+Filed 2026-06-20 (all public, full detail). ADR PR: **#105**.
+
+| Item | Issue | Notes |
+|---|---|---|
+| Rollback-resistant security-state store (keystone) | **#71** (commented) | the foundation for C2 + C3: monotonic epoch, atomic+fsync, fail-closed, single-writer |
+| C1 launch provenance | **#106** (new) | env_clear + tests; canonical/verified binary path; override compiled-out of release |
+| C5 runtime memory hardening | **#107** (new) | mlock-all/coredump/dumpable; fail-loud; macOS needs signing |
+| C2 authenticated policy | **#72** (commented) | MAC (not "signature") + monotonic version on the keystone; fail-closed; not-in-vault |
+| C3 reserve-before-sign cap | **#108** (new) | durable reservation pre-broadcast + reconciliation; depends on #71 |
+| C4 per-chain guardrail | **#76** + **#97** (commented) | per-chain opt-in, unknown chains fail-closed, classification not RPC-trusted |
+| Architecture-fitness CI | **#109** (new) | custom feature-closure check (not cargo-deny bans while module-gated); relates #75 |
+| Governance: CODEOWNERS + branch protection | **#110** (new) | separate from CI; branch protection settings are acceptance criteria |
+| F1a keystore feature-gate | **#111** (new) | closure-aware acceptance |
+| F1b keystore crate extraction | **#112** (new) | optional follow-up; own done-criterion |
+| F2 seed-seal surface | **#113** (new) | scope honestly: surface-reduction *or* seed-never-in-GUI |
 
 ## Status / next step
 
