@@ -27,6 +27,9 @@
 )]
 
 pub mod balances;
+/// The chain capability registry — one source of truth for per-chain config + trust tier, keyed
+/// by `chain_id`. Unfeatured so the daemon (built with `default-features = false`) reads it too.
+pub mod chain;
 pub mod config;
 /// CoW Protocol orderbook REST client (quote / submit / status). Gated behind the default-on
 /// `cow-client` feature so the daemon never compiles `reqwest`. When the feature is off, this
@@ -63,6 +66,12 @@ pub mod shielded;
 pub mod tokens;
 
 pub use balances::{fetch_portfolio, format_amount, Portfolio, TokenBalance};
+// The chain capability registry: the spec types, the lookup, the fail-safe real-value classifier,
+// and the launch-probe classifier — re-exported so the app + daemon read chains through core.
+pub use chain::{
+    classify_chain_id_probe, for_chain, is_real_value_chain, network_name, verification,
+    ChainIdProbe, ChainSpec, NativeAsset, Verification,
+};
 // CoW order machinery, re-exported so the daemon + app + MCP can build/sign/cancel orders and
 // decode shaped approvals through core without naming the `cow_types` path directly.
 pub use cow_types::{
@@ -82,7 +91,7 @@ pub use cow_client::{
     DEFAULT_SLIPPAGE_BPS,
 };
 pub use env::{demo_fork_block, screen_capture_allowed, verified_reads_enabled};
-pub use eth::{EthProvider, Read, DEFAULT_RPC};
+pub use eth::{probe_rpc_chain_id, EthProvider, Read, DEFAULT_RPC};
 #[cfg(feature = "verified-reads")]
 pub use helios::{launch_verified, VerifiedReader, DEFAULT_CONSENSUS_RPC};
 pub use keystore::{random_word_positions, KdfParams, SecretKind, UnlockedVault, Vault, WordCount};

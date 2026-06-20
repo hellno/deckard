@@ -28,6 +28,8 @@
 //! current-thread runtime, consider `new_multi_thread`. Do NOT switch preemptively —
 //! it would break the "single current-thread runtime" decision without proven need.
 
+use std::time::Duration;
+
 use alloy::ens::ProviderEnsExt;
 use alloy::primitives::{Address, U256};
 use alloy::providers::{DynProvider, Provider, ProviderBuilder};
@@ -36,6 +38,7 @@ use alloy::sol;
 use deckard_contract::ReadStatus;
 
 use crate::balances::{fetch_portfolio, Portfolio};
+use crate::chain::{classify_chain_id_probe, ChainIdProbe};
 
 sol! {
     #[sol(rpc)]
@@ -45,8 +48,61 @@ sol! {
 }
 
 /// A reliable public mainnet RPC, used as the execution-layer endpoint Helios proves
-/// against (or, with `verified-reads` off, read directly). Overridable via settings.
+/// against (or, with `verified-reads` off, read directly). Overridable via settings. This is the
+/// single source for the mainnet default — [`crate::chain`]'s mainnet spec references it.
 pub const DEFAULT_RPC: &str = "https://ethereum-rpc.publicnode.com";
+
+/// Probe `rpc_url`'s `eth_chainId` once (bounded by `timeout`) against the *declared* chain id and
+/// classify the result (see [`ChainIdProbe`]). Blocking, for the one-shot launch pre-flight: it
+/// builds a throwaway current-thread runtime so callers needn't be async, and reads the RAW
+/// execution RPC directly — NOT through Helios — because we are verifying the node's identity, which
+/// Helios does not change. The RPC-reported id is only ever compared here, never used to pick a
+/// chain spec (EIP-3085: never trust an RPC-returned chain id for config/signing).
+pub fn probe_rpc_chain_id(rpc_url: &str, declared: u64, timeout: Duration) -> ChainIdProbe {
+    classify_chain_id_probe(declared, fetch_chain_id_blocking(rpc_url, timeout))
+}
+
+/// One-shot, blocking `eth_chainId`. Returns the reported id, or a short, URL-free error: a
+/// transport error can echo the RPC URL (which may carry an API key), so its text is never
+/// surfaced — the caller already logs the redacted RPC separately.
+///
+/// The timeout is enforced with `recv_timeout` on a dedicated probe thread (NOT `tokio::time`,
+/// whose "time" feature deckard-core does not declare): the thread owns a throwaway current-thread
+/// runtime and does the one async call; if it does not answer within `timeout` the caller returns
+/// "timed out" and the detached thread tears itself down when its runtime drops.
+fn fetch_chain_id_blocking(rpc_url: &str, timeout: Duration) -> Result<u64, String> {
+    let (tx, rx) = std::sync::mpsc::channel::<Result<u64, String>>();
+    let url = rpc_url.to_string();
+    let spawned = std::thread::Builder::new()
+        .name("deckard-chainid-probe".into())
+        .spawn(move || {
+            let result = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| format!("could not build chain-id probe runtime: {e}"))
+                .and_then(|rt| {
+                    rt.block_on(async move {
+                        let parsed = url
+                            .parse()
+                            .map_err(|_| "RPC URL is not a valid URL".to_string())?;
+                        let provider = ProviderBuilder::new().connect_http(parsed).erased();
+                        provider
+                            .get_chain_id()
+                            .await
+                            .map_err(|_| "eth_chainId request failed".to_string())
+                    })
+                });
+            // The receiver may have already given up (timeout); a closed channel is fine.
+            let _ = tx.send(result);
+        });
+    if spawned.is_err() {
+        return Err("could not spawn chain-id probe thread".to_string());
+    }
+    match rx.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(_) => Err("eth_chainId request timed out".to_string()),
+    }
+}
 
 /// The reply half of a request: the worker sends the result here; the caller awaits it.
 type Reply<T> = flume::Sender<anyhow::Result<T>>;

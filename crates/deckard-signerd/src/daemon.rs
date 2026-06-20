@@ -1557,6 +1557,22 @@ mod exempt_list_tests {
         assert!(is_testnet_or_fork(11_155_111));
         assert!(is_testnet_or_fork(31_337));
     }
+
+    /// PARITY (#97): the daemon's exempt allowlist must stay the EXACT inverse of the chain
+    /// registry's fail-safe real-value classifier (`deckard_core::chain::is_real_value_chain`),
+    /// which `Config::is_real_value_chain` exposes for the #76 guardrail. #97 deliberately does NOT
+    /// change `is_testnet_or_fork`; this pin guarantees the two never drift, so when #76 later
+    /// delegates the guardrail to the registry it is a no-op on behavior — not a silent change.
+    #[test]
+    fn exempt_list_matches_registry_real_value_classifier() {
+        for id in [0u64, 1, 11_155_111, 31_337, 8453, 10, 42161, 137, 999_999] {
+            assert_eq!(
+                is_testnet_or_fork(id),
+                !deckard_core::chain::is_real_value_chain(id),
+                "chain {id}: daemon exempt list and registry real-value classifier disagree"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

@@ -101,6 +101,15 @@ impl Config {
     pub fn redacted_rpc(&self) -> String {
         redact_url(&self.rpc_url)
     }
+
+    /// Whether the daemon's configured chain moves real value, sourced from the chain capability
+    /// registry (#97). FAIL-SAFE: an unknown chain id is treated as real value. EXPOSED here for the
+    /// #76 auto-approval guardrail; the guardrail's own decision (`daemon::is_testnet_or_fork`) is
+    /// intentionally NOT changed by #97 — a parity test (`daemon::exempt_list_tests`) pins the two
+    /// classifications equal, so #76 can later delegate to this with no behavior change.
+    pub fn is_real_value_chain(&self) -> bool {
+        deckard_core::chain::is_real_value_chain(self.chain_id)
+    }
 }
 
 /// Reduce an RPC URL to `scheme://host[:port]` so an embedded API key (e.g. an Infura

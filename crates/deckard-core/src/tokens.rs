@@ -9,7 +9,7 @@
 use alloy::primitives::{address, Address};
 
 /// One bundled token: its mainnet contract, ticker, name, and ERC-20 decimals.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TokenInfo {
     pub address: Address,
     pub symbol: &'static str,
@@ -108,12 +108,11 @@ pub const SEPOLIA_TOKENS: &[TokenInfo] = &[
     },
 ];
 
-/// The curated token list for a chain: mainnet (1) → [`DEFAULT_TOKENS`], Sepolia
-/// (11155111) → [`SEPOLIA_TOKENS`], any other chain → empty (no bundled list).
+/// The curated token list for a chain, read from the [chain registry](crate::chain): mainnet (1) →
+/// [`DEFAULT_TOKENS`], Sepolia (11155111) → [`SEPOLIA_TOKENS`], any other chain → empty (no bundled
+/// list). The per-chain arrays now live on each [`ChainSpec`](crate::chain::ChainSpec).
 pub fn tokens_for(chain_id: u64) -> &'static [TokenInfo] {
-    match chain_id {
-        1 => DEFAULT_TOKENS,
-        11155111 => SEPOLIA_TOKENS,
-        _ => &[],
-    }
+    crate::chain::for_chain(chain_id)
+        .map(|c| c.tokens)
+        .unwrap_or(&[])
 }
