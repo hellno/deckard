@@ -42,7 +42,7 @@ learn how the agent plus approval loop actually feels.
 - Activity feed + see-and-stop view: **#60**
 - Agent loop (poll balance, propose shield): **#61**
 
-It uses only what exists: the policy gate (`auto_shield_min`, `OverCap`), the mainnet guardrail, STOP. No
+It uses only what exists: the policy gate (`auto_shield_min`, `OverCap`), the auto-approval guardrail, STOP. No
 new authority.
 
 ## What is deferred (and why)

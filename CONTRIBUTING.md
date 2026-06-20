@@ -130,7 +130,7 @@ cargo build -p deckard-mcp      # one-time: builds ./target/debug/deckard-mcp (n
 
 The demo policy (`policy.demo.json`, installed at `~/.deckard/demo/policy.json`) caps
 per-tx at **0.1 ETH** and daily at **0.5 ETH** with `require_approval: OverCap`. A shield
-**within** cap auto-allows (on the Sepolia fork the mainnet guardrail is inactive). A
+**within** cap auto-allows (on the Sepolia fork — an exempt testnet id — the auto-approval guardrail is inactive). A
 shield **over** cap returns `NeedsApproval` — and there's no approval card in this alpha
 (the app only resolves shields it proposed itself, so an agent/CLI-proposed over-cap shield
 can't be approved from the app). To proceed, either **lower the amount** under the per-tx

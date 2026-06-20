@@ -51,7 +51,7 @@ discipline:
 1. **Policy gates every write in the daemon.** Allowlist, per-tx cap, daily cap, and
    approval mode are evaluated by the daemon process that owns the key — the sidecar
    and the app only *propose*.
-2. **The mainnet guardrail removes hands-free spend on chain 1.** See below.
+2. **The auto-approval guardrail removes hands-free spend on every real-value chain.** See below.
 3. **The launch tool surface is 6 tools** (`mcp.v0.1`): no raw `propose` (intents are
    constructed daemon-side from typed `shield` arguments and the Shield target is
    pre-checked against the canonical RelayAdapt address), and no `resolve` (an
@@ -61,27 +61,35 @@ discipline:
    `scheme://host[:port]` before it leaves the daemon (transport errors love to echo
    the full RPC URL, API key and all). This is canary-tested end-to-end.
 
-## The mainnet guardrail and its override
+## The auto-approval guardrail and its override
 
-While the daemon signs for `chain_id == 1`, **every auto-Allow is downgraded to
-`NeedsApproval`** — the default `OverCap` policy ships with an empty (= any-recipient)
-allowlist, so without this a within-cap injected write would move real funds with
-zero human contact. The downgrade happens in the daemon, post-policy-evaluation; a
-human approves via the app's hold-to-confirm (`Resolve`), and `Deny` is never
-upgraded.
+The guardrail is **default-deny**: while the daemon signs for **any real-value chain** —
+every chain EXCEPT an explicit exempt allowlist of testnet/dev ids (Sepolia `11155111`,
+local anvil `31337`) — **every auto-Allow is downgraded to `NeedsApproval`**. An UNKNOWN
+chain-id is treated as real-value and guarded too, so configuring a new real chain (Base,
+OP, …) can never silently turn the brake off. The default `OverCap` policy ships with an
+empty (= any-recipient) allowlist, so without this a within-cap injected write would move
+real funds with zero human contact. The downgrade happens in the daemon,
+post-policy-evaluation; a human approves via the app's hold-to-confirm (`Resolve`), and
+`Deny` is never upgraded.
 
-The override env var is **`DECKARD_I_KNOW_THIS_IS_MAINNET=1`**. This paragraph is its
-only documentation, deliberately: the variable's name never appears in daemon reason
-strings, tool responses, tool descriptions, or `demo-check` output (asserted by the
-transcript-hygiene tests) — a guardrail whose disable instructions are printed to the
-agent is a speed bump, not a control. Set it only if you are a human operator who has
-read this file and wants policy-capped hands-free mainnet writes anyway.
+The override env var is **`DECKARD_I_KNOW_THIS_IS_MAINNET=1`**. (The name is kept for
+back-compat; despite it, the override now disarms the guardrail on **any** real-value
+chain, not just mainnet — set it only if that is what you mean.) This paragraph is its only
+documentation, deliberately: the variable's name never appears in daemon reason strings,
+tool responses, tool descriptions, or `demo-check` output (asserted by the
+transcript-hygiene tests) — a guardrail whose disable instructions are printed to the agent
+is a speed bump, not a control. Set it only if you are a human operator who has read this
+file and wants policy-capped hands-free writes on a real chain anyway.
 
 Honest limits of the guardrail:
 
-- It is **chain-1 only**. On any other chain (Polygon, Arbitrum, …) the policy caps
-  are the only brake on auto-Allow. Treat non-mainnet chains you care about like
-  mainnet: set `ApprovalMode::Always` in your policy.
+- It guards against a **misconfigured-chain** hands-free spend, not all hands-free spend.
+  On the **exempt** testnet/dev ids the guardrail is off **by design** (the demo runs
+  hands-free), and there the policy caps are the only brake — within-cap auto-Allow to any
+  recipient still happens. The default policy is still `OverCap` with an empty allowlist;
+  this guardrail does not change that. If you operate on an exempt chain you care about, set
+  `ApprovalMode::Always` in your policy.
 - It is a **same-uid speed bump**, per the boundary section above.
 
 ## The viewing key in the sidecar
@@ -232,12 +240,12 @@ designated resolver; see the boundary section). The interesting question is whet
   app is the wire contract's designated resolver, so it sends `Resolve{approved: true}`
   only after the hold completes, and leaving the Shield surface cancels an in-progress
   hold so a stale timer can't fire a confirm after the screen is gone.
-- **The mainnet guardrail downgrade happens daemon-side, not app-side**
-  (`crates/deckard-signerd/src/daemon.rs`, `propose` + `mainnet_guardrail_active`): on
-  chain 1 without the override, every auto-`Allow` becomes `Pending` *in the daemon*, so
-  the human-approval requirement doesn't depend on the app rendering a card correctly —
-  a buggy or bypassed UI still can't produce a hands-free mainnet write. `Deny` is never
-  upgraded.
+- **The auto-approval guardrail downgrade happens daemon-side, not app-side**
+  (`crates/deckard-signerd/src/daemon.rs`, `propose` + `guardrail_active`): on any
+  real-value chain (every chain except the exempt testnet/dev allowlist) without the
+  override, every auto-`Allow` becomes `Pending` *in the daemon*, so the human-approval
+  requirement doesn't depend on the app rendering a card correctly — a buggy or bypassed UI
+  still can't produce a hands-free real-chain write. `Deny` is never upgraded.
 - **Chain-id resolution fails loud** (`crates/deckard-app/src/settings.rs`,
   `resolve_chain_id`): the daemon's chain is resolved `env > settings > default(mainnet)`
   *once* at startup and pinned into the daemon's env, so the reader and signer agree. An
@@ -255,7 +263,7 @@ broadcasts through a diverged endpoint, but it's worth attacking (red-team issue
 |---|------|--------|
 | 1 | Same-uid code self-approves via `Resolve` (or speaks the wire directly) | Accepted v1 boundary — documented above; resolver authentication is the roadmap fix |
 | 2 | STOP queues ≤30s behind an in-flight broadcast | Accepted v1 tradeoff — first post-launch daemon PR |
-| 3 | Non-mainnet chains have no guardrail (policy caps only) | Documented — use `ApprovalMode::Always` for chains you care about |
+| 3 | Exempt testnet/dev chains have no guardrail (policy caps only); the default policy is still `OverCap` so within-cap auto-Allow to any recipient happens there | Narrowed (#76: real-value & unknown chains are now guarded by default) — on exempt chains use `ApprovalMode::Always` |
 | 4 | Viewing-key compromise in the sidecar leaks shielded history (not funds) | Mitigated (Zeroizing, no-output discipline, scan-tested) |
 | 5 | Reason redaction is URL-shaped-token-based; a credential echoed in a non-URL form would pass | Mitigated for realistic transport-error shapes (tested); allowlist scan is the backstop |
 | 6 | Deterministic request-ids allow same-uid intent-collision games | Accepted within the uid boundary; salted ids on roadmap |
