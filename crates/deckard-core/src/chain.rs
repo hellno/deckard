@@ -17,9 +17,13 @@
 //!
 //! 1. **Only mainnet may be [`Verification::Mainnet`].** DESIGN.md "Per-chain trust tiers": mainnet
 //!    is the only Helios-verified tier; every other chain reads NOT VERIFIED. The registry is a
-//!    *closed* const table (no public constructor), and [`tests::mainnet_is_the_only_verified_tier`]
-//!    pins that no `chain_id != 1` entry can ever carry `Mainnet`. A non-mainnet chain wearing the
-//!    verified look is unrepresentable, not merely discouraged.
+//!    *closed* const table: every spec the app sees comes from [`for_chain`], which only ever
+//!    returns an entry from that table, and [`tests::mainnet_is_the_only_verified_tier`] pins that
+//!    no `chain_id != 1` entry carries `Mainnet`. (Fields are `pub` for ergonomic reads, so an
+//!    external crate could build a *standalone* `ChainSpec` with any values — but such a value is
+//!    inert: it cannot enter the registry and no classifier here consults it.) The read path
+//!    enforces the same rule independently: `eth::ReadPath` only takes the Helios `Verified` path
+//!    when `verification(chain_id) == Mainnet`.
 //! 2. **[`is_real_value_chain`] is fail-safe.** It is the *negation of a fixed exempt allowlist*,
 //!    exposed as a free function that returns `true` (real value, guardrail armed) for any chain
 //!    id NOT explicitly exempt — including chains with no registry entry at all. It is never a
@@ -43,13 +47,15 @@ pub const ANVIL_CHAIN_ID: u64 = 31_337;
 
 /// Chains exempt from the real-value guardrail: public testnets + local dev/fork ids where
 /// hands-free agent spend is allowed by default. This is the SINGLE source for core's real-value
-/// classification; `deckard-signerd` keeps its own `TESTNET_FORK_CHAIN_IDS` and a parity test pins
-/// the two equal, so #76 can later delegate to [`is_real_value_chain`] with no behavior change.
+/// classification (read it through [`is_real_value_chain`], which is the API; this const is `pub`
+/// only so `deckard-signerd`'s parity test can pin its own `TESTNET_FORK_CHAIN_IDS` set-equal to it,
+/// so the two can never silently diverge and #76 can later delegate to [`is_real_value_chain`] with
+/// no behavior change).
 ///
 /// SAFETY: extend ONLY with testnet / local-dev ids. A mainnet or L2-mainnet id here is a
 /// fund-loss fail-open bug. It is an allowlist of ids we trust to move no real value, NOT a proof —
 /// a fork could reuse a mainnet id, which is exactly why it is a fixed list, not a heuristic.
-const EXEMPT_TESTNET_CHAIN_IDS: &[u64] = &[SEPOLIA_CHAIN_ID, ANVIL_CHAIN_ID];
+pub const EXEMPT_TESTNET_CHAIN_IDS: &[u64] = &[SEPOLIA_CHAIN_ID, ANVIL_CHAIN_ID];
 
 /// A chain's verified-reads trust tier (DESIGN.md "Per-chain trust tiers").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,9 +83,11 @@ pub struct NativeAsset {
     pub decimals: u8,
 }
 
-/// One chain's capabilities + trust tier. Constructed ONLY inside this module's closed [`REGISTRY`]
-/// table — there is no public constructor, which is what makes the "only mainnet is Verified"
-/// invariant structural rather than a caller-discipline rule.
+/// One chain's capabilities + trust tier. The registered specs all live in this module's closed
+/// [`REGISTRY`] table; [`for_chain`] only ever returns an entry from it, so the trust invariants
+/// (pinned by the module tests) hold for every spec the app actually consumes. Fields are `pub` for
+/// ergonomic reads — a standalone `ChainSpec` built elsewhere is inert (it cannot enter the registry
+/// and no classifier consults it).
 #[derive(Clone, Copy, Debug)]
 pub struct ChainSpec {
     /// EIP-155 chain id this spec describes (the registry key).

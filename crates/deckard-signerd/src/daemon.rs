@@ -1573,6 +1573,23 @@ mod exempt_list_tests {
             );
         }
     }
+
+    /// The sampled check above can miss a divergence on an id no test lists; this pins the two
+    /// allowlists EXACTLY equal as sets. A future edit to ONE list (or a new exempt id added to
+    /// only one side) fails CI here regardless of which ids any other test happens to enumerate.
+    #[test]
+    fn exempt_list_is_set_equal_to_core_registry() {
+        let mut daemon = super::TESTNET_FORK_CHAIN_IDS.to_vec();
+        let mut core = deckard_core::chain::EXEMPT_TESTNET_CHAIN_IDS.to_vec();
+        daemon.sort_unstable();
+        daemon.dedup();
+        core.sort_unstable();
+        core.dedup();
+        assert_eq!(
+            daemon, core,
+            "daemon TESTNET_FORK_CHAIN_IDS and core EXEMPT_TESTNET_CHAIN_IDS have diverged"
+        );
+    }
 }
 
 #[cfg(test)]

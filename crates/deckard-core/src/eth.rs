@@ -297,11 +297,23 @@ impl ReadPath {
     /// Build the read path on the worker thread, inside the worker's tokio runtime.
     #[cfg(feature = "verified-reads")]
     async fn build(rpc_url: &str, chain_id: u64) -> Self {
-        // Demo / local-fork mode: when verified reads are disabled at runtime
-        // (`DECKARD_VERIFIED_READS=0`), skip the Helios bootstrap entirely. Embedded Helios is
-        // mainnet-only and would stall a Balance read against a Sepolia fork; instead read the
-        // raw fork RPC directly, honestly tagged Unsynced (never a fabricated Verified).
-        if !crate::env::verified_reads_enabled() {
+        // Skip the Helios bootstrap and read the raw RPC directly (honestly tagged Unsynced, never a
+        // fabricated Verified) in two cases:
+        //   1. Verified reads are disabled at runtime (`DECKARD_VERIFIED_READS=0`) — the demo /
+        //      local-fork path; embedded Helios is mainnet-only and would stall against a fork.
+        //   2. The chain is NOT the verified-mainnet tier in the registry. Helios proves L1
+        //      consensus and exists only for mainnet; a non-mainnet read must never reach Verified
+        //      (DESIGN.md "Per-chain trust tiers" / "never fake it" — #97). Gating here, on the
+        //      registry, makes that structural rather than relying on the operator disabling
+        //      verified reads per chain.
+        let mainnet_tier =
+            crate::chain::verification(chain_id) == crate::chain::Verification::Mainnet;
+        if !crate::env::verified_reads_enabled() || !mainnet_tier {
+            let reason = if !crate::env::verified_reads_enabled() {
+                "verification disabled (demo mode)"
+            } else {
+                "not verified (non-mainnet chain)"
+            };
             let provider = rpc_url
                 .parse()
                 .ok()
@@ -309,7 +321,7 @@ impl ReadPath {
             return Self {
                 chain_id,
                 provider,
-                unverified_reason: Some("verification disabled (demo mode)".to_string()),
+                unverified_reason: Some(reason.to_string()),
                 _helios: None,
             };
         }
