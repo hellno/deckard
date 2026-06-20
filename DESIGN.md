@@ -50,8 +50,8 @@ helper), and the **brand fonts were never bundled** so the app ran in the OS sys
 cannot fix that. Three things make this foundation enforceable:
 
 ### 1. Fonts are bundled, not aspirational
-General Sans (UI) and JetBrains Mono (money/addresses) are both free to redistribute and **must be
-embedded** via `cx.text_system().add_fonts(...)` in `main.rs` with the files in
+Schibsted Grotesk (UI) and JetBrains Mono (money/addresses) are both OFL-1.1 (free to redistribute,
+even in a public repo) and **must be embedded** via `cx.text_system().add_fonts(...)` in `main.rs` with the files in
 `crates/deckard-app/assets/fonts/`. Until they are, every typography rule below is fiction (the app
 falls back to the system font). This is the single highest-leverage visual fix.
 
@@ -186,7 +186,7 @@ agent?" in under a second. A **two-signal axis plus shape**, never a rainbow:
 ---
 
 ## Typography
-- **UI / display:** **General Sans** (bundled). Sentence case; no ALL-CAPS except tiny section
+- **UI / display:** **Schibsted Grotesk** (bundled, OFL-1.1). Sentence case; no ALL-CAPS except tiny section
   labels. Hierarchy from **weight + size + color, in that order** (the old build leaned on color
   alone, which read flat).
 - **Money / numbers / addresses / hashes:** **JetBrains Mono** (bundled), tabular figures, full
@@ -402,7 +402,7 @@ a child's `flex_1`/`justify_center` is inert unless the parent is `v_flex`/`h_fl
 
 ## Visual definition of done (QA + /code-review enforce this)
 A GUI change is not done until ALL hold (paste screenshots as evidence):
-- [ ] Renders in **General Sans + JetBrains Mono** (fonts actually bundled), not the system font.
+- [ ] Renders in **Schibsted Grotesk + JetBrains Mono** (fonts actually bundled), not the system font.
 - [ ] Money + addresses are **mono**, dimmed-decimals, via `money.rs`; addresses via `short_addr`
       (6+4) + identicon.
 - [ ] No raw hex colors in the view; only `theme.*` + `theme::amber/agent`.
@@ -433,3 +433,4 @@ A GUI change is not done until ALL hold (paste screenshots as evidence):
 | 2026-06-20 | **Transaction-as-hero clear-signing.** Amount + recipient are the heroes; details demoted; danger red first; caution amber inline (no box). | The old flat key/value form read amateurish; what can lose money must dominate. |
 | 2026-06-20 | **Agent interaction model.** Agents first-class standalone in the sidebar; a dedicated agent surface owns editable policy + controls + its own activity; the home shows a compact agent presence; expandability contract (agent = policy + activity, UX renders from data). | The read-only policy dump on the home was awkward; an agent that spends your money deserves a first-class surface; lean for one agent, expandable to N and to model-2 without redesign. |
 | 2026-06-20 | **Activity lean now = audit log + STOP**; triage inbox / keyboard nav / drill-in receipts / filtering deferred and documented. | Build the see-and-stop log first; layer the inbox interactions once the loop is real. |
+| 2026-06-20 | **UI/display face: General Sans → Schibsted Grotesk** (JetBrains Mono unchanged). | General Sans is Fontshare/ITF proprietary — its EULA forbids redistributing the raw files / public-server hosting, which the public repo violated once #114 committed them. Schibsted Grotesk is OFL-1.1, a structural drop-in (same 400/500/600 weights), and built for editorial publishing — it fits the locked Editorial direction. Chosen over Hanken Grotesk (safer/quieter) and IBM Plex Sans (more recognizable) via /design-consultation. |

@@ -63,12 +63,15 @@ fn write_then_unlock(
 
 /// What the sidebar tree selects — the contextual-view driver. The home surface
 /// renders differently per selection (project / wallet). Demo scope is a single
-/// project + wallet; Atlas (key-less automation on the SAME wallet EOA) is not a
-/// separate entity — its policy fence lives in the wallet home.
+/// project + wallet; and Atlas, the agent. Atlas is now a FIRST-CLASS entity
+/// (DESIGN.md v2 §The agent interaction model): a standalone sidebar row that opens
+/// its own surface (policy + controls + its activity), no longer folded into the
+/// wallet home. It is still key-less automation on the same wallet EOA.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Selection {
     Project,
     Wallet,
+    Agent,
 }
 
 /// Transient full-pane surfaces opened FROM a selection. `Home` = the contextual
@@ -1417,7 +1420,7 @@ impl Shell {
         // The wallet home now carries the "What Atlas may do" policy fence — re-fetch the
         // daemon's live policy on every visit so an out-of-band edit to policy.json (or a
         // STOP) shows up without a relaunch.
-        if sel == Selection::Wallet {
+        if matches!(sel, Selection::Wallet | Selection::Agent) {
             self.kick_agent_policy(cx);
         }
         cx.notify();
@@ -2959,6 +2962,15 @@ impl Render for Shell {
                     .size_full()
                     .overflow_y_scrollbar()
                     .child(self.render_project_home(cx))
+                    .into_any_element(),
+                // The agent's own surface (DESIGN.md v2 §The agent interaction model): selected
+                // from the sidebar Agents group. Rendered entirely from policy data + the agent's
+                // activity slice.
+                (Selection::Agent, Surface::Home) => div()
+                    .id("scroll-agent")
+                    .size_full()
+                    .overflow_y_scrollbar()
+                    .child(self.render_agent_surface(cx))
                     .into_any_element(),
             };
             v_flex()

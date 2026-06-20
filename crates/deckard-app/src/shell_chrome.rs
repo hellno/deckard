@@ -71,6 +71,7 @@ impl Shell {
             Surface::Home => match self.selection {
                 Selection::Project => "Personal",
                 Selection::Wallet => "Wallet",
+                Selection::Agent => "Atlas",
             },
         }
     }
@@ -99,6 +100,9 @@ impl Shell {
         let project_selected =
             self.surface == Surface::Home && self.selection == Selection::Project;
         let wallet_selected = self.surface == Surface::Home && self.selection == Selection::Wallet;
+        let agent_selected = self.surface == Surface::Home && self.selection == Selection::Agent;
+        let agent = theme::agent(is_dark);
+        let agent_tint = theme::agent_tint(is_dark);
 
         let addr = short_addr(&self.wallet_address_string());
         let balance = self
@@ -196,6 +200,29 @@ impl Shell {
                             ),
                     )
                     .on_click(cx.listener(|this, _, _, cx| this.select(Selection::Wallet, cx))),
+            )
+            // Agents group — first-class (DESIGN.md v2 §The agent interaction model): the agent is
+            // its own entity with its own surface, no longer folded into the wallet home.
+            .child(group_label("Agents"))
+            .child(
+                div()
+                    .id("nav-agent")
+                    .mx_2()
+                    .px_2()
+                    .py_1p5()
+                    .rounded_md()
+                    .when(agent_selected, |e| e.bg(lift))
+                    .cursor_pointer()
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_2()
+                            .child(agent_squircle(px(18.0), px(5.0), agent, agent_tint))
+                            .child(div().text_sm().text_color(fg).child("Atlas"))
+                            .child(div().flex_1())
+                            .child(div().size(px(6.0)).rounded_full().bg(agent)),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.select(Selection::Agent, cx))),
             )
             // Spacer pushes the footer rows to the bottom.
             .child(div().flex_1())

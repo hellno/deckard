@@ -93,7 +93,7 @@ fn refine(config: &mut ThemeConfig, dark: bool) {
     // registered family name, not a path; GPUI silently falls back to the system
     // font if the family isn't installed. `Root` applies `font_family` app-wide;
     // mono is per-element via `cx.theme().mono_font_family`.
-    config.font_family = Some("General Sans".into());
+    config.font_family = Some("Schibsted Grotesk".into());
     config.mono_font_family = Some("JetBrains Mono".into());
     // NB: deliberately do NOT set `font.size` — the views rely on the relative
     // `.text_*` utilities off gpui's 16px base; lowering it would rescale every

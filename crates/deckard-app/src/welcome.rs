@@ -37,7 +37,10 @@ struct Holding {
 /// allowlist honestly reads "any", the approval mode is spelled out, and a STOP
 /// (`revoked`) is never hidden. `masked` bullets only the spent-today figure — that is
 /// activity; the caps are config the user set, not a balance to hide.
-fn agent_policy_rows(p: &deckard_contract::Policy, masked: bool) -> Vec<(&'static str, String)> {
+pub(crate) fn agent_policy_rows(
+    p: &deckard_contract::Policy,
+    masked: bool,
+) -> Vec<(&'static str, String)> {
     use deckard_contract::ApprovalMode;
     let eth = |wei: U256| format!("{} ETH", deckard_core::format_amount(wei, 18, 6));
     vec![
@@ -248,119 +251,103 @@ impl Shell {
                     )
                     // Holdings, or a state.
                     .child(self.render_holdings(first_sync, has_tokens, holdings, cx))
-                    // "What Atlas may do" — the agent policy fence. Atlas is key-less automation
-                    // ON this same wallet (same EOA), not a separate account, so its limits live
-                    // here in the wallet cockpit. The rows are the daemon's LIVE policy (the same
-                    // fence `deckard_policy_get` shows an MCP client), never invented.
-                    .child(self.render_agent_fence(cx)),
+                    // Compact agent presence — ONE clickable Atlas row that opens the agent
+                    // surface (where the full policy fence now lives). Atlas is key-less
+                    // automation ON this same wallet (same EOA); the home only carries a calm
+                    // status + budget glance, not the full configuration.
+                    .child(self.render_agent_presence(cx)),
             )
     }
 
-    /// The agent policy fence ("What Atlas may do") for the wallet home — a frameless editorial
-    /// SECTION (top hairline + whitespace, no card box), not a bordered box. Atlas is key-less
-    /// automation on the SAME wallet EOA — not a separate account — so its limits belong here in
-    /// the wallet cockpit, not on a standalone page. The section shows the daemon's LIVE policy fence
-    /// (per-tx cap, daily budget, spent-today, recipients, auto-shield minimum, approval mode, the
-    /// STOP brake) via `agent_policy_rows` — the same numbers `deckard_policy_get` returns to an
-    /// MCP client, never invented — plus a Spent-today/Daily-budget gauge. `None` until the first
-    /// `PolicyGet` lands → a quiet "loading…". The cyan squircle is the static two-signal identity
-    /// marker (no pulse).
-    fn render_agent_fence(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The compact agent presence for the wallet home — a single clickable Atlas row that
+    /// navigates to the agent surface (`Selection::Agent`), where the full policy fence lives.
+    /// Set off from the holdings above by whitespace + a top hairline (editorial section, NOT a
+    /// card). The row carries the cyan identity squircle, the "Atlas" name, a small "acting" cyan
+    /// status, and a thin Spent-today/Daily-budget gauge (from the daemon's LIVE policy, never
+    /// invented) in a ~200px container on the right, plus a muted chevron. When the policy hasn't
+    /// landed yet (`agent_policy == None`) the row reads just "Atlas · idle" with no gauge.
+    fn render_agent_presence(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let fg = theme.foreground;
         let muted = theme.muted_foreground;
         let border = theme.border;
         let track = theme.secondary; // bg.raise — the calm gauge track tone
         let danger = theme.danger;
-        let mono: SharedString = theme.mono_font_family.clone();
         let is_dark = theme.is_dark();
         let agent = theme::agent(is_dark);
         let agent_tint = theme::agent_tint(is_dark);
         let amber = theme::amber(is_dark);
 
-        // One policy row: label left (muted), value right (mono, primary). No per-row hairline —
-        // grouping is whitespace.
-        let mono_for_row = mono.clone();
-        let policy_row = move |label: &'static str, value: String| {
-            h_flex()
-                .w_full()
-                .justify_between()
-                .items_center()
-                .py_1p5()
-                .child(div().text_sm().text_color(muted).child(label))
-                .child(
-                    div()
-                        .font_family(mono_for_row.clone())
-                        .text_sm()
-                        .text_color(fg)
-                        .child(value),
-                )
-        };
-
-        // The Spent-today / Daily-budget gauge, computed from the live policy (never invented).
-        // `frac = spent_today / daily_cap` via the integer-safe `fraction` helper; the gauge color
-        // escalates with pressure (cyan → amber ≥90% → red ≥100%). `None` until the first fetch.
+        // The Spent-today / Daily-budget gauge in a ~200px container, computed from the live policy
+        // (never invented). `frac = spent_today / daily_cap` via the integer-safe `fraction` helper;
+        // the gauge color escalates with pressure (cyan → amber ≥90% → red ≥100%). `None` until the
+        // first fetch, in which case the row shows a muted "idle" instead of a gauge.
         let eth = |wei: U256| format!("{} ETH", deckard_core::format_amount(wei, 18, 6));
         let gauge = self.agent_policy.as_ref().map(|p| {
             let frac = fraction(p.spent_today_wei, p.daily_cap_wei);
             let pct = (frac.clamp(0.0, 1.0) * 100.0).round() as u32;
             let cap_eth = deckard_core::format_amount(p.daily_cap_wei, 18, 6);
-            budget_gauge(
+            div().w(px(200.0)).child(budget_gauge(
                 frac,
                 agent,
                 amber,
                 danger,
                 track,
                 muted,
-                format!("Spent today {}", eth(p.spent_today_wei)),
-                format!("{pct}% of {cap_eth}"),
-            )
+                format!("{} / {} today", eth(p.spent_today_wei), cap_eth),
+                format!("{pct}%"),
+            ))
         });
+        let has_policy = self.agent_policy.is_some();
 
-        // The agent fence is a SECTION, not a card (DESIGN editorial rule: no bordered/filled box
-        // to group content). A top hairline + margin sets it off from the holdings above; the rows
-        // are grouped by whitespace alone.
+        // The agent presence is a SECTION, not a card (DESIGN editorial rule: no bordered/filled
+        // box to group content). A top hairline + margin sets it off from the holdings above.
         v_flex()
             .w_full()
-            .gap_4()
+            .gap_1p5()
             .mt_4()
-            .pt_5()
+            .pt_4()
             .border_t_1()
             .border_color(border)
-            // Section header: the cyan squircle (the ONLY cyan here — static identity, no pulse)
-            // + the section label. The label tier carries the "What Atlas may do" grouping.
+            .child(section_label("Agents", muted))
+            // The one clickable row → the agent surface. The cyan squircle is the static
+            // two-signal identity marker; the gauge (when known) sits right; the chevron signals
+            // "drill in".
             .child(
                 h_flex()
+                    .id("agent-presence-row")
+                    .w_full()
                     .items_center()
-                    .gap_2()
-                    .child(agent_squircle(px(20.0), px(5.0), agent, agent_tint))
-                    .child(section_label("What Atlas may do", muted)),
-            )
-            // The live fence rows — grouped by whitespace, no frame. Until the first fetch lands the
-            // section says so instead of showing invented numbers.
-            .child(v_flex().w_full().gap_0().map(|rows| {
-                match self.agent_policy.as_ref() {
-                    Some(p) => rows.children(
-                        agent_policy_rows(p, self.mask)
-                            .into_iter()
-                            .map(|(label, value)| policy_row(label, value)),
-                    ),
-                    None => rows.child(
+                    .gap_3()
+                    .py_1p5()
+                    .cursor_pointer()
+                    .child(agent_squircle(px(18.0), px(5.0), agent, agent_tint))
+                    .child(
                         div()
                             .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(fg)
+                            .child("Atlas"),
+                    )
+                    // Status: "acting" (cyan) when the policy is live, a muted "idle" otherwise.
+                    .child(if has_policy {
+                        div().text_xs().text_color(agent).child("acting")
+                    } else {
+                        div().text_xs().text_color(muted).child("idle")
+                    })
+                    // The gauge (if known) is pushed to the right; the chevron caps the row.
+                    .children(gauge.map(|g| div().ml_auto().child(g)))
+                    .child(
+                        div()
+                            .when(!has_policy, |el| el.ml_auto())
+                            .text_sm()
                             .text_color(muted)
-                            .child("Reading the signer's policy…"),
-                    ),
-                }
-            }))
-            // The budget gauge sits under the policy rows when the live fence is known.
-            .children(gauge)
-            // The fence is read-only here; it's enforced by the signer, edited via policy.json.
-            .child(div().text_xs().text_color(muted).child(
-                "Atlas acts through the key-less deckard-mcp sidecar, signing from this same \
-                     wallet. The signer checks every move against this fence. Edit policy.json in \
-                     the Deckard config dir to change it.",
-            ))
+                            .child("›"),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.select(crate::shell::Selection::Agent, cx)
+                    })),
+            )
     }
 
     /// The merged Total hero (Wave 2 T10): `Total = public + private` when both are known, a
@@ -771,7 +758,7 @@ fn allocation_bar(
 
 /// `part / total` as a 0..=1 fraction, via integer (bps) math — f32 only at the edge so a
 /// huge `U256` can't lose precision in the ratio. Zero `total` → 0.
-fn fraction(part: U256, total: U256) -> f32 {
+pub(crate) fn fraction(part: U256, total: U256) -> f32 {
     if total.is_zero() {
         return 0.0;
     }

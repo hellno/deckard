@@ -6,6 +6,7 @@
 //! modules; shared leaf components live in `widgets.rs` (DESIGN.md §Enforcement).
 
 mod activity_view;
+mod agent_view;
 mod capture;
 mod commit_flow;
 mod commit_view;
@@ -75,22 +76,24 @@ fn main() {
             gpui_component::init(cx);
 
             // 1b. Register the bundled offline fonts (no web-font CDN). The theme
-            //     sets the family names ("General Sans" / "JetBrains Mono"); these
-            //     files are embedded at build time so the running app renders in
-            //     Deckard's real type. DESIGN.md §Enforcement: fonts are bundled,
+            //     sets the family names ("Schibsted Grotesk" / "JetBrains Mono");
+            //     these files are embedded at build time so the running app renders
+            //     in Deckard's real type. DESIGN.md §Enforcement: fonts are bundled,
             //     not optional — without this the app falls back to the OS system
-            //     font and the mono-for-money + weight hierarchy is fiction.
+            //     font and the mono-for-money + weight hierarchy is fiction. Both
+            //     families are OFL-1.1, so the raw files are safe to ship in a
+            //     public repo.
             use std::borrow::Cow;
             cx.text_system()
                 .add_fonts(vec![
                     Cow::Borrowed(
-                        include_bytes!("../assets/fonts/GeneralSans-Regular.otf").as_slice(),
+                        include_bytes!("../assets/fonts/SchibstedGrotesk-Regular.otf").as_slice(),
                     ),
                     Cow::Borrowed(
-                        include_bytes!("../assets/fonts/GeneralSans-Medium.otf").as_slice(),
+                        include_bytes!("../assets/fonts/SchibstedGrotesk-Medium.otf").as_slice(),
                     ),
                     Cow::Borrowed(
-                        include_bytes!("../assets/fonts/GeneralSans-Semibold.otf").as_slice(),
+                        include_bytes!("../assets/fonts/SchibstedGrotesk-SemiBold.otf").as_slice(),
                     ),
                     Cow::Borrowed(
                         include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf").as_slice(),
