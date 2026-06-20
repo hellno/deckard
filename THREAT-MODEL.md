@@ -267,6 +267,7 @@ broadcasts through a diverged endpoint, but it's worth attacking (red-team issue
 | 4 | Viewing-key compromise in the sidecar leaks shielded history (not funds) | Mitigated (Zeroizing, no-output discipline, scan-tested) |
 | 5 | Reason redaction is URL-shaped-token-based; a credential echoed in a non-URL form would pass | Mitigated for realistic transport-error shapes (tested); allowlist scan is the backstop |
 | 6 | Deterministic request-ids allow same-uid intent-collision games | Accepted within the uid boundary; salted ids on roadmap |
+| 7 | **Rollback / replay of an older genuine `vault.bin`**: a same-uid attacker drops an older valid copy back over the current file (it isn't a forgery, so the AEAD can't flag it) | **Accepted residual for alpha.** Evaluated and **deferred** ([ADR 0004](docs/adr/0004-rollback-resistant-state-anchor.md), #71): rollback needs filesystem write, which is same-uid and already inside this file's conceded boundary, and the vault's only rollback worst-case is reverting a passphrase/KDF rotation (the seed is constant, balances are on-chain). Revisit if the threat model rises (mainnet keys, multi-user, untrusted backup/sync) |
 
 If you can demonstrate an attack that crosses a boundary this file claims holds —
 that's a vulnerability. Please report it via [SECURITY.md](SECURITY.md).
