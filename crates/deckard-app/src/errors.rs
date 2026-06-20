@@ -10,6 +10,28 @@ pub fn short_err(e: impl std::fmt::Display) -> String {
     line.chars().take(140).collect()
 }
 
+/// Map a raw provider/transport error string to ONE calm, plain line for the UI. Unlike
+/// [`humanize_deny`] (which maps the daemon's terse, known `reason` tags), this takes the
+/// free-form error text a read/RPC call can return and matches it by substring, so a noisy
+/// `reqwest`/transport failure reads as a calm, actionable line instead of raw provider text.
+pub fn humanize_read_error(raw: &str) -> String {
+    let lower = raw.to_lowercase();
+    if lower.contains("insufficient funds") {
+        "Not enough ETH to cover the amount plus gas.".into()
+    } else if lower.contains("nonce") {
+        "Transaction ordering error. Try again.".into()
+    } else if lower.contains("connection")
+        || lower.contains("timeout")
+        || lower.contains("error sending request")
+        || lower.contains("reqwest")
+        || lower.contains("transport")
+    {
+        "Couldn't reach the network. Retrying.".into()
+    } else {
+        "The network rejected the request.".into()
+    }
+}
+
 /// Map a daemon deny/`reason` tag to a calm, user-facing line (the wire tags are terse +
 /// machine-readable; the UI shouldn't show `chain_mismatch` raw).
 pub fn humanize_deny(reason: &str) -> String {

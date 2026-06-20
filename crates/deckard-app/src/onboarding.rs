@@ -75,8 +75,8 @@ impl Shell {
         v_flex()
             .gap_6()
             .child(self.auth_heading(
-                "Welcome to Deckard",
-                "A self-custodial Ethereum wallet. Your keys are generated and encrypted on this device — they never leave it.",
+                "Your money on autopilot. You can see and stop everything.",
+                "A self-custodial Ethereum wallet. Your keys are generated and encrypted on this device, and they never leave it.",
                 cx,
             ))
             .child(
@@ -241,7 +241,7 @@ impl Shell {
             .gap_4()
             .child(self.auth_heading(
                 "Back up your recovery phrase",
-                "Write these 12 words down and store them offline. Anyone with them controls your funds — Deckard can't recover them for you.",
+                "Write these 12 words down and store them offline. Anyone with them controls your funds, and Deckard can't recover them for you.",
                 cx,
             ))
             .child(grid)
@@ -311,18 +311,10 @@ impl Shell {
                 "Deckard found a wallet stored without encryption from an earlier build. Set a passphrase to encrypt it now.",
                 cx,
             ))
-            .child(
-                div()
-                    .w_full()
-                    .px_3()
-                    .py_2()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(danger)
-                    .text_xs()
-                    .text_color(danger)
-                    .child("This key was previously in plaintext on disk. For full safety, create a fresh wallet afterward and move your funds."),
-            )
+            .child(crate::widgets::error_line(
+                danger,
+                "This key was previously in plaintext on disk. For full safety, create a fresh wallet afterward and move your funds.",
+            ))
             .child(Input::new(&self.pass_input).w_full())
             .child(self.error_line(cx))
             .child(
@@ -402,18 +394,17 @@ impl Shell {
                 div()
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .child("Touch ID unlock — available after the signed build (Phase 2)"),
+                    .child("Touch ID unlock: available after the signed build (Phase 2)"),
             )
     }
 
     /// A one-line error, or nothing.
     fn error_line(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        div().children(self.auth_error.as_ref().map(|e| {
-            div()
-                .text_sm()
-                .text_color(theme.danger)
-                .child(format!("⚠ {e}"))
-        }))
+        let danger = cx.theme().danger;
+        div().children(
+            self.auth_error
+                .as_ref()
+                .map(|e| crate::widgets::error_line(danger, e.clone())),
+        )
     }
 }

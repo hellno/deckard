@@ -65,18 +65,10 @@ fn origin_subject(origin: ProposalOrigin) -> &'static str {
     }
 }
 
-/// Middle-truncate a long `0x…` string for a tight row (first 10 + last 6).
-fn short_mid(s: &str) -> String {
-    if s.len() >= 16 {
-        format!("{}…{}", &s[..10], &s[s.len() - 6..])
-    } else {
-        s.to_string()
-    }
-}
-
-/// A short, EIP-55-checksummed, middle-truncated address for the row + card.
+/// A short, EIP-55-checksummed address for the row + card — the canonical
+/// first-6+last-4 truncation via [`crate::widgets::short_addr`].
 fn short_address(addr: &deckard_core::Address) -> String {
-    short_mid(&addr.to_checksum(None))
+    crate::widgets::short_addr(&addr.to_checksum(None))
 }
 
 /// A short tx hash for the trailing cluster (`0x6ea1b2…9f3c`) — proof the action broadcast.
@@ -272,6 +264,7 @@ impl Shell {
         let muted = theme.muted_foreground;
         let raise = theme.secondary;
         let danger = theme.danger;
+        let is_dark = theme.is_dark();
         let now = now_ms();
 
         let body = if self.activity_loading && self.activity.is_empty() {
@@ -282,11 +275,12 @@ impl Shell {
                 .children((0..3).map(|_| skeleton_row(raise)))
                 .into_any_element()
         } else if let Some(err) = self.activity_error.as_ref() {
-            div()
-                .text_sm()
-                .text_color(danger)
-                .child(format!("⚠ Can't reach the signer — {err}"))
-                .into_any_element()
+            crate::widgets::caution_line(
+                theme::amber(is_dark),
+                muted,
+                false,
+                format!("Can't reach the signer. {err}"),
+            )
         } else {
             let pending = activity_pending(&self.activity);
             let settled = activity_settled(&self.activity);
@@ -313,7 +307,7 @@ impl Shell {
                         div()
                             .text_sm()
                             .text_color(muted)
-                            .child("All clear — nothing needs you"),
+                            .child("All clear. Nothing needs you"),
                     );
                 }
 
@@ -389,7 +383,7 @@ impl Shell {
                         div()
                             .text_sm()
                             .text_color(muted)
-                            .child("What Atlas and you did this session — watch it, and stop it."),
+                            .child("What Atlas and you did this session. Watch it, and stop it."),
                     ),
             )
             .child(self.activity_stop_control(cx))
@@ -420,7 +414,7 @@ impl Shell {
                 .text_sm()
                 .font_weight(FontWeight::SEMIBOLD)
                 .cursor_pointer()
-                .child("Confirm STOP — revoke & lock signing · Esc to cancel")
+                .child("Confirm STOP: revoke & lock signing · Esc to cancel")
                 .on_click(cx.listener(|this, _, _, cx| this.stop_button_clicked(cx)))
         } else {
             div()
@@ -461,7 +455,7 @@ impl Shell {
         v_flex()
             .w_full()
             .gap_1()
-            .child(section_label("Needs you", muted))
+            .child(crate::widgets::section_label("Needs you", muted))
             .child(band)
     }
 
@@ -486,7 +480,7 @@ impl Shell {
         v_flex()
             .w_full()
             .gap_1()
-            .child(section_label(label, muted))
+            .child(crate::widgets::section_label(label, muted))
             .child(band)
     }
 
@@ -1080,7 +1074,7 @@ fn stopped_banner(danger: gpui::Hsla, surface: gpui::Hsla) -> impl IntoElement {
             div()
                 .text_sm()
                 .text_color(danger)
-                .child("Stopped — key zeroized and in-flight work denied. Unlock to re-arm."),
+                .child("Stopped. Key zeroized and in-flight work denied. Unlock to re-arm."),
         )
 }
 
@@ -1134,17 +1128,6 @@ fn kv_mono_row(
 /// One loading skeleton row (DESIGN §Required states — never a spinner).
 fn skeleton_row(raise: gpui::Hsla) -> impl IntoElement {
     div().w_full().h(px(40.0)).rounded(px(6.0)).bg(raise)
-}
-
-/// A quiet uppercase section band label (DESIGN §Spacing → tiny uppercase section labels +
-/// whitespace). Shared by the NEEDS YOU band and each LOG day-group header so they read alike.
-fn section_label(label: &str, muted: gpui::Hsla) -> impl IntoElement {
-    div()
-        .pb_1()
-        .text_xs()
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(muted)
-        .child(label.to_uppercase())
 }
 
 /// The review card's heading block (H1 + muted subtitle).

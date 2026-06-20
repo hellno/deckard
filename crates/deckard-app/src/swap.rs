@@ -192,7 +192,7 @@ pub fn confirm_swap_blocking(
             // v1 swaps never auto-allow; treat an unexpected Allow as a refusal rather than signing
             // an order the daemon didn't gate behind the hold.
             return Ok(SwapConfirmOutcome::Denied {
-                reason: "the signer didn't require approval for this swap — review again".into(),
+                reason: "the signer didn't require approval for this swap. Review again.".into(),
             });
         }
         Decision::Deny { reason } => return Ok(SwapConfirmOutcome::Denied { reason }),
@@ -242,7 +242,7 @@ pub fn confirm_swap_blocking(
         if !approved {
             return Ok(SwapConfirmOutcome::Denied {
                 reason:
-                    "the token approval is still confirming on-chain — give it a few seconds, then hold to swap again"
+                    "the token approval is still confirming on-chain. Give it a few seconds, then hold to swap again."
                         .into(),
             });
         }
@@ -290,15 +290,15 @@ fn deny_from_cow(e: &anyhow::Error, context: &str) -> SwapConfirmOutcome {
     let reason = match e.downcast_ref::<CowError>() {
         Some(CowError::Api { error_type, .. }) => humanize_cow_api(error_type),
         Some(CowError::Http { status, .. }) => {
-            format!("{context} — the orderbook returned HTTP {status}")
+            format!("{context}: the orderbook returned HTTP {status}")
         }
         Some(CowError::Decode(_)) => {
-            format!("{context} — the orderbook sent an unexpected response")
+            format!("{context}: the orderbook sent an unexpected response")
         }
         Some(CowError::Transport(_)) => {
-            format!("{context} — check your network and try again")
+            format!("{context}: check your network and try again")
         }
-        None => format!("{context} — {}", short(e)),
+        None => format!("{context}: {}", short(e)),
     };
     SwapConfirmOutcome::Denied { reason }
 }
@@ -310,11 +310,11 @@ fn humanize_cow_api(error_type: &str) -> String {
     match error_type {
         // The quote/order lapsed between pricing and submit — the user can simply try again.
         "OrderExpired" | "Expired" | "EXPIRED" => {
-            "the price quote expired before the order was placed — try the swap again".into()
+            "the price quote expired before the order was placed. Try the swap again.".into()
         }
         // No solver route at any price for this pair/size.
         "NoLiquidity" => {
-            "there's no route to swap these tokens right now — try a different pair or amount"
+            "there's no route to swap these tokens right now. Try a different pair or amount."
                 .into()
         }
         // The wallet doesn't hold enough of the sell token (or hasn't approved the relayer).
@@ -323,11 +323,11 @@ fn humanize_cow_api(error_type: &str) -> String {
         }
         // The EIP-712 signature didn't validate against the submitted order (usually a stale quote).
         "InvalidSignature" => {
-            "the order signature didn't validate — re-quote and try the swap again".into()
+            "the order signature didn't validate. Re-quote and try the swap again.".into()
         }
         // Allowance shortfall the orderbook caught (we approve the exact gross, so this is rare).
         "InsufficientAllowance" => {
-            "the vault relayer isn't approved to move enough of the sell token — try again".into()
+            "the vault relayer isn't approved to move enough of the sell token. Try again.".into()
         }
         // A duplicate of an already-placed order.
         "DuplicatedOrder" => "this exact order is already on the orderbook".into(),

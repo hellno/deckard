@@ -77,7 +77,7 @@ pub static SWAP_VIEW: CommitView = CommitView {
             emphasized: true,
         },
         HonestyLine {
-            text: "You receive at least the minimum shown — a worse price never settles.",
+            text: "You receive at least the minimum shown. A worse price never settles.",
             emphasized: false,
         },
     ],
@@ -126,17 +126,6 @@ fn swap_hold_start(shell: &mut Shell, cx: &mut Context<Shell>) {
 }
 fn swap_hold_cancel(shell: &mut Shell, cx: &mut Context<Shell>) {
     shell.swap_hold_cancel(cx);
-}
-
-/// Middle-truncate a long address (`0x…`) for a tight row. A local copy matching the per-view
-/// practice in `send_view`/`shield_view`/`commit_view` (the shared one is module-private to
-/// `commit_view`; we don't widen its visibility just for this).
-fn short_mid(s: &str) -> String {
-    if s.len() >= 16 {
-        format!("{}…{}", &s[..10], &s[s.len() - 6..])
-    } else {
-        s.to_string()
-    }
 }
 
 impl Shell {
@@ -211,7 +200,7 @@ impl Shell {
                     v_flex()
                         .w_full()
                         .gap_2()
-                        .child(field_label("Amount to sell", muted))
+                        .child(crate::widgets::section_label("Amount to sell", muted))
                         .child(Input::new(&self.swap.amount).w_full()),
                 )
                 .child(sell_picker)
@@ -311,7 +300,7 @@ impl Shell {
         v_flex()
             .w_full()
             .gap_2()
-            .child(field_label(label, muted))
+            .child(crate::widgets::section_label(label, muted))
             .child(row)
     }
 
@@ -459,7 +448,7 @@ impl Shell {
         card = card
             .child(kv_text_row(
                 "Receiver",
-                short_mid(receiver.trim()),
+                crate::widgets::short_addr(receiver.trim()),
                 mono.clone(),
                 fg,
                 muted,
@@ -563,7 +552,7 @@ impl Shell {
                         .font_family(mono)
                         .text_xs()
                         .text_color(muted)
-                        .child(short_mid(&uid)),
+                        .child(crate::widgets::short_addr(&uid)),
                 )
                 .child(
                     h_flex()
@@ -591,26 +580,23 @@ impl Shell {
         )
     }
 
-    /// The swap honesty lines, in the same calm neutral surface as `commit_honesty`. A tiny local
-    /// copy reading [`SWAP_VIEW`]'s `honesty` slice (the shared `commit_honesty` is keyed by a
-    /// `&CommitView` too, but lives in `commit_view`; rather than route the bespoke review through
-    /// it we inline the identical treatment here for the two swap lines).
+    /// The swap honesty lines as inline caution lines (DESIGN §Color rule 7: a `TriangleAlert`
+    /// icon + risk text, no box, no keyline). A tiny local copy reading [`SWAP_VIEW`]'s `honesty`
+    /// slice; each line tints the icon amber (the caution register) with the emphasized line at
+    /// medium weight so the "this order is public" caution leads.
     fn commit_honesty_swap(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let fg = theme.foreground;
         let muted = theme.muted_foreground;
-        let surface = theme.secondary;
+        let amber = theme::amber(theme.is_dark());
 
-        let mut col = v_flex()
-            .w_full()
-            .gap_1p5()
-            .px_3()
-            .py_2p5()
-            .rounded_lg()
-            .bg(surface);
+        let mut col = v_flex().w_full().gap_2();
         for line in SWAP_VIEW.honesty {
-            let color = if line.emphasized { fg } else { muted };
-            col = col.child(div().text_xs().text_color(color).child(line.text));
+            col = col.child(crate::widgets::caution_line(
+                amber,
+                muted,
+                line.emphasized,
+                line.text,
+            ));
         }
         col
     }
@@ -681,17 +667,11 @@ fn kv_text_row(
         )
 }
 
-/// A tiny field label (matches `commit_view::field_label`).
-fn field_label(text: &'static str, muted: Hsla) -> impl IntoElement {
-    div().text_xs().text_color(muted).child(text)
-}
-
-/// A one-line error, in `danger` (matches `commit_view::error_line`).
+/// A one-line error, in `danger` (matches `commit_view::error_line`). Delegates to the shared
+/// `widgets::error_line` (the Lucide `TriangleAlert` icon + danger text) so every error register
+/// reads identically across surfaces.
 fn error_line(msg: &str, cx: &mut Context<Shell>) -> impl IntoElement {
-    div()
-        .text_sm()
-        .text_color(cx.theme().danger)
-        .child(format!("⚠ {msg}"))
+    crate::widgets::error_line(cx.theme().danger, msg.to_string())
 }
 
 /// Render a unix-seconds expiry as a short, human clock for the review card (e.g. `14:32 UTC`).

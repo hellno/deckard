@@ -31,7 +31,7 @@ pub static SEND_VIEW: CommitView = CommitView {
     review_label: "Review transfer",
     cancel_button_id: "send-cancel",
     compose_hint: Some(
-        "An ENS name is resolved when you review — you'll confirm the exact address before sending.",
+        "An ENS name is resolved when you review. You'll confirm the exact address before sending.",
     ),
     compose_hint_dynamic: None,
 
@@ -46,7 +46,7 @@ pub static SEND_VIEW: CommitView = CommitView {
             emphasized: true,
         },
         HonestyLine {
-            text: "Double-check the destination address — funds sent to the wrong address are lost.",
+            text: "Double-check the destination address: funds sent to the wrong address are lost.",
             emphasized: false,
         },
     ],
@@ -58,7 +58,7 @@ pub static SEND_VIEW: CommitView = CommitView {
     edit_button_id: "send-edit",
 
     // --- done ---
-    done_title: "Transfer broadcast",
+    done_title: "Transfer sent",
     done_body:
         "Your ETH is on its way. It settles after on-chain confirmation; your balance updates on the next sync.",
     copy_button_id: "send-copy-tx",

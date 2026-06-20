@@ -19,6 +19,7 @@ use crate::money::money;
 use crate::shell::{Shell, Surface};
 use crate::shell_chrome::agent_squircle;
 use crate::theme;
+use crate::widgets::{identity_mark, short_addr};
 
 /// One row in the holdings table. Carries the raw balance (not a pre-formatted
 /// string) so the amount column can render mono-for-money with dimmed decimals.
@@ -29,21 +30,6 @@ struct Holding {
     raw: U256,
     decimals: u8,
     max_frac: usize,
-}
-
-/// The primary modifier label, per platform (⌘ on macOS, "Ctrl " elsewhere).
-#[cfg(target_os = "macos")]
-const MOD: &str = "⌘";
-#[cfg(not(target_os = "macos"))]
-const MOD: &str = "Ctrl ";
-
-/// Middle-truncate an address string for a tight pill, e.g. `0xA1b2…9F3c`.
-fn short_addr(a: &str) -> String {
-    if a.len() >= 12 {
-        format!("{}…{}", &a[..6], &a[a.len() - 4..])
-    } else {
-        a.to_string()
-    }
 }
 
 /// The agent policy card's rows, built from the daemon's LIVE policy — the same fence
@@ -85,7 +71,7 @@ fn agent_policy_rows(p: &deckard_contract::Policy, masked: bool) -> Vec<(&'stati
         (
             "STOP brake",
             if p.revoked {
-                "engaged — unlock to re-arm".to_string()
+                "engaged, unlock to re-arm".to_string()
             } else {
                 "ready".to_string()
             },
@@ -102,29 +88,7 @@ impl Shell {
         let theme = cx.theme();
         let fg = theme.foreground;
         let muted = theme.muted_foreground;
-        let border = theme.border;
-        let surface = theme.secondary;
         let mono: SharedString = theme.mono_font_family.clone();
-
-        // A small bordered key-hint chip, e.g. ⌘K.
-        let chip = move |keys: String, label: String| {
-            h_flex()
-                .items_center()
-                .gap_1p5()
-                .child(
-                    div()
-                        .px_1p5()
-                        .py_0p5()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(border)
-                        .bg(surface)
-                        .text_color(fg)
-                        .text_xs()
-                        .child(keys),
-                )
-                .child(div().text_xs().text_color(muted).child(label))
-        };
 
         // --- Derive view state from the live portfolio. ---
         let addr_str = self.display_address.to_string();
@@ -198,7 +162,13 @@ impl Shell {
                                 h_flex()
                                     .items_center()
                                     .gap_3()
-                                    .child(div().size(px(28.0)).rounded(px(6.0)).bg(id_square))
+                                    .child(identity_mark(
+                                        &wallet_name,
+                                        px(28.0),
+                                        px(6.0),
+                                        id_square,
+                                        fg,
+                                    ))
                                     .child(
                                         v_flex()
                                             .gap_0p5()
@@ -276,16 +246,7 @@ impl Shell {
                     // ON this same wallet (same EOA), not a separate account, so its limits live
                     // here in the wallet cockpit. The rows are the daemon's LIVE policy (the same
                     // fence `deckard_policy_get` shows an MCP client), never invented.
-                    .child(self.render_agent_fence(cx))
-                    // Keyboard hints — the Superhuman/Linear signal.
-                    .child(
-                        h_flex()
-                            .gap_4()
-                            .pt_1()
-                            .child(chip(format!("{MOD}K"), "Command palette".into()))
-                            .child(chip(format!("{MOD}["), "Back".into()))
-                            .child(chip(format!("{MOD},"), "Settings".into())),
-                    ),
+                    .child(self.render_agent_fence(cx)),
             )
     }
 
@@ -372,7 +333,7 @@ impl Shell {
             // The fence is read-only here; it's enforced by the signer, edited via policy.json.
             .child(div().text_xs().text_color(muted).child(
                 "Atlas acts through the key-less deckard-mcp sidecar, signing from this same \
-                     wallet. The signer checks every move against this fence — edit policy.json in \
+                     wallet. The signer checks every move against this fence. Edit policy.json in \
                      the Deckard config dir to change it.",
             ))
     }
@@ -424,7 +385,10 @@ impl Shell {
                     fg,
                     muted,
                 )),
-                None => el.font_family(mono.clone()).text_color(muted).child("—"),
+                None => el
+                    .font_family(mono.clone())
+                    .text_color(muted)
+                    .child("Syncing…"),
             })
             .on_click(cx.listener(|this, _, _, cx| this.toggle_mask(cx)));
 
@@ -509,7 +473,7 @@ impl Shell {
                     )),
             )
             .child(div().text_xs().text_color(muted).child(
-                "Private is WETH-equivalent, net of the 0.25% fee, and synced over raw RPC (not independently verified).",
+                "Private balance is shown in ETH, after the 0.25% fee, and read from the network without independent verification.",
             ))
             .into_any_element()
     }
@@ -591,7 +555,7 @@ impl Shell {
                     .text_xs()
                     .text_color(muted)
                     .pt_1()
-                    .child("Only listed tokens are shown — long-tail tokens may be missing."),
+                    .child("Only listed tokens are shown. Lesser-known tokens may be missing."),
             );
         } else {
             col = col.child(
@@ -634,7 +598,7 @@ impl Shell {
                         h_flex()
                             .items_center()
                             .gap_3()
-                            .child(div().size(px(28.0)).rounded(px(6.0)).bg(id_square))
+                            .child(identity_mark("Personal", px(28.0), px(6.0), id_square, fg))
                             .child(
                                 div()
                                     .text_xl()
@@ -667,7 +631,7 @@ impl Shell {
                                         None => el
                                             .font_family(mono.clone())
                                             .text_color(muted)
-                                            .child("—"),
+                                            .child("Syncing…"),
                                     })
                                     .on_click(cx.listener(|this, _, _, cx| this.toggle_mask(cx))),
                             )
@@ -804,7 +768,7 @@ fn composition_line(
         .child(div().text_xs().map(|el| match wei {
             Some(w) => el.child(money(w, 18, 4, Some("ETH"), masked, mono, fg, muted)),
             None if syncing => el.text_color(muted).child("syncing…"),
-            None => el.text_color(muted).child("—"),
+            None => el.text_color(muted).child("Syncing…"),
         }))
 }
 
@@ -952,6 +916,6 @@ mod tests {
         assert_eq!(get("Spent today"), crate::money::MASK_BULLETS);
         assert_eq!(get("Per-transaction cap"), "0.1 ETH"); // config, not a balance
         assert_eq!(get("Recipients"), "1 allowed");
-        assert_eq!(get("STOP brake"), "engaged — unlock to re-arm");
+        assert_eq!(get("STOP brake"), "engaged, unlock to re-arm");
     }
 }

@@ -127,28 +127,6 @@ pub struct CommitView {
     pub on_hold_cancel: fn(&mut Shell, &mut Context<Shell>),
 }
 
-/// Middle-truncate a long address (`0x…` / `0zk…`) for a tight row (matches the per-view helper).
-fn short_mid(s: &str) -> String {
-    if s.len() >= 16 {
-        format!("{}…{}", &s[..10], &s[s.len() - 6..])
-    } else {
-        s.to_string()
-    }
-}
-
-/// A tiny field label (matches the per-view `field_label`).
-fn field_label(text: &'static str, muted: Hsla) -> impl IntoElement {
-    div().text_xs().text_color(muted).child(text)
-}
-
-/// A one-line error, in `danger` (matches the per-view `error_line`).
-fn error_line(msg: &str, cx: &mut Context<Shell>) -> impl IntoElement {
-    div()
-        .text_sm()
-        .text_color(cx.theme().danger)
-        .child(format!("⚠ {msg}"))
-}
-
 impl Shell {
     /// Dispatch to the active commit state: done (broadcast) → review (proposed) → compose.
     /// Reads the surface's flow via `view.flow`. The render arms below are byte-identical to the
@@ -181,6 +159,7 @@ impl Shell {
     ) -> impl IntoElement {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
+        let danger = theme.danger;
         let flow = (view.flow)(self);
         let busy = flow.busy;
 
@@ -209,17 +188,21 @@ impl Shell {
                     v_flex()
                         .w_full()
                         .gap_2()
-                        .child(field_label("Amount", muted))
+                        .child(crate::widgets::section_label("Amount", muted))
                         .child(Input::new(&flow.amount).w_full()),
                 )
                 .child(
                     v_flex()
                         .w_full()
                         .gap_2()
-                        .child(field_label(view.recipient_label, muted))
+                        .child(crate::widgets::section_label(view.recipient_label, muted))
                         .child(Input::new(&flow.recipient).w_full()),
                 )
-                .children(flow.error.as_ref().map(|e| error_line(e, cx)))
+                .children(
+                    flow.error
+                        .as_ref()
+                        .map(|e| crate::widgets::error_line(danger, e.clone())),
+                )
                 .child(
                     h_flex()
                         .w_full()
@@ -260,6 +243,7 @@ impl Shell {
         let muted = theme.muted_foreground;
         let border = theme.border;
         let surface = theme.secondary;
+        let danger = theme.danger;
         let mono = theme.mono_font_family.clone();
         let flow = (view.flow)(self);
 
@@ -287,7 +271,7 @@ impl Shell {
                             .font_family(mono.clone())
                             .text_sm()
                             .text_color(fg)
-                            .child(short_mid(recipient.trim())),
+                            .child(crate::widgets::short_addr(recipient.trim())),
                     ),
             );
         for row in view.extra_rows {
@@ -308,7 +292,11 @@ impl Shell {
                 .child(self.commit_heading(view, view.review_title, view.review_subtitle, cx))
                 .child(card)
                 .child(self.commit_honesty(view, cx))
-                .children(flow.error.as_ref().map(|e| error_line(e, cx)))
+                .children(
+                    flow.error
+                        .as_ref()
+                        .map(|e| crate::widgets::error_line(danger, e.clone())),
+                )
                 .child(self.hold_to_confirm(view, cx))
                 .child(
                     Button::new(view.edit_button_id)
@@ -373,7 +361,7 @@ impl Shell {
                         .font_family(mono)
                         .text_xs()
                         .text_color(muted)
-                        .child(short_mid(&tx)),
+                        .child(crate::widgets::short_addr(&tx)),
                 )
                 .child(
                     h_flex()
@@ -397,28 +385,31 @@ impl Shell {
         )
     }
 
-    /// The honesty lines in a calm neutral surface (no keyline). `emphasized` lines use the
-    /// foreground tone; the rest are muted — matching `send_honesty` / `shield_honesty`.
+    /// The honesty lines as caution affordances (DESIGN §Color rule 7): an inline
+    /// TriangleAlert icon + risk text, NO box and NO keyline. The irreversible /
+    /// funds-are-lost line takes the loud `danger` register; the softer cautions take
+    /// amber, with `emphasized` driving the text weight.
     fn commit_honesty(
         &self,
         view: &'static CommitView,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
-        let fg = theme.foreground;
+        let is_dark = theme.is_dark();
         let muted = theme.muted_foreground;
-        let surface = theme.secondary;
+        let danger = theme.danger;
+        let amber = crate::theme::amber(is_dark);
 
-        let mut col = v_flex()
-            .w_full()
-            .gap_1p5()
-            .px_3()
-            .py_2p5()
-            .rounded_lg()
-            .bg(surface);
+        let mut col = v_flex().w_full().gap_2();
         for line in view.honesty {
-            let color = if line.emphasized { fg } else { muted };
-            col = col.child(div().text_xs().text_color(color).child(line.text));
+            // The irreversible / funds-are-lost line is the danger register; the rest are amber.
+            let danger_line = line.text.contains("can't be undone") || line.text.contains("lost");
+            let el = if danger_line {
+                crate::widgets::error_line(danger, line.text)
+            } else {
+                crate::widgets::caution_line(amber, muted, line.emphasized, line.text)
+            };
+            col = col.child(el);
         }
         col
     }

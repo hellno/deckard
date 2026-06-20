@@ -85,7 +85,7 @@ pub static SHIELD_VIEW: CommitView = CommitView {
     edit_button_id: "shield-edit",
 
     // --- done ---
-    done_title: "Deposit broadcast",
+    done_title: "Deposit sent",
     done_body:
         "Your deposit is on its way to a private balance. It becomes spendable after on-chain confirmation and a private sync.",
     copy_button_id: "shield-copy-tx",
@@ -116,9 +116,9 @@ fn shield_compose_hint(shell: &Shell, recipient_raw: &str) -> &'static str {
     if recipient.is_empty() {
         "Enter the 0zk address that will receive the private balance."
     } else if is_own_address {
-        "Pre-filled with your own 0zk address — edit it to shield to a different recipient."
+        "Pre-filled with your own 0zk address. Edit it to shield to a different recipient."
     } else {
-        "Shielding to the 0zk address above — double-check it before you continue."
+        "Shielding to the 0zk address above. Double-check it before you continue."
     }
 }
 

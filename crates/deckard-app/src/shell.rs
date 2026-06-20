@@ -822,7 +822,7 @@ impl Shell {
             .map(|s| s.trim().to_lowercase())
             .collect();
         if entered != expected {
-            self.auth_error = Some("Those words don't match your backup — try again".into());
+            self.auth_error = Some("Those words don't match your backup. Try again.".into());
             cx.notify();
             return;
         }
@@ -1370,7 +1370,7 @@ impl Shell {
                         Ok(Err(e)) => {
                             this.portfolio_loading = false;
                             this.portfolio_error =
-                                Some(format!("couldn't resolve name — {}", short_err(e)));
+                                Some(format!("couldn't resolve name: {}", short_err(e)));
                             cx.notify();
                         }
                         Err(_) => {
@@ -1760,7 +1760,7 @@ impl Shell {
                     .recv_async()
                     .await
                     .map_err(|_| anyhow::anyhow!("network worker stopped"))?
-                    .map_err(|e| anyhow::anyhow!("couldn't resolve name — {}", short_err(e)))?,
+                    .map_err(|e| anyhow::anyhow!("couldn't resolve name: {}", short_err(e)))?,
             };
             let intent = signer::build_native_send_intent(chain_id, to, value_wei);
             // The user's foreground send from the app → App-origin (the wire requires origin).
@@ -1909,7 +1909,7 @@ impl Shell {
             self.swap_quote = None;
             self.swap_uid = None;
             self.swap.error = Some(
-                "Swap needs a supported network (Sepolia or mainnet) — switch chains first".into(),
+                "Swap needs a supported network (Sepolia or mainnet). Switch chains first.".into(),
             );
             self.open(Surface::Swap, cx);
             return;
@@ -2175,7 +2175,7 @@ impl Shell {
             self.swap_buy_token,
             self.wallet_address,
         ) else {
-            self.swap.error = Some("Review the swap again — the order details are missing".into());
+            self.swap.error = Some("Review the swap again. The order details are missing.".into());
             cx.notify();
             return;
         };
