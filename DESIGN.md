@@ -241,6 +241,30 @@ data components must define **empty / loading / error**. Defaults:
 - **Kill switch / revocation** — Pause / Revoke / Rotate always one deliberate action away on any
   agent; a master "Pause all agents" belongs in Settings (agent governance), styled deliberate.
 
+## Per-chain trust tiers
+Deckard proof-checks reads with an embedded Helios light client, and that client is Ethereum-mainnet
+only. Other chains have no light client we can embed today, so their reads come from a trusted RPC.
+The product stance: we show those chains in the one wallet, and we never let an unverified number
+wear the verified look.
+- **Tier 1 — mainnet (chain 1):** every read is Helios-proof-checked. `Verified` when the head is
+  fresh, honestly `Unsynced` when it is not. Unchanged.
+- **Tier 2 — verified L2 (future):** an OP-stack chain read through helios-opstack is sequencer-
+  trusted, not L1-derived, so it renders `Degraded`, never `Verified` (spike: issue #77).
+- **Tier 3 — raw-RPC chains (Arbitrum, Tempo, most L2s):** no light client, so reads are the
+  existing `Unsynced` / "NOT VERIFIED" state. We do not build a new badge — the existing Unsynced
+  affordance is the downgrade signal, and it must read as loudly on these chains as it does on a
+  stale mainnet head. A Tier-3 balance must never sit in the same row treatment as a Verified one.
+- **The hard rule, now cross-chain:** never read a raw RPC and call it `Verified`. A Tier-3 chain
+  simply never reaches `Verified`; `ReadStatus` already fails closed. The work is selecting the
+  right tier per chain at launch, not new trust machinery.
+- **No-native-asset chains (Tempo):** a chain with no native gas token (gas paid in a USD
+  stablecoin) breaks the native-balance hero row; eth_getBalance returns a placeholder. Deferred
+  until the portfolio model can represent "no native asset" — never render a placeholder balance
+  as real money.
+- **Agent safety is per-chain, default-deny:** the hands-free guardrail fires on every real-value
+  chain, not only mainnet (issue #76). Adding a chain must never weaken the human-approval brake by
+  omission.
+
 ## Onboarding flow
 A stepped, calm, full-bleed flow: **Welcome** (Create / Import) → **Secure** (passphrase + strength;
 Argon2id + XChaCha20-Poly1305, "we can't reset it") → **Back up** (recovery phrase, hold-to-reveal,
@@ -275,3 +299,4 @@ existing motion budget. Fonts bundle via GPUI assets. No web-font CDN.
 | 2026-06-05 | IA: Conductor sidebar tree (Projects → Wallets + Agents), 2-pane, contextual views, Splits-style wallet rows | Grounded in real Conductor + Splits product shots; gives agents a home without a separate console. |
 | 2026-06-05 | Re-grounded the whole language in REAL Linear/Conductor/Splits screenshots | First drafts were rumor-mill slop; active=brightness-lift, whitespace grouping, circular status glyphs, Lucide icons, amber <1% all come from the pixels. |
 | 2026-06-05 | Design-review pass applied | Neutral primary buttons (amber only for caution/hold/where-you-are/focus); thin threshold budget bars; agent title white (identity via glyph); no interior card grid-lines; collapsed clear-signing; desaturated identity/token colors off the amber + ok-green bands; light-mode contrast + segmented-state fixes; money $/precision/zero rules; required empty/loading/error/pending/failed/disabled states. |
+| 2026-06-20 | Multi-chain = one wallet with a loud, honest downgrade; mainnet stays the only `Verified` tier, every other chain reads NOT VERIFIED via the existing `Unsynced` tag | The moat is verified-or-honestly-labeled reads. Helios is mainnet-only and no embeddable L2 light client ships today, so the honest move is to show other chains and make the downgrade impossible to miss — not to fake verification or hide the chains. Reuse the Unsynced affordance rather than building new badges. Scope + research: `docs/research/multichain-scope.md`. |
