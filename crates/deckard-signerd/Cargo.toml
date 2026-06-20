@@ -34,6 +34,11 @@ shield = ["deckard-core/shield"]
 # the epic's "signerd has no CoW HTTP dependency" AC (reqwest itself is already in-tree via
 # alloy provider-http + helios + railgun, so a literal "0 reqwest" is impossible).
 cow-client = ["deckard-core/cow-client"]
+# SPIKE artifact (issue #71, ADR 0004): an UNWIRED reference implementation of the keystone
+# `StateAnchor` primitive (`state_anchor.rs`). DELIBERATELY NOT in `default` — enabling it compiles
+# the module + its tests and changes NO production path (`unlock`/`propose`/`execute` are untouched).
+# Pure safe Rust, zero new dependencies; the keychain backend (a new dep) is approval-gated per the ADR.
+state-anchor = []
 
 [dependencies]
 # The frozen wire contract (Intent / Decision / Policy / RPC + the shared `evaluate`).
