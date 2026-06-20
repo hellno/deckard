@@ -19,7 +19,7 @@ use crate::money::money;
 use crate::shell::{Shell, Surface};
 use crate::shell_chrome::agent_squircle;
 use crate::theme;
-use crate::widgets::{identity_mark, short_addr};
+use crate::widgets::{budget_gauge, identity_mark, section_label, short_addr};
 
 /// One row in the holdings table. Carries the raw balance (not a pre-formatted
 /// string) so the amount column can render mono-for-money with dimmed decimals.
@@ -88,6 +88,7 @@ impl Shell {
         let theme = cx.theme();
         let fg = theme.foreground;
         let muted = theme.muted_foreground;
+        let border = theme.border;
         let mono: SharedString = theme.mono_font_family.clone();
 
         // --- Derive view state from the live portfolio. ---
@@ -208,10 +209,13 @@ impl Shell {
                     .child(
                         h_flex()
                             .w_full()
-                            .gap_2()
-                            // Shield signs from YOUR wallet, so it's disabled while viewing a
-                            // watched read-only account (don't show a funds-moving action in a
-                            // someone-else's-address context).
+                            .items_center()
+                            .gap_2p5()
+                            // Shield (the privacy hero) is the ONE neutral primary CTA. Send /
+                            // Receive / Swap follow as a ghost cluster set off by a thin vertical
+                            // hairline (DESIGN §Balance hero action row). Shield signs from YOUR
+                            // wallet, so it's disabled while viewing a watched read-only account
+                            // (don't show a funds-moving action in a someone-else's-address context).
                             .child(
                                 Button::new("shield")
                                     .primary()
@@ -219,9 +223,8 @@ impl Shell {
                                     .disabled(self.viewing_watch)
                                     .on_click(cx.listener(|this, _, _, cx| this.open_shield(cx))),
                             )
-                            .child(Button::new("receive").ghost().label("Receive").on_click(
-                                cx.listener(|this, _, _, cx| this.open(Surface::Receive, cx)),
-                            ))
+                            // The divider that separates the primary CTA from the ghost cluster.
+                            .child(div().w(px(1.0)).h(px(20.0)).bg(border))
                             .child(
                                 Button::new("send")
                                     .ghost()
@@ -229,6 +232,9 @@ impl Shell {
                                     .disabled(self.viewing_watch)
                                     .on_click(cx.listener(|this, _, _, cx| this.open_send(cx))),
                             )
+                            .child(Button::new("receive").ghost().label("Receive").on_click(
+                                cx.listener(|this, _, _, cx| this.open(Surface::Receive, cx)),
+                            ))
                             .child(
                                 Button::new("swap")
                                     .ghost()
@@ -250,23 +256,27 @@ impl Shell {
             )
     }
 
-    /// The agent policy fence card ("What Atlas may do") for the wallet home. Atlas is key-less
+    /// The agent policy fence ("What Atlas may do") for the wallet home — a frameless editorial
+    /// SECTION (top hairline + whitespace, no card box), not a bordered box. Atlas is key-less
     /// automation on the SAME wallet EOA — not a separate account — so its limits belong here in
-    /// the wallet cockpit, not on a standalone page. The card shows the daemon's LIVE policy fence
+    /// the wallet cockpit, not on a standalone page. The section shows the daemon's LIVE policy fence
     /// (per-tx cap, daily budget, spent-today, recipients, auto-shield minimum, approval mode, the
     /// STOP brake) via `agent_policy_rows` — the same numbers `deckard_policy_get` returns to an
-    /// MCP client, never invented. `None` until the first `PolicyGet` lands → a quiet "loading…".
-    /// The cyan squircle is the static two-signal identity marker (no pulse).
+    /// MCP client, never invented — plus a Spent-today/Daily-budget gauge. `None` until the first
+    /// `PolicyGet` lands → a quiet "loading…". The cyan squircle is the static two-signal identity
+    /// marker (no pulse).
     fn render_agent_fence(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let fg = theme.foreground;
         let muted = theme.muted_foreground;
         let border = theme.border;
-        let surface = theme.secondary;
+        let track = theme.secondary; // bg.raise — the calm gauge track tone
+        let danger = theme.danger;
         let mono: SharedString = theme.mono_font_family.clone();
         let is_dark = theme.is_dark();
         let agent = theme::agent(is_dark);
         let agent_tint = theme::agent_tint(is_dark);
+        let amber = theme::amber(is_dark);
 
         // One policy row: label left (muted), value right (mono, primary). No per-row hairline —
         // grouping is whitespace.
@@ -287,49 +297,64 @@ impl Shell {
                 )
         };
 
+        // The Spent-today / Daily-budget gauge, computed from the live policy (never invented).
+        // `frac = spent_today / daily_cap` via the integer-safe `fraction` helper; the gauge color
+        // escalates with pressure (cyan → amber ≥90% → red ≥100%). `None` until the first fetch.
+        let eth = |wei: U256| format!("{} ETH", deckard_core::format_amount(wei, 18, 6));
+        let gauge = self.agent_policy.as_ref().map(|p| {
+            let frac = fraction(p.spent_today_wei, p.daily_cap_wei);
+            let pct = (frac.clamp(0.0, 1.0) * 100.0).round() as u32;
+            let cap_eth = deckard_core::format_amount(p.daily_cap_wei, 18, 6);
+            budget_gauge(
+                frac,
+                agent,
+                amber,
+                danger,
+                track,
+                muted,
+                format!("Spent today {}", eth(p.spent_today_wei)),
+                format!("{pct}% of {cap_eth}"),
+            )
+        });
+
+        // The agent fence is a SECTION, not a card (DESIGN editorial rule: no bordered/filled box
+        // to group content). A top hairline + margin sets it off from the holdings above; the rows
+        // are grouped by whitespace alone.
         v_flex()
             .w_full()
-            .gap_3()
+            .gap_4()
+            .mt_4()
+            .pt_5()
+            .border_t_1()
+            .border_color(border)
             // Section header: the cyan squircle (the ONLY cyan here — static identity, no pulse)
-            // + a plain title. The agent name H1 (text.primary, NEVER cyan) sits beside it.
+            // + the section label. The label tier carries the "What Atlas may do" grouping.
             .child(
                 h_flex()
                     .items_center()
                     .gap_2()
                     .child(agent_squircle(px(20.0), px(5.0), agent, agent_tint))
-                    .child(
+                    .child(section_label("What Atlas may do", muted)),
+            )
+            // The live fence rows — grouped by whitespace, no frame. Until the first fetch lands the
+            // section says so instead of showing invented numbers.
+            .child(v_flex().w_full().gap_0().map(|rows| {
+                match self.agent_policy.as_ref() {
+                    Some(p) => rows.children(
+                        agent_policy_rows(p, self.mask)
+                            .into_iter()
+                            .map(|(label, value)| policy_row(label, value)),
+                    ),
+                    None => rows.child(
                         div()
                             .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(fg)
-                            .child("What Atlas may do"),
+                            .text_color(muted)
+                            .child("Reading the signer's policy…"),
                     ),
-            )
-            // Policy card: one faint frame, no interior grid lines. The rows are the daemon's live
-            // fence; until the first fetch lands the card says so instead of showing invented numbers.
-            .child(
-                v_flex()
-                    .w_full()
-                    .gap_0()
-                    .p_4()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(border)
-                    .bg(surface)
-                    .map(|card| match self.agent_policy.as_ref() {
-                        Some(p) => card.children(
-                            agent_policy_rows(p, self.mask)
-                                .into_iter()
-                                .map(|(label, value)| policy_row(label, value)),
-                        ),
-                        None => card.child(
-                            div()
-                                .text_sm()
-                                .text_color(muted)
-                                .child("Reading the signer's policy…"),
-                        ),
-                    }),
-            )
+                }
+            }))
+            // The budget gauge sits under the policy rows when the live fence is known.
+            .children(gauge)
             // The fence is read-only here; it's enforced by the signer, edited via policy.json.
             .child(div().text_xs().text_color(muted).child(
                 "Atlas acts through the key-less deckard-mcp sidecar, signing from this same \
@@ -369,10 +394,14 @@ impl Shell {
             _ => None,
         };
 
+        // The editorial hero: the balance is the LARGEST object on screen (DESIGN
+        // §Balance hero). Oversized mono (~64px) with the integer in text.primary and
+        // the decimals + ticker dimmed — `money()` already dims by color, we only step
+        // up the size at this site. The "Syncing…" placeholder keeps a calm body size.
         let hero = div()
             .id("balance-hero")
             .cursor_pointer()
-            .text_3xl()
+            .text_size(px(64.0))
             .font_weight(FontWeight::SEMIBOLD)
             .map(|el| match total {
                 Some(wei) => el.child(money(
@@ -385,7 +414,9 @@ impl Shell {
                     fg,
                     muted,
                 )),
+                // The placeholder stays a calm body size, not the 64px hero step.
                 None => el
+                    .text_2xl()
                     .font_family(mono.clone())
                     .text_color(muted)
                     .child("Syncing…"),
@@ -532,6 +563,9 @@ impl Shell {
                 .into_any_element();
         }
 
+        // The ledger heading (DESIGN §Holdings table): a tiny muted section label, not a
+        // card title. Grouping is whitespace + the per-row hairline below.
+        col = col.child(div().pb_1().child(section_label("Holdings", muted)));
         for h in holdings {
             col = col.child(render_row(
                 theme.foreground,

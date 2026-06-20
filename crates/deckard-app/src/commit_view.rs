@@ -1,8 +1,10 @@
 //! commit_view — the generic "compose → review → done" renderer that drives every
 //! [`CommitFlow`](crate::commit_flow) surface (Send now; Shield joins in Step 2). A single
 //! [`CommitView`] descriptor (a `&'static` table of copy, button ids, the heading glyph, and a
-//! few per-surface hooks) feeds [`Shell::render_commit`], which reproduces the hand-written
-//! surface view BYTE-FOR-BYTE — same layout, same strings, same widget ids.
+//! few per-surface hooks) feeds [`Shell::render_commit`], which renders the shared compose →
+//! review → done surface. The review step is the editorial transaction-as-hero clear-signing
+//! statement (DESIGN §Clear-signing review): action label, oversized mono amount, recipient,
+//! danger/caution lines, then quiet supporting facts — driven entirely by the descriptor.
 //!
 //! The clear-signing contract is unchanged from `shield_view`/`send_view`: plain language, exact
 //! mono figures, danger early, and confirm is a hold (never a tap) — the hand-built
@@ -31,8 +33,8 @@ use crate::commit_flow::{CommitFlow, Proposal};
 use crate::money::money;
 use crate::shell::{Shell, SHIELD_HOLD};
 
-/// A single label/value money row in the review card: label left (muted), value right (mono).
-/// One signature shared by every commit surface's card.
+/// A single label/value money row in the review's quiet supporting-facts list: label left
+/// (muted), value right (mono). One signature shared by every commit surface.
 fn kv_money_row(
     label: &'static str,
     wei: U256,
@@ -53,9 +55,9 @@ fn kv_money_row(
         )
 }
 
-/// A money figure derived from the proposal's gross value, rendered as one extra review-card row
-/// (e.g. Shield's "Railgun fee" and "You'll receive (private)"). `compute` turns the gross intent
-/// value into the row's wei figure.
+/// A money figure derived from the proposal's gross value, rendered as one quiet supporting-fact
+/// row below the review hero (e.g. Shield's "Railgun fee" and "You'll receive (private)").
+/// `compute` turns the gross intent value into the row's wei figure.
 pub struct MoneyRow {
     pub label: &'static str,
     pub compute: fn(gross: U256) -> U256,
@@ -100,7 +102,8 @@ pub struct CommitView {
     // --- review ---
     pub review_title: &'static str,
     pub review_subtitle: &'static str,
-    /// Extra money rows below "Amount" / "To" (Shield's fee + net). Empty for Send.
+    /// Quiet supporting-fact money rows, demoted between hairlines below the hero (Shield's fee +
+    /// net). Empty for Send, which has nothing to demote.
     pub extra_rows: &'static [MoneyRow],
     /// The honesty lines (2 for Send, 3 for Shield), in render order.
     pub honesty: &'static [HonestyLine],
@@ -230,8 +233,12 @@ impl Shell {
         )
     }
 
-    /// Review: the clear-signing card (amount / recipient [+ extra rows]) + the honesty lines +
-    /// a deliberate hold-to-confirm. Rendered from the proposal SNAPSHOT — never the live input.
+    /// Review: the clear-signing statement (DESIGN §Clear-signing review — transaction-as-hero).
+    /// NOT a bordered card: a tiny action label, then the AMOUNT as the oversized mono hero
+    /// (dimmed decimals), then `TO` + the recipient via `truncated_address`, then the danger /
+    /// caution lines, then the quiet supporting facts (any `extra_rows`) demoted between
+    /// hairlines, then the unchanged hold-to-confirm + Edit. Rendered from the proposal SNAPSHOT —
+    /// never the live input.
     fn render_commit_review(
         &self,
         view: &'static CommitView,
@@ -241,48 +248,76 @@ impl Shell {
         let theme = cx.theme();
         let fg = theme.foreground;
         let muted = theme.muted_foreground;
+        let secondary = theme.secondary;
         let border = theme.border;
-        let surface = theme.secondary;
         let danger = theme.danger;
+        let is_dark = theme.is_dark();
         let mono = theme.mono_font_family.clone();
         let flow = (view.flow)(self);
 
         let gross = proposal.intent.value;
         let recipient = proposal.recipient.clone();
 
-        // The card: Amount, To, then any extra money rows (Shield's fee + net).
-        let mut card = v_flex()
+        // The action label noun ("Sending" / "Shielding") — derived from the descriptor's own
+        // busy verb (the `&'static` `CommitView` is shared with the off-limits swap descriptor, so
+        // a new noun field can't be added; the busy label is the descriptor's authoritative verb).
+        let noun = view.hold_label_busy.trim_end_matches('…');
+
+        // The transaction-as-hero block: a tiny action label, then the amount as the oversized
+        // mono hero (integer `fg`, decimals + ticker dimmed by color via `money`, no size step).
+        let hero = v_flex()
             .w_full()
-            .p_4()
-            .rounded_lg()
-            .border_1()
-            .border_color(border)
-            .bg(surface)
-            .child(kv_money_row("Amount", gross, mono.clone(), fg, muted))
+            .gap_1()
+            .child(crate::widgets::section_label(noun, muted))
             .child(
-                h_flex()
-                    .w_full()
-                    .justify_between()
-                    .items_center()
-                    .py_1p5()
-                    .child(div().text_sm().text_color(muted).child("To"))
-                    .child(
-                        div()
-                            .font_family(mono.clone())
-                            .text_sm()
-                            .text_color(fg)
-                            .child(crate::widgets::short_addr(recipient.trim())),
-                    ),
+                div()
+                    .text_size(px(40.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(money(
+                        gross,
+                        18,
+                        6,
+                        Some("ETH"),
+                        false,
+                        mono.clone(),
+                        fg,
+                        muted,
+                    )),
             );
-        for row in view.extra_rows {
-            card = card.child(kv_money_row(
-                row.label,
-                (row.compute)(gross),
+
+        // The recipient: a tiny `To` label + the trust-grade identicon/address (no ENS plumbed
+        // through the proposal yet, so `None`).
+        let to = v_flex()
+            .w_full()
+            .gap_2()
+            .child(crate::widgets::section_label("To", muted))
+            .child(crate::widgets::truncated_address(
+                recipient.trim(),
+                None,
                 mono.clone(),
+                crate::theme::identity_square(is_dark),
                 fg,
+                secondary,
                 muted,
             ));
-        }
+
+        // The quiet supporting facts (Shield's Railgun fee + net), demoted between two hairlines.
+        // Empty for a public send, where there is nothing to demote.
+        let facts = (!view.extra_rows.is_empty()).then(|| {
+            let mut col = v_flex()
+                .w_full()
+                .child(div().w_full().h(px(1.0)).bg(border));
+            for row in view.extra_rows {
+                col = col.child(kv_money_row(
+                    row.label,
+                    (row.compute)(gross),
+                    mono.clone(),
+                    fg,
+                    muted,
+                ));
+            }
+            col.child(div().w_full().h(px(1.0)).bg(border))
+        });
 
         self.commit_shell(
             view,
@@ -290,13 +325,15 @@ impl Shell {
                 .w_full()
                 .gap_4()
                 .child(self.commit_heading(view, view.review_title, view.review_subtitle, cx))
-                .child(card)
+                .child(hero)
+                .child(to)
                 .child(self.commit_honesty(view, cx))
                 .children(
                     flow.error
                         .as_ref()
                         .map(|e| crate::widgets::error_line(danger, e.clone())),
                 )
+                .children(facts)
                 .child(self.hold_to_confirm(view, cx))
                 .child(
                     Button::new(view.edit_button_id)
