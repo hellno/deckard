@@ -108,11 +108,13 @@ jobs:
       - run: cargo build --locked -p deckard-app --features tray
       - run: cargo clippy --locked -p deckard-app --all-targets --features tray -- -D warnings
 
-  # Supply-chain SECURITY gate — advisories only. BLOCKING. Config: deny.toml. Every advisory the
-  # RustSec DB reports is either fixed or carries a written, justified `ignore` in deny.toml; a new,
-  # untriaged advisory fails this check and blocks the merge until a human triages it. A daily
-  # re-scan against the committed Cargo.lock runs from .github/workflows/audit.yml.
-  # Rationale: docs/AGENTIC-ENGINEERING.md §4.
+  # Supply-chain SECURITY gate — advisories only. BLOCKING on real RUSTSEC advisories. Config:
+  # deny.toml. Every advisory the RustSec DB reports is either fixed or carries a written, justified
+  # `ignore` in deny.toml; a new, untriaged advisory fails this check and blocks the merge until a
+  # human triages it. A bare crates.io *yank* is warn-level (deny.toml `yanked = "warn"`, #82) so
+  # outside-world drift can't block an unrelated PR — but a real advisory still does, here and at
+  # release. A daily re-scan against the committed Cargo.lock runs from .github/workflows/audit.yml
+  # (which also opens a tracking issue on failure). Rationale: docs/AGENTIC-ENGINEERING.md §4.
   cargo-deny-advisories:
     needs: quick
     runs-on: ubuntu-latest

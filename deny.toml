@@ -17,11 +17,18 @@ all-features = true
 
 [advisories]
 # RustSec advisory DB. Vulnerabilities and unmaintained crates are denied by default in cargo-deny
-# v2; we additionally refuse yanked crates. Add to `ignore` ONLY with a written justification.
+# v2 — a real advisory blocks PRs AND releases until it is fixed or given a justified `ignore` below.
+#
+# `yanked` is WARN, not deny (#82). A crates.io "yank" (a published version withdrawn, often for a
+# non-security reason like an accidental publish or a semver slip) is non-deterministic outside-world
+# drift: it can flip with no change on our side and was blocking UNRELATED PRs (PR #81 ate a
+# `bitcoin_hashes` yank). Warn keeps the yank visible in logs without gating any PR; a yank that is
+# also a real security pull still surfaces as a RUSTSEC advisory and still blocks. Add to `ignore`
+# ONLY with a written justification.
 #
 # Every entry below is a TRANSITIVE advisory with NO in-tree fix; removing them is tracked in #40.
 # Re-evaluate the whole list on each `just bump-gpui` / Helios / alloy bump — drop any that resolve.
-yanked = "deny"
+yanked = "warn"
 ignore = [
     # ── rustls-webpki 0.101 — TLS path-validation advisories, reachable only through the Helios
     #    light client's jsonrpsee 0.19 → rustls 0.21 stack. rustls 0.21 caps webpki at 0.101, so

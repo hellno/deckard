@@ -16,6 +16,7 @@ on:
 
 permissions:
   contents: read
+  issues: write # so a failed scan can open/refresh a tracking issue (#82)
 
 jobs:
   advisories:
@@ -25,3 +26,25 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check advisories
+      # Make the daily watch LOUD (#82): a failed scheduled scan means a new RUSTSEC advisory landed
+      # (yanks are warn-level now, so this fires on real advisories, not yanks). A red scheduled run
+      # only emails repo admins by default — easy to miss — so open a tracking issue, or comment on
+      # the existing open one, to de-dup. Uses the preinstalled `gh` CLI: no third-party action added.
+      - name: Open or refresh advisory tracking issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          title="Daily cargo-deny advisory scan is failing"
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          body=$(printf '%s\n\n%s\n\n%s' \
+            "The scheduled \`cargo deny check advisories\` run failed (a new RustSec advisory likely landed)." \
+            "Failed run: ${run_url}" \
+            "Triage in \`deny.toml\`: bump the dependency, or add a justified \`ignore\` entry. Close this issue once the daily scan is green again.")
+          existing=$(gh issue list --state open --search "${title} in:title" --json number --jq '.[0].number // empty')
+          if [ -n "${existing}" ]; then
+            gh issue comment "${existing}" --body "${body}"
+          else
+            gh issue create --title "${title}" --body "${body}"
+          fi
