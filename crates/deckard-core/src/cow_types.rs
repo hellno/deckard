@@ -116,13 +116,10 @@ pub fn build_invalidate_order_calldata(uid: &[u8; 56]) -> Bytes {
     .into()
 }
 
-/// Orderbook REST base for a chain (no HTTP here — just the URL).
+/// Orderbook REST base for a chain (no HTTP here — just the URL), read from the
+/// [chain registry](crate::chain::ChainSpec::cow_orderbook_base).
 pub fn cow_api_base(chain_id: u64) -> Option<&'static str> {
-    match chain_id {
-        1 => Some("https://api.cow.fi/mainnet"),
-        11155111 => Some("https://api.cow.fi/sepolia"),
-        _ => None,
-    }
+    crate::chain::for_chain(chain_id).and_then(|c| c.cow_orderbook_base)
 }
 
 #[cfg(test)]

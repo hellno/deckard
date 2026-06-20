@@ -1,7 +1,8 @@
 //! Daemon configuration, all environment-driven so CI/tests point at a local anvil and
 //! production points at Sepolia/mainnet by config.
 //!
-//! - `DECKARD_RPC_URL`    — JSON-RPC endpoint to broadcast through (default: the public RPC).
+//! - `DECKARD_RPC_URL`    — JSON-RPC endpoint to broadcast through (default: the chain registry's
+//!   per-chain default RPC for `DECKARD_CHAIN_ID` — never silently mainnet for a non-mainnet chain).
 //! - `DECKARD_CHAIN_ID`   — the chain the daemon signs for (default: 1 = mainnet). A
 //!   `propose` whose `intent.chain_id` differs is denied `chain_mismatch`.
 //! - `DECKARD_CONFIG_DIR` — where `vault.bin` + `policy.json` live (default: the platform
@@ -24,8 +25,8 @@ pub struct Config {
     pub socket_path: PathBuf,
     /// True when the operator explicitly disarmed the auto-approval guardrail via the override
     /// env var (documented only in THREAT-MODEL.md). Default false. DEFAULT-DENY: on every
-    /// real-value chain (any chain NOT on the exempt testnet/dev list — see
-    /// `daemon::is_testnet_or_fork`) every auto-Allow is downgraded to `NeedsApproval`, so no
+    /// real-value chain (any chain NOT a testnet/dev id — see
+    /// `deckard_core::chain::is_testnet_or_dev`) every auto-Allow is downgraded to `NeedsApproval`, so no
     /// hands-free agent spend exists THERE — a human must approve each write in the Deckard app's
     /// Approvals queue / activity feed (#60). On an exempt testnet/dev chain (the demo's Sepolia
     /// fork, the local anvil) within-cap auto-allow is deliberately hands-free, so the demo can
@@ -40,9 +41,6 @@ pub struct Config {
 impl Config {
     /// Resolve the config from the environment, applying the documented defaults.
     pub fn from_env() -> anyhow::Result<Self> {
-        let rpc_url = std::env::var("DECKARD_RPC_URL")
-            .unwrap_or_else(|_| deckard_core::DEFAULT_RPC.to_string());
-
         let chain_id = match std::env::var("DECKARD_CHAIN_ID") {
             Ok(s) => s
                 .trim()
@@ -57,6 +55,17 @@ impl Config {
             chain_id != 0,
             "DECKARD_CHAIN_ID must not be 0 (an unsigned-replayable chain id)"
         );
+
+        // Per-chain default RPC (#97), in parity with the app's `settings::effective_rpc`: an
+        // unset/empty `DECKARD_RPC_URL` resolves to THIS chain's node from the registry, never
+        // silently mainnet. Closes the silent-read/sign-wrong-chain footgun on the signing path for
+        // a standalone (non-supervised) daemon launch; the supervised path always passes the app's
+        // already-resolved per-chain URL (so its behavior is unchanged). `chain_id` is resolved
+        // first because the default depends on it.
+        let rpc_url = match std::env::var("DECKARD_RPC_URL") {
+            Ok(u) if !u.trim().is_empty() => u,
+            _ => deckard_core::chain::default_rpc(chain_id).to_string(),
+        };
 
         // An empty `DECKARD_CONFIG_DIR=` is treated as unset (parity with `deckard_core::config_dir`),
         // so it falls through to the platform dir instead of resolving the vault CWD-relative.

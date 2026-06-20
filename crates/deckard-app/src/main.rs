@@ -45,6 +45,11 @@ use shell::Shell;
 /// The display name used in the menu bar and window. Change this first when forking.
 pub const APP_NAME: &str = "Deckard";
 
+/// How long the launch chain-id pre-flight waits for the RPC's `eth_chainId`. The happy path is
+/// sub-second; this only bounds a hung/unreachable RPC, which then warns and continues rather than
+/// blocking the launch.
+const CHAIN_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 // Declare the app's actions. Each becomes a zero-sized struct you can bind a key
 // to, hang a menu item off of, and handle in a view or globally. Add your own here.
 gpui::actions!(
@@ -65,13 +70,45 @@ gpui::actions!(
 );
 
 fn main() {
+    // Load persisted preferences before the GUI comes up so the launch pre-flight can resolve the
+    // chain config (env > settings > registry default) from them.
+    let settings = Settings::load();
+
+    // Launch pre-flight: verify the RPC actually serves the chain Deckard is configured for, and
+    // REFUSE TO START on a confirmed mismatch rather than silently reading the wrong chain. This is
+    // EIP-3085's strongest clause ("reject if the declared chainId does not match the RPC's
+    // eth_chainId") and protects the EIP-155 replay guarantee. The RPC-reported id is only ever
+    // compared here, never used to pick the chain. An unreachable RPC cannot CONFIRM a mismatch, so
+    // it warns and continues (offline tolerance): a node that serves no read can serve no wrong one.
+    let chain_id = settings.effective_chain_id();
+    let rpc = settings.effective_rpc(chain_id);
+    match deckard_core::probe_rpc_chain_id(&rpc, chain_id, CHAIN_PROBE_TIMEOUT) {
+        deckard_core::ChainIdProbe::Match => {}
+        deckard_core::ChainIdProbe::Unreachable { error } => {
+            eprintln!(
+                "deckard: could not verify chain id against the RPC ({} · {error}); continuing — \
+                 an unreachable RPC serves no read, so there is no wrong-chain risk",
+                deckard_signerd::config::redact_url(&rpc),
+            );
+        }
+        deckard_core::ChainIdProbe::Mismatch { declared, reported } => {
+            eprintln!(
+                "deckard: REFUSING TO START — configured for chain {declared} but the RPC ({}) \
+                 reports chain {reported}. Point DECKARD_RPC_URL at a chain-{declared} endpoint (or \
+                 fix DECKARD_CHAIN_ID). Refusing rather than silently reading the wrong chain.",
+                deckard_signerd::config::redact_url(&rpc),
+            );
+            std::process::exit(1);
+        }
+    }
+
     // `with_assets` registers gpui-component's bundled icon SVGs + fonts so
     // `IconName::*` renders. This is the whole asset story for the UI kit.
     // `application()` lives in `gpui_platform` after Zed split gpui into core +
     // platform crates; it returns the same `gpui::Application` builder.
     gpui_platform::application()
         .with_assets(gpui_component_assets::Assets)
-        .run(|cx: &mut App| {
+        .run(move |cx: &mut App| {
             // 1. Bring up gpui-component (themes, fonts, icon assets, input system).
             gpui_component::init(cx);
 
@@ -99,8 +136,8 @@ fn main() {
             //     // is a packaging bug we want to surface loudly at startup.
             //     .expect("bundled fonts failed to register");
 
-            // 2. Load persisted preferences and install the refined theme from them.
-            let settings = Settings::load();
+            // 2. Install the refined theme from the persisted preferences (loaded in `main`
+            //    before the launch chain-id pre-flight).
             theme::install(cx, settings.theme_mode.to_gpui());
 
             // 3. Keyboard shortcuts. `secondary` = ⌘ on macOS, Ctrl on Linux /

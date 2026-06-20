@@ -547,19 +547,21 @@ impl Shell {
             AuthStep::Choose
         };
 
+        // One resolved runtime chain id (env > settings > default), threaded to the daemon
+        // launch, the shield builder, and the Railgun sync. Resolve it BEFORE the RPC so the
+        // per-chain default RPC keys off the right chain.
+        let chain_id = settings.effective_chain_id();
         // The network worker is always live (it serves the watch-only path too), but the
         // wallet portfolio isn't fetched until the vault is unlocked.
-        let current_rpc = settings.effective_rpc();
-        // One resolved runtime chain id (env > settings > default), threaded to the daemon
-        // launch, the shield builder, and the Railgun sync.
-        let chain_id = settings.effective_chain_id();
+        let current_rpc = settings.effective_rpc(chain_id);
         let eth = EthProvider::spawn(current_rpc.clone(), chain_id);
 
         // Log the resolved runtime config once (the RPC is REDACTED to scheme://host — it may
         // carry an API key). Makes "which chain / RPC / mode am I on?" answerable from the log,
         // which matters most exactly when an env override re-points the demo off mainnet.
         eprintln!(
-            "deckard: runtime — chain {chain_id} · rpc {} · verified-reads {} · fork-mode {}",
+            "deckard: runtime — chain {chain_id} ({}) · rpc {} · verified-reads {} · fork-mode {}",
+            deckard_core::network_name(chain_id).unwrap_or("unknown chain"),
             deckard_signerd::config::redact_url(&current_rpc),
             if deckard_core::verified_reads_enabled() {
                 "on"
@@ -1077,7 +1079,7 @@ impl Shell {
         }
         let client = self.signer.client();
         let chain_id = self.chain_id;
-        let rpc = self.settings.effective_rpc();
+        let rpc = self.settings.effective_rpc(chain_id);
         let epoch = self.auth_epoch;
         let task =
             cx.background_spawn(async move { client.railgun_view_grant_blocking(chain_id, 0) });
@@ -1395,7 +1397,9 @@ impl Shell {
     /// diverged endpoint; re-pointing the daemon (and forcing a re-unlock) lands with the send
     /// screen.
     pub fn respawn_provider(&mut self, cx: &mut Context<Self>) {
-        let url = self.settings.effective_rpc();
+        let url = self
+            .settings
+            .effective_rpc(self.settings.effective_chain_id());
         if url == self.current_rpc {
             return;
         }

@@ -80,13 +80,17 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// The effective RPC URL: the `DECKARD_RPC_URL` env override > the user's custom setting >
-    /// the bundled default. The env tier lets `just demo` (and the supervised daemon, which
-    /// reads the same var) point every process at the local fork without editing settings.
-    pub fn effective_rpc(&self) -> String {
+    /// The effective RPC URL: the `DECKARD_RPC_URL` env override > the user's custom setting > the
+    /// per-chain default from the [chain registry](deckard_core::chain::default_rpc). The env tier
+    /// lets `just demo` (and the supervised daemon, which reads the same var) point every process at
+    /// the local fork without editing settings. The per-chain default closes the silent-read-mainnet
+    /// footgun: with an unset RPC on a non-mainnet chain, this resolves to that chain's own node
+    /// instead of mainnet. Resolve `chain_id` first (it has no RPC dependency), then pass it here.
+    pub fn effective_rpc(&self, chain_id: u64) -> String {
         resolve_rpc(
             std::env::var("DECKARD_RPC_URL").ok().as_deref(),
             &self.rpc_url,
+            chain_id,
         )
     }
 
@@ -103,14 +107,16 @@ impl Settings {
 }
 
 /// Pure resolver for [`Settings::effective_rpc`]: env override (if non-empty) > the setting
-/// (if non-empty) > the bundled default. Split out so the precedence is unit-testable.
-pub(crate) fn resolve_rpc(env: Option<&str>, setting: &str) -> String {
+/// (if non-empty) > the per-chain default for `chain_id` from the chain registry. Split out so the
+/// precedence is unit-testable. The per-chain default is the footgun fix: an unset RPC on a
+/// non-mainnet chain resolves to that chain's node, never silently to mainnet.
+pub(crate) fn resolve_rpc(env: Option<&str>, setting: &str, chain_id: u64) -> String {
     if let Some(url) = env.map(str::trim).filter(|s| !s.is_empty()) {
         return url.to_string();
     }
     let setting = setting.trim();
     if setting.is_empty() {
-        deckard_core::DEFAULT_RPC.to_string()
+        deckard_core::chain::default_rpc(chain_id).to_string()
     } else {
         setting.to_string()
     }
@@ -137,12 +143,15 @@ pub(crate) fn resolve_chain_id(env: Option<&str>, setting: Option<u64>) -> u64 {
 }
 
 /// True when the app is pointed at a **local development fork** rather than a public network:
-/// the resolved RPC is a loopback address AND the chain isn't mainnet. Both conditions matter —
-/// a local mainnet archive node (loopback, chain 1) is still real mainnet data, and a remote
-/// testnet (public host, chain ≠ 1) isn't a fork. Drives the status-strip "DEMO FORK — not
-/// mainnet" caution (DESIGN: an amber alert icon + risk text inline, never a colored slab).
+/// the resolved RPC is a loopback address AND the chain isn't the verified-mainnet tier. Both
+/// conditions matter — a local mainnet archive node (loopback, chain 1) is still real mainnet data,
+/// and a remote testnet (public host, chain ≠ 1) isn't a fork. The mainnet check now reads the
+/// chain registry's verification tier (the single source of "what is mainnet"), so the label is no
+/// longer a bare `chain_id == 1` literal. Drives the status-strip "DEMO FORK — not mainnet" caution
+/// (DESIGN: an amber alert icon + risk text inline, never a colored slab).
 pub(crate) fn is_fork_mode(rpc_url: &str, chain_id: u64) -> bool {
-    chain_id != DEFAULT_CHAIN_ID && rpc_is_loopback(rpc_url)
+    deckard_core::chain::verification(chain_id) != deckard_core::Verification::Mainnet
+        && rpc_is_loopback(rpc_url)
 }
 
 /// Whether an RPC URL points at the local loopback interface (a local anvil fork lives at
@@ -212,21 +221,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rpc_resolution_prefers_env_then_setting_then_default() {
-        let default = deckard_core::DEFAULT_RPC;
-        // Env override wins over everything, even a custom setting.
+    fn rpc_resolution_prefers_env_then_setting_then_per_chain_default() {
+        let mainnet_default = deckard_core::DEFAULT_RPC;
+        // Env override wins over everything, even a custom setting (chain id is irrelevant here).
         assert_eq!(
-            resolve_rpc(Some("http://127.0.0.1:8545"), "https://my.rpc"),
+            resolve_rpc(
+                Some("http://127.0.0.1:8545"),
+                "https://my.rpc",
+                DEFAULT_CHAIN_ID
+            ),
             "http://127.0.0.1:8545"
         );
         // Blank/whitespace env is ignored → the setting is used.
-        assert_eq!(resolve_rpc(Some("   "), "https://my.rpc"), "https://my.rpc");
-        assert_eq!(resolve_rpc(None, "https://my.rpc"), "https://my.rpc");
-        // Neither env nor setting → the bundled default.
-        assert_eq!(resolve_rpc(None, ""), default);
-        assert_eq!(resolve_rpc(Some(""), "  "), default);
+        assert_eq!(
+            resolve_rpc(Some("   "), "https://my.rpc", DEFAULT_CHAIN_ID),
+            "https://my.rpc"
+        );
+        assert_eq!(
+            resolve_rpc(None, "https://my.rpc", DEFAULT_CHAIN_ID),
+            "https://my.rpc"
+        );
+        // Neither env nor setting → the PER-CHAIN default. Mainnet → the bundled mainnet default.
+        assert_eq!(resolve_rpc(None, "", DEFAULT_CHAIN_ID), mainnet_default);
+        assert_eq!(
+            resolve_rpc(Some(""), "  ", DEFAULT_CHAIN_ID),
+            mainnet_default
+        );
+        // Footgun fix: an unset RPC on a non-mainnet chain resolves to THAT chain, not mainnet.
+        let sepolia_default = resolve_rpc(None, "", 11_155_111);
+        assert_ne!(sepolia_default, mainnet_default);
+        assert!(sepolia_default.contains("sepolia"));
         // Trimmed.
-        assert_eq!(resolve_rpc(Some(" https://x "), ""), "https://x");
+        assert_eq!(
+            resolve_rpc(Some(" https://x "), "", DEFAULT_CHAIN_ID),
+            "https://x"
+        );
     }
 
     #[test]

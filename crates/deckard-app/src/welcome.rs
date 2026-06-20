@@ -139,14 +139,21 @@ impl Shell {
         // (dimmed decimals) rather than a single-color string.
         let mut holdings: Vec<Holding> = Vec::new();
         if let Some(p) = &self.portfolio {
-            holdings.push(Holding {
-                mark: "Ξ".into(),
-                name: "Ethereum".into(),
-                symbol: "ETH".into(),
-                raw: p.native_wei,
-                decimals: 18,
-                max_frac: 4,
-            });
+            // The native-asset hero row is sourced from the chain registry (glyph / name / ticker /
+            // decimals), not hardcoded — so mainnet + Sepolia render the same `Ξ` / Ethereum / ETH
+            // row as before, and a chain with no native gas token (e.g. Tempo) shows no hero row.
+            if let Some(native) =
+                deckard_core::for_chain(self.chain_id()).and_then(|c| c.native_asset)
+            {
+                holdings.push(Holding {
+                    mark: native.mark.into(),
+                    name: native.name.into(),
+                    symbol: native.symbol.into(),
+                    raw: p.native_wei,
+                    decimals: native.decimals,
+                    max_frac: 4,
+                });
+            }
             for t in &p.tokens {
                 let frac = if t.decimals <= 6 { 2 } else { 4 };
                 let mark = t.symbol.chars().next().unwrap_or('•').to_string();
