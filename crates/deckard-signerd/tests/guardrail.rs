@@ -1,11 +1,13 @@
-//! The chain-1 (mainnet) guardrail: while the daemon signs for chain 1 and the operator has
-//! NOT set the override env var, EVERY auto-Allow is downgraded to `NeedsApproval` — so no
-//! prompt-injected client can move mainnet funds hands-free within the caps. On any other
-//! chain (and with the override set) behavior is unchanged.
+//! The auto-approval guardrail (DEFAULT-DENY): while the daemon signs for any real-value chain
+//! — every chain EXCEPT the explicit exempt testnet/dev allowlist (Sepolia 11155111, anvil
+//! 31337) — and the operator has NOT set the override env var, EVERY auto-Allow is downgraded to
+//! `NeedsApproval`, so no prompt-injected client can move real funds hands-free within the caps.
+//! On an exempt testnet/dev chain (and with the override set) within-cap auto-allow is hands-free
+//! by design, so the demo can run. An UNKNOWN chain-id is treated as real-value → guarded (fail safe).
 //!
-//! Full matrix: `ApprovalMode × chain × override`, plus the resolve path (the app's
-//! hold-to-confirm is the human approval that re-enables execution) and the hygiene rule
-//! that the override env var's NAME never appears in any client-visible string.
+//! Full matrix: `ApprovalMode × chain × override`, plus the resolve + execute paths (the app's
+//! hold-to-confirm is the human approval that re-enables execution) and the hygiene rule that the
+//! override env var's NAME never appears in any client-visible string.
 
 mod common;
 
@@ -23,6 +25,11 @@ use common::*;
 const DUMMY_RPC: &str = "http://127.0.0.1:1";
 const PER_TX_CAP: u64 = 50_000_000_000_000_000; // 0.05 ETH
 const SEPOLIA: u64 = 11_155_111;
+/// Base mainnet — a real-value, NON-mainnet chain. The whole point of #76: the guardrail must
+/// fire here too, not just on chain 1.
+const BASE: u64 = 8453;
+/// An arbitrary chain id the daemon has never heard of — must be treated as real-value (fail safe).
+const UNKNOWN_CHAIN: u64 = 999_999;
 
 /// The name of the override env var, assembled so this test file can assert it never leaks
 /// without itself being a grep-able instruction for an agent reading test output.
@@ -88,41 +95,61 @@ fn is_needs_approval(d: &Decision) -> bool {
     matches!(d, Decision::NeedsApproval { .. })
 }
 
-#[tokio::test]
-async fn matrix_chain1_without_override_kills_every_auto_allow() {
-    // chain 1, override OFF: no decision may be a bare Allow, in ANY approval mode.
+/// The core safety property, parameterized by chain: on a real-value / unknown `chain` with the
+/// override OFF, NO decision may be a bare `Allow` in ANY approval mode — within-cap downgrades to
+/// `NeedsApproval`; over-cap stays a `Deny` under `Never` (the guardrail only downgrades Allows, it
+/// never upgrades a Deny).
+async fn assert_guardrail_kills_auto_allow(chain: u64) {
     for mode in [
         ApprovalMode::Never,
         ApprovalMode::OverCap,
         ApprovalMode::Always,
     ] {
         let label = format!("{mode:?}");
-        let (within, over) = classify(mode, 1, false).await;
+        let (within, over) = classify(mode, chain, false).await;
         assert!(
             is_needs_approval(&within),
-            "{label}: within-cap on chain 1 must be NeedsApproval, got {within:?}"
+            "{label}: within-cap on chain {chain} must be NeedsApproval, got {within:?}"
         );
         match label.as_str() {
-            // Never raises no card: over-cap stays a deny (the guardrail only downgrades
-            // Allows, it never upgrades a Deny).
             "Never" => assert_eq!(
                 over,
                 Decision::Deny {
                     reason: "over_cap".into()
                 },
-                "Never/over-cap must stay Deny"
+                "Never/over-cap must stay Deny on chain {chain}"
             ),
             _ => assert!(
                 is_needs_approval(&over),
-                "{label}: over-cap on chain 1 must be NeedsApproval, got {over:?}"
+                "{label}: over-cap on chain {chain} must be NeedsApproval, got {over:?}"
             ),
         }
     }
 }
 
 #[tokio::test]
-async fn matrix_other_chains_unchanged() {
-    // Sepolia (the demo chain): classification is exactly the pre-guardrail behavior.
+async fn matrix_chain1_without_override_kills_every_auto_allow() {
+    // Mainnet (chain 1): the original guardrail behavior — unchanged.
+    assert_guardrail_kills_auto_allow(1).await;
+}
+
+#[tokio::test]
+async fn matrix_real_nonmainnet_chain_kills_auto_allow() {
+    // #76 acceptance pin: a real-value NON-mainnet chain (Base 8453) must be guarded exactly
+    // like mainnet — within-cap auto-Allow → NeedsApproval, no hands-free spend.
+    assert_guardrail_kills_auto_allow(BASE).await;
+}
+
+#[tokio::test]
+async fn matrix_unknown_chain_id_fails_safe() {
+    // An id the daemon has never heard of is treated as real-value → guarded (fail safe).
+    assert_guardrail_kills_auto_allow(UNKNOWN_CHAIN).await;
+}
+
+#[tokio::test]
+async fn matrix_exempt_testnet_chain_stays_hands_free() {
+    // Sepolia (the demo chain, an EXEMPT testnet id): within-cap auto-allow is hands-free by
+    // design — classification is exactly the pre-guardrail behavior, so the demo still runs.
     let (within, over) = classify(ApprovalMode::OverCap, SEPOLIA, false).await;
     assert_eq!(within, Decision::Allow);
     assert!(is_needs_approval(&over));
@@ -141,14 +168,58 @@ async fn matrix_other_chains_unchanged() {
 }
 
 #[tokio::test]
-async fn matrix_override_restores_chain1_auto_allow() {
-    // chain 1 + override: behaves like any other chain (the operator took the wheel).
-    let (within, over) = classify(ApprovalMode::OverCap, 1, true).await;
-    assert_eq!(within, Decision::Allow);
-    assert!(is_needs_approval(&over));
+async fn matrix_override_restores_auto_allow() {
+    // override set: the operator took the wheel, so a guarded chain behaves like an exempt one
+    // (within-cap auto-allows again). Pin it on BOTH mainnet (1) and a real L2 (Base 8453) — the
+    // override now disarms the guardrail on ANY real-value chain, not just mainnet.
+    for chain in [1u64, BASE] {
+        let (within, over) = classify(ApprovalMode::OverCap, chain, true).await;
+        assert_eq!(
+            within,
+            Decision::Allow,
+            "override should auto-allow on chain {chain}"
+        );
+        assert!(
+            is_needs_approval(&over),
+            "over-cap still needs approval on chain {chain}"
+        );
 
-    let (within, _) = classify(ApprovalMode::Never, 1, true).await;
-    assert_eq!(within, Decision::Allow);
+        let (within, _) = classify(ApprovalMode::Never, chain, true).await;
+        assert_eq!(
+            within,
+            Decision::Allow,
+            "override+Never auto-allows on chain {chain}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn guardrail_blocks_execute_on_real_chain() {
+    // #76 exec-level pin: on a real-value NON-mainnet chain (Base 8453), a within-cap agent
+    // propose downgrades to NeedsApproval AND `execute` is refused at the approval gate
+    // (`not_approved`) BEFORE any human resolve — the brake actually blocks the broadcast, not
+    // just the classification label.
+    let dir = TempDir::new("guardrail-base-exec");
+    let (_wallet, to) = seal_account0(dir.path());
+    write_policy(dir.path(), ApprovalMode::OverCap);
+    let var = override_var();
+    let d = spawn_daemon(dir.path(), DUMMY_RPC, BASE, &[(var.as_str(), "0")]);
+    let client = SignerClient::new(d.socket_path.clone());
+    client.unlock(PASS).await.unwrap();
+
+    let intent = send(BASE, to, 1_000); // within cap — would auto-allow but for the guardrail
+    let id = match client
+        .propose(&intent, ProposalOrigin::Agent)
+        .await
+        .unwrap()
+    {
+        Decision::NeedsApproval { request_id } => request_id,
+        other => panic!("within-cap on Base must downgrade to NeedsApproval, got {other:?}"),
+    };
+    match client.execute(id).await.unwrap() {
+        ExecuteResult::Denied { reason } => assert_eq!(reason, "not_approved"),
+        other => panic!("execute on Base must be refused at the approval gate, got {other:?}"),
+    }
 }
 
 #[tokio::test]

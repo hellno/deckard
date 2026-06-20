@@ -1684,7 +1684,7 @@ impl Shell {
                     needs_resolve: false,
                 });
             }
-            // NeedsApproval (over-cap, or the daemon's mainnet guardrail): the review card +
+            // NeedsApproval (over-cap, or the daemon's auto-approval guardrail): the review card +
             // hold-to-confirm ARE the human approval surface — the hold resolves the pending
             // record, then executes.
             Ok((intent, recipient, Decision::NeedsApproval { request_id })) => {

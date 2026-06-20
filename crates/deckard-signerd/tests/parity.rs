@@ -8,11 +8,11 @@
 //! don't fire and both sides reduce to `evaluate` — exactly the apples-to-apples parity
 //! contract.
 //!
-//! Explicit carve-out: the daemon's chain-1 guardrail (auto-Allow → `NeedsApproval` on
-//! mainnet, `tests/guardrail.rs`) is a PROCESS-level check on daemon state (the configured
-//! chain id and the operator override), exactly like `locked` — it lives outside `evaluate`
-//! by design, so the mock is not expected to mirror it. These vectors use chain 31337,
-//! where it never fires.
+//! Explicit carve-out: the daemon's auto-approval guardrail (auto-Allow → `NeedsApproval` on any
+//! real-value chain — every chain except the exempt testnet/dev allowlist — `tests/guardrail.rs`)
+//! is a PROCESS-level check on daemon state (the configured chain id and the operator override),
+//! exactly like `locked` — it lives outside `evaluate` by design, so the mock is not expected to
+//! mirror it. These vectors use chain 31337 (an exempt id), where it never fires.
 
 use alloy_primitives::{Address, Bytes, B256, U256};
 use deckard_contract::{

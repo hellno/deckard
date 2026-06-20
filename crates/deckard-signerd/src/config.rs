@@ -9,9 +9,9 @@
 //! - `DECKARD_SOCKET_PATH`— explicit UDS path (default: the per-uid runtime path). Tests +
 //!   the app set this so both ends agree.
 //!
-//! One more env var exists (the mainnet-guardrail override). It is deliberately NOT named in
-//! this doc comment, in any reason string, or in any client-visible text — it is documented
-//! exactly once, in THREAT-MODEL.md. See [`Config::mainnet_override`].
+//! One more env var exists (the auto-approval-guardrail override). It is deliberately NOT named
+//! in this doc comment, in any reason string, or in any client-visible text — it is documented
+//! exactly once, in THREAT-MODEL.md. See [`Config::autonomy_override`].
 
 use std::path::PathBuf;
 
@@ -22,16 +22,19 @@ pub struct Config {
     pub chain_id: u64,
     pub config_dir: PathBuf,
     pub socket_path: PathBuf,
-    /// True when the operator explicitly disarmed the chain-1 guardrail via the override
-    /// env var (documented only in THREAT-MODEL.md). Default false: on `chain_id == 1`
-    /// (mainnet) every auto-Allow is downgraded to `NeedsApproval`, so no hands-free agent
-    /// spend exists THERE — a human must approve each write in the Deckard app's Approvals
-    /// queue / activity feed (#60). Off mainnet (a fork/testnet) within-cap auto-allow is
-    /// deliberately hands-free, so the demo can run and be watched-and-stopped; the limits are
-    /// software-enforced, not chain-enforced (ADR-0002, THREAT-MODEL.md). The variable's NAME
-    /// must never be echoed into a reason string or tool response — a guardrail with printed
-    /// instructions is a speed bump, not a control.
-    pub mainnet_override: bool,
+    /// True when the operator explicitly disarmed the auto-approval guardrail via the override
+    /// env var (documented only in THREAT-MODEL.md). Default false. DEFAULT-DENY: on every
+    /// real-value chain (any chain NOT on the exempt testnet/dev list — see
+    /// `daemon::is_testnet_or_fork`) every auto-Allow is downgraded to `NeedsApproval`, so no
+    /// hands-free agent spend exists THERE — a human must approve each write in the Deckard app's
+    /// Approvals queue / activity feed (#60). On an exempt testnet/dev chain (the demo's Sepolia
+    /// fork, the local anvil) within-cap auto-allow is deliberately hands-free, so the demo can
+    /// run and be watched-and-stopped; the limits are software-enforced, not chain-enforced
+    /// (ADR-0002, THREAT-MODEL.md). The override now disarms the guardrail on ANY chain, not just
+    /// mainnet — its env-var NAME is unchanged for back-compat but is documented (only in
+    /// THREAT-MODEL.md) to mean exactly that. The NAME must never be echoed into a reason string
+    /// or tool response — a guardrail with printed disable-instructions is a speed bump, not a control.
+    pub autonomy_override: bool,
 }
 
 impl Config {
@@ -68,7 +71,10 @@ impl Config {
             None => crate::socket::default_socket_path(),
         };
 
-        let mainnet_override = std::env::var("DECKARD_I_KNOW_THIS_IS_MAINNET")
+        // The autonomy override (disarms the auto-approval guardrail on ANY real-value chain).
+        // Env-var NAME kept for back-compat; its broadened meaning is documented only in
+        // THREAT-MODEL.md. Never echo this name into a client-visible string.
+        let autonomy_override = std::env::var("DECKARD_I_KNOW_THIS_IS_MAINNET")
             .map(|v| v.trim() == "1")
             .unwrap_or(false);
 
@@ -77,7 +83,7 @@ impl Config {
             chain_id,
             config_dir,
             socket_path,
-            mainnet_override,
+            autonomy_override,
         })
     }
 

@@ -12,7 +12,8 @@ trustless by construction, open source.
 
 **The falsifiable claim:** *a prompt-injected agent cannot move your funds* — every write is
 policy-gated inside a **separate signer process** that holds the key (the agent surface is
-key-less), and on **mainnet every auto-allow is downgraded to an in-app human approval**.
+key-less), and on **every real-value chain every auto-allow is downgraded to an in-app human
+approval** (hands-free runs only on explicit testnet/dev chains, for the demo).
 That is the whole design; if you can cross a boundary it claims, that's a vulnerability — see
 [`THREAT-MODEL.md`](THREAT-MODEL.md) and [`SECURITY.md`](SECURITY.md).
 
@@ -117,7 +118,7 @@ cargo build -p deckard-mcp               # one-time: builds ./target/debug/decka
 ```
 
 > The demo policy caps per-tx at **0.1 ETH**; a shield **within** cap auto-allows on the Sepolia
-> fork (the mainnet guardrail is inactive there), an **over-cap** shield returns `NeedsApproval`.
+> fork (the guardrail is inactive on exempt testnet/dev chains), an **over-cap** shield returns `NeedsApproval`.
 > Each `just demo` is a **fresh fork** — re-run `just demo-fund` and re-shield every time. Full
 > demo mechanics, the env-var table, and over-cap behavior live in
 > [`CONTRIBUTING.md`](CONTRIBUTING.md#demo--local-chain-dev-loop).
@@ -208,9 +209,9 @@ Real, and already built:
 - **Key-less agent surface** (`deckard-mcp`): the MCP process holds no key material — it only proposes
   typed intents to the daemon, which evaluates policy and signs. The `mcp.v0.1` profile excludes raw
   `propose`/`resolve` by design.
-- **Mainnet guardrail:** while the daemon signs for chain 1, every auto-allow is downgraded to an in-app
-  human approval (its override is documented in [`THREAT-MODEL.md`](THREAT-MODEL.md) only, never echoed to
-  the agent).
+- **Auto-approval guardrail:** on every real-value chain (every chain except an explicit testnet/dev
+  allowlist), every auto-allow is downgraded to an in-app human approval (its override is documented in
+  [`THREAT-MODEL.md`](THREAT-MODEL.md) only, never echoed to the agent).
 - **Helios light-client verified reads** — no third-party RPC is trusted by default.
 - **Keystore at rest** = Argon2id key derivation + an XChaCha20-Poly1305 envelope; secrets stay in `Zeroizing`.
 - `deckard-core` is `#![forbid(unsafe_code)]`; the workspace lint policy denies `todo!`, `dbg!`, and ignored

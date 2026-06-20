@@ -73,6 +73,27 @@ fn relay_adapt(chain_id: u64) -> Option<Address> {
     }
 }
 
+/// Explicitly **exempt** chain ids: public testnets and local dev / fork ids where hands-free
+/// agent spend is allowed by default (the `just demo` Sepolia fork and the `just qa` anvil
+/// vault run hands-free here). This is an allowlist of ids we trust to move no real value, not
+/// a proof — a fork could reuse a mainnet id, which is exactly why it is a fixed exempt-list,
+/// not a heuristic. Everything NOT here — mainnet (1), L2 mainnets (Base 8453, OP 10, Arbitrum
+/// 42161, …), and any UNKNOWN id — is treated as real-value, so the [`Daemon::guardrail_active`]
+/// brake stays armed. DEFAULT-DENY: a new real chain needs no code change to stay safe.
+///
+/// SAFETY: extend ONLY with testnet / local-dev ids. A mainnet or L2-mainnet id here is a
+/// fund-loss fail-open bug (pinned by `exempt_list_excludes_real_chains` in tests/guardrail.rs).
+/// (chain 0 is refused at config time, so it never reaches the predicate.)
+const TESTNET_FORK_CHAIN_IDS: &[u64] = &[
+    11_155_111, // Sepolia (and the demo's Sepolia fork, which preserves this id)
+    31_337,     // anvil / hardhat default (the `just qa` vault + most e2e suites)
+];
+
+/// Whether `chain_id` is on the exempt testnet/dev allowlist — see [`TESTNET_FORK_CHAIN_IDS`].
+pub(crate) fn is_testnet_or_fork(chain_id: u64) -> bool {
+    TESTNET_FORK_CHAIN_IDS.contains(&chain_id)
+}
+
 /// `Locked` holds no key; `Unlocked` owns the decrypted vault (dropped — and zeroized — on
 /// lock/STOP) plus its cached primary address.
 enum VaultState {
@@ -124,10 +145,10 @@ struct PendingReq {
     /// pass or an explicit `cancel_order`), not a successful execute. Keeps the feed from reading
     /// a cancelled swap as `Executed` — a cancel is the opposite of the order going through.
     cancelled: bool,
-    /// True ONLY when this record was auto-allowed hands-free at propose time (within cap, off
-    /// mainnet). A mainnet-guardrail hold and an over-cap card are both `false` (a human is in the
-    /// loop) even though neither breached a cap — so the feed can say "auto-approved within cap"
-    /// vs "you approved" HONESTLY, instead of inferring it from the (absent) breach reason.
+    /// True ONLY when this record was auto-allowed hands-free at propose time (within cap, on an
+    /// exempt testnet/dev chain). A guardrail hold and an over-cap card are both `false` (a human
+    /// is in the loop) even though neither breached a cap — so the feed can say "auto-approved
+    /// within cap" vs "you approved" HONESTLY, instead of inferring it from the (absent) breach reason.
     auto_allowed: bool,
 }
 
@@ -497,8 +518,9 @@ impl Daemon {
                 }
                 // Admitted: an allowance tx ALWAYS raises a human card (it is part of the swap,
                 // and "every swap raises an approval card"). Pass `always_needs_card = true` so it
-                // is stored `Pending` and NEVER auto-broadcast — even off mainnet, where the Send
-                // caps path would otherwise auto-allow a value-0 ContractCall hands-free.
+                // is stored `Pending` and NEVER auto-broadcast — even on an exempt testnet/dev
+                // chain, where the Send caps path would otherwise auto-allow a value-0
+                // ContractCall hands-free.
                 return self.finish_propose(intent, true, origin);
             }
         }
@@ -537,10 +559,10 @@ impl Daemon {
     ///
     /// `always_needs_card`: when `true` (the shaped-approve path) the record is stored `Pending`
     /// unconditionally — the allowance tx is part of the swap and must raise a human card, never
-    /// auto-broadcast (off mainnet the Send caps path would otherwise auto-allow a value-0
-    /// ContractCall hands-free). The shaped-approve prechecks already are its policy gate, so we
-    /// skip `evaluate` (allowlist/caps gate value transfers, not the relayer approval) and only
-    /// honour the STOP brake. When `false` (Send/Shield) the ONE shared `evaluate` (+ mainnet
+    /// auto-broadcast (on an exempt testnet/dev chain the Send caps path would otherwise auto-allow
+    /// a value-0 ContractCall hands-free). The shaped-approve prechecks already are its policy gate,
+    /// so we skip `evaluate` (allowlist/caps gate value transfers, not the relayer approval) and only
+    /// honour the STOP brake. When `false` (Send/Shield) the ONE shared `evaluate` (+ auto-approval
     /// guardrail) decides as before.
     ///
     /// `origin` is stored on the new record for the inbox display only — it never changes the
@@ -590,15 +612,16 @@ impl Daemon {
         // The shaped-approve path forces a card (see the fn doc): store `Pending` after only the
         // STOP brake check — never auto-allow an allowance tx.
         //
-        // Otherwise the ONE shared decision function decides, with the mainnet guardrail
-        // (post-`evaluate`, mock/daemon parity carve-out): on chain 1, unless the operator set
-        // the override (see `Config::mainnet_override` — its env var is documented only in
-        // THREAT-MODEL.md and must never appear in a reason), EVERY auto-Allow is downgraded to
-        // `NeedsApproval`. The default policy is `OverCap` with an empty (= any-recipient)
-        // allowlist, so without this a prompt-injected client could move real funds hands-free
-        // within the caps. A human resolver (the app's hold-to-confirm) flips it to `Allowed` via
-        // `Resolve`. Like `locked`/`chain_mismatch`, this is a process-level check the pure policy
-        // can't express — the parity contract with `MockSigner` covers `evaluate` only.
+        // Otherwise the ONE shared decision function decides, with the auto-approval guardrail
+        // (post-`evaluate`, mock/daemon parity carve-out): on every real-value chain (default-deny,
+        // i.e. any chain NOT on the exempt testnet/dev list), unless the operator set the override
+        // (see `Config::autonomy_override` — its env var is documented only in THREAT-MODEL.md and
+        // must never appear in a reason), EVERY auto-Allow is downgraded to `NeedsApproval`. The
+        // default policy is `OverCap` with an empty (= any-recipient) allowlist, so without this a
+        // prompt-injected client could move real funds hands-free within the caps. A human resolver
+        // (the app's hold-to-confirm) flips it to `Allowed` via `Resolve`. Like
+        // `locked`/`chain_mismatch`, this is a process-level check the pure policy can't express —
+        // the parity contract with `MockSigner` covers `evaluate` only.
         let status = if always_needs_card {
             if self.policy.revoked {
                 return Decision::Deny {
@@ -609,9 +632,9 @@ impl Daemon {
         } else {
             match evaluate(intent, &self.policy) {
                 deny @ Decision::Deny { .. } => return deny,
-                Decision::Allow if self.mainnet_guardrail_active() => {
+                Decision::Allow if self.guardrail_active() => {
                     eprintln!(
-                        "signerd: mainnet guardrail — auto-allow downgraded to NeedsApproval \
+                        "signerd: auto-approval guardrail — auto-allow downgraded to NeedsApproval \
                          (approve in the Deckard app)"
                     );
                     ApprovalStatus::Pending
@@ -630,7 +653,7 @@ impl Daemon {
         } else {
             breach_for(intent, &self.policy)
         };
-        // Hands-free ONLY when the genuine within-cap auto-allow stored `Allowed` (the mainnet
+        // Hands-free ONLY when the genuine within-cap auto-allow stored `Allowed` (the auto-approval
         // guardrail and over-cap both store `Pending`, the shaped-approve card forces `Pending`),
         // so a later human `Resolve` to `Allowed` never flips this true.
         let auto_allowed = status == ApprovalStatus::Allowed;
@@ -1357,11 +1380,17 @@ impl Daemon {
         }
     }
 
-    /// Whether the chain-1 guardrail is armed: the daemon signs for mainnet and the
-    /// operator has NOT set the override. While armed, no auto-Allow exists — every
-    /// within-policy write still requires a human `Resolve` (the app's hold-to-confirm).
-    fn mainnet_guardrail_active(&self) -> bool {
-        self.cfg.chain_id == 1 && !self.cfg.mainnet_override
+    /// Whether the **auto-approval guardrail** is armed for the daemon's configured chain:
+    /// while armed, no auto-Allow exists — every within-policy write still requires a human
+    /// `Resolve` (the app's hold-to-confirm), regardless of proposal origin.
+    ///
+    /// DEFAULT-DENY: armed on EVERY chain except an explicit exempt testnet/dev id
+    /// ([`is_testnet_or_fork`]), unless the operator set the autonomy override
+    /// (`autonomy_override`, documented only in THREAT-MODEL.md). An unknown chain-id is
+    /// treated as real-value → armed (fail safe). This closes the misconfigured-real-chain
+    /// fail-open: configuring a real L2 (Base/OP/…) can never silently turn the brake off.
+    fn guardrail_active(&self) -> bool {
+        !self.cfg.autonomy_override && !is_testnet_or_fork(self.cfg.chain_id)
     }
 
     /// Reset the daily spend window when the UTC day ticks over.
@@ -1502,6 +1531,32 @@ fn one_line(e: &anyhow::Error) -> String {
         .chars()
         .take(160)
         .collect()
+}
+
+#[cfg(test)]
+mod exempt_list_tests {
+    //! Regression pin for the auto-approval guardrail's exempt allowlist. The one way this
+    //! fail-open by construction is a real-value chain id sneaking onto the exempt list, so we
+    //! pin the negative: mainnet and the major L2 mainnets are NEVER exempt, and the two ids the
+    //! demo/qa harnesses depend on ARE. A future fat-finger that adds `1` (or `8453`) fails CI here.
+    use super::is_testnet_or_fork;
+
+    #[test]
+    fn exempt_list_excludes_real_chains() {
+        for real in [1u64, 8453, 10, 42161, 137, 999_999] {
+            assert!(
+                !is_testnet_or_fork(real),
+                "chain {real} must NOT be exempt — guardrail must stay armed (fail-safe)"
+            );
+        }
+    }
+
+    #[test]
+    fn exempt_list_includes_demo_and_qa_chains() {
+        // Sepolia (demo fork) + anvil/hardhat default (qa vault + e2e suites) must stay hands-free.
+        assert!(is_testnet_or_fork(11_155_111));
+        assert!(is_testnet_or_fork(31_337));
+    }
 }
 
 #[cfg(test)]

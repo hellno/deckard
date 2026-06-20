@@ -54,7 +54,7 @@ You run this with the six tools from the quickstart — read them first if you h
 >    record as-is (a pending card stays one card, an already-broadcast shield answers
 >    `already_executed`) — it can never double-shield.
 >    - `decision: "allow"` → call `deckard_execute` with the `request_id`. Report the `tx_hash`.
->    - `decision: "needs_approval"` → the amount is over a cap (or you're on mainnet). **Do not
+>    - `decision: "needs_approval"` → the amount is over a cap (or you're on a real-value chain). **Do not
 >      re-propose and do not lower the amount on your own.** Remember this `request_id` **and the
 >      balance you saw when you proposed it**. Tell the human it is waiting in the Deckard app's
 >      Activity feed — the **"Needs you"** band (⌘K → Activity, or ⌘⇧A) — for them to approve. Keep
@@ -187,7 +187,7 @@ unlocked** in the app, `just demo-fund` funded. Then:
 
 - The thinking agent stays **key-less**. You propose; the daemon signs. You never hold a key.
 - v1 limits are **software-enforced** by the policy gate + human approval. On a fork/testnet a
-  within-cap shield auto-allows hands-free so the demo can run; on mainnet the guardrail forces a
+  within-cap shield auto-allows hands-free so the demo can run; on every real-value chain the guardrail forces a
   human approval for *every* write. The limits are real but enforced by software, not by the
   chain — never tell the user a cap "cannot be exceeded."
 - Never ask for a seed phrase, private key, or passphrase — no tool accepts one.
