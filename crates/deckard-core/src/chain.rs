@@ -10,8 +10,8 @@
 //! `network_name` ← chainName, `default_rpc` ← rpcUrls[0], `explorer_url` ← blockExplorerUrls[0],
 //! [`NativeAsset`] ← nativeCurrency `{name, symbol, decimals}` (optional, so a gas-less chain like
 //! Tempo is `None`). On top of that transport descriptor we add two Deckard-specific trust axes
-//! EIP-3085 has no field for: the verified-reads tier ([`Verification`]) and the real-value
-//! guardrail classification ([`is_real_value_chain`]).
+//! EIP-3085 has no field for: the verified-reads tier ([`Verification`]) and the testnet-vs-dev
+//! guardrail classification ([`is_testnet_or_dev`]).
 //!
 //! ## Two structural invariants (not by-convention)
 //!
@@ -24,12 +24,12 @@
 //!    inert: it cannot enter the registry and no classifier here consults it.) The read path
 //!    enforces the same rule independently: `eth::ReadPath` only takes the Helios `Verified` path
 //!    when `verification(chain_id) == Mainnet`.
-//! 2. **[`is_real_value_chain`] is fail-safe.** It is the *negation of a fixed exempt allowlist*,
-//!    exposed as a free function that returns `true` (real value, guardrail armed) for any chain
-//!    id NOT explicitly exempt — including chains with no registry entry at all. It is never a
-//!    per-chain bool a caller can read as `false` off an absent spec. This mirrors the daemon's
-//!    `is_testnet_or_fork` (negated); a parity test in `deckard-signerd` pins the two equal so the
-//!    #76 guardrail can later delegate here without any behavior change.
+//! 2. **[`is_testnet_or_dev`] is fail-safe.** A small fixed allowlist names the chains where the
+//!    agent runs hands-free (public testnets + local dev nodes); the function returns `false` for
+//!    anything not on it — including chains with no registry entry — so an unknown chain is treated
+//!    as real money and the #76 guardrail stays armed. It is a free function (not a per-chain bool a
+//!    caller could misread off an absent spec), and it is the SINGLE source the daemon's guardrail
+//!    consumes directly (ADR 0003 C4: source the trust tier from this registry).
 //!
 //! Per EIP-3085's strongest security clause, the RPC's own `eth_chainId` is **only ever
 //! compared-and-rejected** ([`classify_chain_id_probe`]) against the *declared* chain id — it is
@@ -45,17 +45,14 @@ pub const SEPOLIA_CHAIN_ID: u64 = 11_155_111;
 /// anvil / hardhat default chain id (the `just qa` vault + most local e2e suites run here).
 pub const ANVIL_CHAIN_ID: u64 = 31_337;
 
-/// Chains exempt from the real-value guardrail: public testnets + local dev/fork ids where
-/// hands-free agent spend is allowed by default. This is the SINGLE source for core's real-value
-/// classification (read it through [`is_real_value_chain`], which is the API; this const is `pub`
-/// only so `deckard-signerd`'s parity test can pin its own `TESTNET_FORK_CHAIN_IDS` set-equal to it,
-/// so the two can never silently diverge and #76 can later delegate to [`is_real_value_chain`] with
-/// no behavior change).
+/// The chains where the agent runs hands-free: public testnets + local dev nodes. Read it through
+/// [`is_testnet_or_dev`] (the API); this is the SINGLE source — the daemon's guardrail consumes that
+/// function directly, so there is no second list to keep in sync.
 ///
 /// SAFETY: extend ONLY with testnet / local-dev ids. A mainnet or L2-mainnet id here is a
 /// fund-loss fail-open bug. It is an allowlist of ids we trust to move no real value, NOT a proof —
 /// a fork could reuse a mainnet id, which is exactly why it is a fixed list, not a heuristic.
-pub const EXEMPT_TESTNET_CHAIN_IDS: &[u64] = &[SEPOLIA_CHAIN_ID, ANVIL_CHAIN_ID];
+const TESTNET_OR_DEV_CHAIN_IDS: &[u64] = &[SEPOLIA_CHAIN_ID, ANVIL_CHAIN_ID];
 
 /// A chain's verified-reads trust tier (DESIGN.md "Per-chain trust tiers").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,10 +113,6 @@ pub struct ChainSpec {
     /// The curated, bundled token list for on-chain balance reads (see `tokens` module). Empty for
     /// a chain with no curated list.
     pub tokens: &'static [TokenInfo],
-    /// Whether this chain moves real value. Read through the fail-safe free function
-    /// [`is_real_value_chain`] (never off an absent spec); the field is the per-chain value the
-    /// classifier must agree with (pinned by [`tests::field_matches_fail_safe_classifier`]).
-    pub is_real_value_chain: bool,
 }
 
 /// Ethereum mainnet (chain 1). The default RPC references [`crate::eth::DEFAULT_RPC`] so the
@@ -140,11 +133,10 @@ const MAINNET: ChainSpec = ChainSpec {
     cow_orderbook_base: Some("https://api.cow.fi/mainnet"),
     railgun: true,
     tokens: DEFAULT_TOKENS,
-    is_real_value_chain: true,
 };
 
-/// Sepolia (chain 11155111) — a testnet, so NOT verified and NOT real-value. The `just demo`
-/// Sepolia fork preserves this id, so the same spec serves both.
+/// Sepolia (chain 11155111) — a testnet, so NOT verified and hands-free (testnet/dev). The `just
+/// demo` Sepolia fork preserves this id, so the same spec serves both.
 const SEPOLIA: ChainSpec = ChainSpec {
     chain_id: SEPOLIA_CHAIN_ID,
     network_name: "Sepolia",
@@ -162,13 +154,12 @@ const SEPOLIA: ChainSpec = ChainSpec {
     cow_orderbook_base: Some("https://api.cow.fi/sepolia"),
     railgun: true,
     tokens: SEPOLIA_TOKENS,
-    is_real_value_chain: false,
 };
 
-/// anvil / hardhat local dev (chain 31337). A first-class dev id the app already runs on (`just
-/// qa`, e2e suites). No curated tokens, no CoW, no Railgun deployment; native ETH so the holdings
-/// hero renders as before. Default RPC is the anvil default so an unset `DECKARD_RPC_URL` on this
-/// chain resolves to the local node rather than mainnet.
+/// anvil / hardhat local dev (chain 31337) — testnet/dev, so hands-free + NOT verified. A first-class
+/// dev id the app already runs on (`just qa`, e2e suites). No curated tokens, no CoW, no Railgun
+/// deployment; native ETH so the holdings hero renders as before. Default RPC is the anvil default so
+/// an unset `DECKARD_RPC_URL` on this chain resolves to the local node rather than mainnet.
 const ANVIL: ChainSpec = ChainSpec {
     chain_id: ANVIL_CHAIN_ID,
     network_name: "Anvil (local)",
@@ -185,7 +176,6 @@ const ANVIL: ChainSpec = ChainSpec {
     cow_orderbook_base: None,
     railgun: false,
     tokens: &[],
-    is_real_value_chain: false,
 };
 
 /// The closed registry. Adding a chain means adding an entry here and nowhere else; there is no
@@ -223,13 +213,13 @@ pub fn default_rpc(chain_id: u64) -> &'static str {
         .unwrap_or(crate::eth::DEFAULT_RPC)
 }
 
-/// Whether `chain_id` moves real value. FAIL-SAFE: every chain is real-value UNLESS it is on the
-/// fixed exempt testnet/dev allowlist ([`EXEMPT_TESTNET_CHAIN_IDS`]), so an unknown chain id (no
-/// registry entry) is treated as real value and the #76 guardrail stays armed. Mirrors (is the
-/// negation of) the daemon's `is_testnet_or_fork`; the two are pinned equal by a parity test in
-/// `deckard-signerd`.
-pub fn is_real_value_chain(chain_id: u64) -> bool {
-    !EXEMPT_TESTNET_CHAIN_IDS.contains(&chain_id)
+/// Whether `chain_id` is a public testnet or local dev node — the chains where the agent runs
+/// hands-free. FAIL-SAFE: returns `false` for anything NOT on the fixed allowlist
+/// ([`TESTNET_OR_DEV_CHAIN_IDS`]), including chains with no registry entry, so an unknown chain is
+/// treated as real money and the #76 guardrail stays armed. This is the single source the daemon's
+/// guardrail reads directly: `guardrail_active = !override && !is_testnet_or_dev(chain_id)`.
+pub fn is_testnet_or_dev(chain_id: u64) -> bool {
+    TESTNET_OR_DEV_CHAIN_IDS.contains(&chain_id)
 }
 
 /// The outcome of probing an RPC's `eth_chainId` against the *declared* chain id.
@@ -294,29 +284,20 @@ mod tests {
     }
 
     #[test]
-    fn unknown_and_exempt_chains_classify_fail_safe() {
-        // Unknown ids (incl. chain 0 and an arbitrary L2) are real-value → guardrail armed.
-        assert!(is_real_value_chain(0));
-        assert!(is_real_value_chain(999_999));
-        assert!(is_real_value_chain(8453)); // Base mainnet — not exempt, real value.
-        assert!(is_real_value_chain(MAINNET_CHAIN_ID));
-        // The exempt testnet/dev ids are the only non-real-value chains.
-        assert!(!is_real_value_chain(SEPOLIA_CHAIN_ID));
-        assert!(!is_real_value_chain(ANVIL_CHAIN_ID));
-    }
-
-    #[test]
-    fn field_matches_fail_safe_classifier() {
-        // Every registry entry's `is_real_value_chain` field agrees with the free function, so a
-        // future hand-edit of one without the other fails CI.
-        for spec in REGISTRY {
-            assert_eq!(
-                spec.is_real_value_chain,
-                is_real_value_chain(spec.chain_id),
-                "is_real_value_chain field/classifier disagree for chain {}",
-                spec.chain_id
+    fn testnet_or_dev_is_fail_safe() {
+        // The guardrail brake stays armed (NOT testnet/dev) on mainnet, every L2 mainnet, AND any
+        // unknown id — the fund-loss fail-safe. A real-value id sneaking onto the allowlist is the
+        // one way this fails open, so pin the negatives (Base 8453, OP 10, Arbitrum 42161, Polygon
+        // 137, chain 0, an arbitrary unknown).
+        for real in [MAINNET_CHAIN_ID, 8453, 10, 42161, 137, 0, 999_999] {
+            assert!(
+                !is_testnet_or_dev(real),
+                "chain {real} must NOT be testnet/dev — guardrail must stay armed (fail-safe)"
             );
         }
+        // The demo (Sepolia fork) + qa (anvil) ids are the only hands-free chains.
+        assert!(is_testnet_or_dev(SEPOLIA_CHAIN_ID));
+        assert!(is_testnet_or_dev(ANVIL_CHAIN_ID));
     }
 
     #[test]

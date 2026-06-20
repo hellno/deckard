@@ -66,10 +66,10 @@ pub mod shielded;
 pub mod tokens;
 
 pub use balances::{fetch_portfolio, format_amount, Portfolio, TokenBalance};
-// The chain capability registry: the spec types, the lookup, the fail-safe real-value classifier,
+// The chain capability registry: the spec types, the lookup, the fail-safe testnet/dev classifier,
 // and the launch-probe classifier — re-exported so the app + daemon read chains through core.
 pub use chain::{
-    classify_chain_id_probe, for_chain, is_real_value_chain, network_name, verification,
+    classify_chain_id_probe, for_chain, is_testnet_or_dev, network_name, verification,
     ChainIdProbe, ChainSpec, NativeAsset, Verification,
 };
 // CoW order machinery, re-exported so the daemon + app + MCP can build/sign/cancel orders and

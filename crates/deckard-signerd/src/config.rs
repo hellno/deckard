@@ -25,8 +25,8 @@ pub struct Config {
     pub socket_path: PathBuf,
     /// True when the operator explicitly disarmed the auto-approval guardrail via the override
     /// env var (documented only in THREAT-MODEL.md). Default false. DEFAULT-DENY: on every
-    /// real-value chain (any chain NOT on the exempt testnet/dev list — see
-    /// `daemon::is_testnet_or_fork`) every auto-Allow is downgraded to `NeedsApproval`, so no
+    /// real-value chain (any chain NOT a testnet/dev id — see
+    /// `deckard_core::chain::is_testnet_or_dev`) every auto-Allow is downgraded to `NeedsApproval`, so no
     /// hands-free agent spend exists THERE — a human must approve each write in the Deckard app's
     /// Approvals queue / activity feed (#60). On an exempt testnet/dev chain (the demo's Sepolia
     /// fork, the local anvil) within-cap auto-allow is deliberately hands-free, so the demo can
@@ -109,15 +109,6 @@ impl Config {
     /// The RPC endpoint with any embedded credentials/host elided — safe to log.
     pub fn redacted_rpc(&self) -> String {
         redact_url(&self.rpc_url)
-    }
-
-    /// Whether the daemon's configured chain moves real value, sourced from the chain capability
-    /// registry (#97). FAIL-SAFE: an unknown chain id is treated as real value. EXPOSED here for the
-    /// #76 auto-approval guardrail; the guardrail's own decision (`daemon::is_testnet_or_fork`) is
-    /// intentionally NOT changed by #97 — a parity test (`daemon::exempt_list_tests`) pins the two
-    /// classifications equal, so #76 can later delegate to this with no behavior change.
-    pub fn is_real_value_chain(&self) -> bool {
-        deckard_core::chain::is_real_value_chain(self.chain_id)
     }
 }
 

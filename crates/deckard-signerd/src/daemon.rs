@@ -73,26 +73,11 @@ fn relay_adapt(chain_id: u64) -> Option<Address> {
     }
 }
 
-/// Explicitly **exempt** chain ids: public testnets and local dev / fork ids where hands-free
-/// agent spend is allowed by default (the `just demo` Sepolia fork and the `just qa` anvil
-/// vault run hands-free here). This is an allowlist of ids we trust to move no real value, not
-/// a proof — a fork could reuse a mainnet id, which is exactly why it is a fixed exempt-list,
-/// not a heuristic. Everything NOT here — mainnet (1), L2 mainnets (Base 8453, OP 10, Arbitrum
-/// 42161, …), and any UNKNOWN id — is treated as real-value, so the [`Daemon::guardrail_active`]
-/// brake stays armed. DEFAULT-DENY: a new real chain needs no code change to stay safe.
-///
-/// SAFETY: extend ONLY with testnet / local-dev ids. A mainnet or L2-mainnet id here is a
-/// fund-loss fail-open bug (pinned by `exempt_list_excludes_real_chains` in tests/guardrail.rs).
-/// (chain 0 is refused at config time, so it never reaches the predicate.)
-const TESTNET_FORK_CHAIN_IDS: &[u64] = &[
-    11_155_111, // Sepolia (and the demo's Sepolia fork, which preserves this id)
-    31_337,     // anvil / hardhat default (the `just qa` vault + most e2e suites)
-];
-
-/// Whether `chain_id` is on the exempt testnet/dev allowlist — see [`TESTNET_FORK_CHAIN_IDS`].
-pub(crate) fn is_testnet_or_fork(chain_id: u64) -> bool {
-    TESTNET_FORK_CHAIN_IDS.contains(&chain_id)
-}
+// The exempt testnet/dev allowlist (the chains where hands-free agent spend is allowed) is the chain
+// capability registry's `deckard_core::chain::is_testnet_or_dev` — ONE source of truth (#97 / ADR
+// 0003 C4). Everything NOT on it — mainnet (1), L2 mainnets (Base 8453, OP 10, Arbitrum 42161, …),
+// and any UNKNOWN id — is real-value, so the `Daemon::guardrail_active` brake stays armed by default.
+// The classifier's safety is pinned by `guardrail_classifier_is_fail_safe` below + the core tests.
 
 /// `Locked` holds no key; `Unlocked` owns the decrypted vault (dropped — and zeroized — on
 /// lock/STOP) plus its cached primary address.
@@ -1384,13 +1369,14 @@ impl Daemon {
     /// while armed, no auto-Allow exists — every within-policy write still requires a human
     /// `Resolve` (the app's hold-to-confirm), regardless of proposal origin.
     ///
-    /// DEFAULT-DENY: armed on EVERY chain except an explicit exempt testnet/dev id
-    /// ([`is_testnet_or_fork`]), unless the operator set the autonomy override
-    /// (`autonomy_override`, documented only in THREAT-MODEL.md). An unknown chain-id is
-    /// treated as real-value → armed (fail safe). This closes the misconfigured-real-chain
-    /// fail-open: configuring a real L2 (Base/OP/…) can never silently turn the brake off.
+    /// DEFAULT-DENY: armed on EVERY chain except an explicit testnet/dev id
+    /// (`deckard_core::chain::is_testnet_or_dev`, the registry's single source — #97), unless the
+    /// operator set the autonomy override (`autonomy_override`, documented only in THREAT-MODEL.md).
+    /// An unknown chain-id is treated as real-value → armed (fail safe). This closes the
+    /// misconfigured-real-chain fail-open: configuring a real L2 (Base/OP/…) can never silently turn
+    /// the brake off.
     fn guardrail_active(&self) -> bool {
-        !self.cfg.autonomy_override && !is_testnet_or_fork(self.cfg.chain_id)
+        !self.cfg.autonomy_override && !deckard_core::chain::is_testnet_or_dev(self.cfg.chain_id)
     }
 
     /// Reset the daily spend window when the UTC day ticks over.
@@ -1535,60 +1521,29 @@ fn one_line(e: &anyhow::Error) -> String {
 
 #[cfg(test)]
 mod exempt_list_tests {
-    //! Regression pin for the auto-approval guardrail's exempt allowlist. The one way this
-    //! fail-open by construction is a real-value chain id sneaking onto the exempt list, so we
-    //! pin the negative: mainnet and the major L2 mainnets are NEVER exempt, and the two ids the
-    //! demo/qa harnesses depend on ARE. A future fat-finger that adds `1` (or `8453`) fails CI here.
-    use super::is_testnet_or_fork;
+    //! Regression pin for the auto-approval guardrail's classifier. `guardrail_active` reads
+    //! `deckard_core::chain::is_testnet_or_dev` (the registry's single source — #97); the one way
+    //! that fails open is a real-value chain id sneaking onto its allowlist, so we pin the negative
+    //! at the daemon boundary too: mainnet and the major L2 mainnets are NEVER hands-free, and the
+    //! two ids the demo/qa harnesses depend on ARE. A future fat-finger that adds `1` (or `8453`)
+    //! to the core list fails CI here (and in core's own `testnet_or_dev_is_fail_safe`).
+    use deckard_core::chain::is_testnet_or_dev;
 
     #[test]
-    fn exempt_list_excludes_real_chains() {
+    fn guardrail_classifier_excludes_real_chains() {
         for real in [1u64, 8453, 10, 42161, 137, 999_999] {
             assert!(
-                !is_testnet_or_fork(real),
-                "chain {real} must NOT be exempt — guardrail must stay armed (fail-safe)"
+                !is_testnet_or_dev(real),
+                "chain {real} must NOT be testnet/dev — guardrail must stay armed (fail-safe)"
             );
         }
     }
 
     #[test]
-    fn exempt_list_includes_demo_and_qa_chains() {
+    fn guardrail_classifier_includes_demo_and_qa_chains() {
         // Sepolia (demo fork) + anvil/hardhat default (qa vault + e2e suites) must stay hands-free.
-        assert!(is_testnet_or_fork(11_155_111));
-        assert!(is_testnet_or_fork(31_337));
-    }
-
-    /// PARITY (#97): the daemon's exempt allowlist must stay the EXACT inverse of the chain
-    /// registry's fail-safe real-value classifier (`deckard_core::chain::is_real_value_chain`),
-    /// which `Config::is_real_value_chain` exposes for the #76 guardrail. #97 deliberately does NOT
-    /// change `is_testnet_or_fork`; this pin guarantees the two never drift, so when #76 later
-    /// delegates the guardrail to the registry it is a no-op on behavior — not a silent change.
-    #[test]
-    fn exempt_list_matches_registry_real_value_classifier() {
-        for id in [0u64, 1, 11_155_111, 31_337, 8453, 10, 42161, 137, 999_999] {
-            assert_eq!(
-                is_testnet_or_fork(id),
-                !deckard_core::chain::is_real_value_chain(id),
-                "chain {id}: daemon exempt list and registry real-value classifier disagree"
-            );
-        }
-    }
-
-    /// The sampled check above can miss a divergence on an id no test lists; this pins the two
-    /// allowlists EXACTLY equal as sets. A future edit to ONE list (or a new exempt id added to
-    /// only one side) fails CI here regardless of which ids any other test happens to enumerate.
-    #[test]
-    fn exempt_list_is_set_equal_to_core_registry() {
-        let mut daemon = super::TESTNET_FORK_CHAIN_IDS.to_vec();
-        let mut core = deckard_core::chain::EXEMPT_TESTNET_CHAIN_IDS.to_vec();
-        daemon.sort_unstable();
-        daemon.dedup();
-        core.sort_unstable();
-        core.dedup();
-        assert_eq!(
-            daemon, core,
-            "daemon TESTNET_FORK_CHAIN_IDS and core EXEMPT_TESTNET_CHAIN_IDS have diverged"
-        );
+        assert!(is_testnet_or_dev(11_155_111));
+        assert!(is_testnet_or_dev(31_337));
     }
 }
 
