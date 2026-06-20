@@ -28,11 +28,6 @@ pub mod request_id;
 pub mod server;
 pub mod signing;
 pub mod socket;
-/// SPIKE reference implementation of the keystone `StateAnchor` primitive (issue #71, ADR 0004).
-/// Gated behind the off-by-default `state-anchor` feature and wired into NO production path — see
-/// the module docs. Present so `#72`/`#108` can build on a concrete interface.
-#[cfg(feature = "state-anchor")]
-pub mod state_anchor;
 pub mod supervise;
 
 pub use client::SignerClient;
