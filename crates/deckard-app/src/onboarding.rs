@@ -245,7 +245,7 @@ impl Shell {
             .items_center()
             .justify_center()
             .gap_2()
-            .flex_1()
+            .w_full()
             .py_2()
             .rounded_md()
             .border_1()
@@ -295,7 +295,10 @@ impl Shell {
                 false,
                 "Make sure nobody can see your screen before you reveal.",
             ))
-            .child(h_flex().w_full().gap_2().child(reveal_btn).child(copy_btn))
+            // Reveal is the primary affordance (own full-width row); Copy is demoted to a centered
+            // ghost action beneath it (DESIGN §Seed reveal: "Copy demoted below reveal").
+            .child(reveal_btn)
+            .child(h_flex().w_full().justify_center().child(copy_btn))
             .child(
                 Button::new("written-down")
                     .primary()
@@ -493,18 +496,20 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
+        // The locked scale (DESIGN §Typography): screen-title H1 22/600, body/subtitle 13/400 —
+        // not gpui's text_2xl (24) / text_sm (14), which ran a touch large.
         v_flex()
             .gap_2()
             .child(
                 div()
-                    .text_2xl()
+                    .text_size(px(22.0))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.foreground)
                     .child(title.to_string()),
             )
             .child(
                 div()
-                    .text_sm()
+                    .text_size(px(13.0))
                     .text_color(theme.muted_foreground)
                     .child(subtitle.to_string()),
             )
