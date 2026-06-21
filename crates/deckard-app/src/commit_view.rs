@@ -16,9 +16,10 @@
 //! a variable honesty-line list, an optional conditional compose-hint hook) so Step 2 is a pure
 //! descriptor + handler swap with no renderer changes.
 
+use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, relative, Animation, AnimationExt, ClipboardItem, Context, FontWeight, Hsla,
-    InteractiveElement, IntoElement, MouseButton, ParentElement, SharedString, Styled,
+    div, px, ClipboardItem, Context, FontWeight, Hsla, InteractiveElement, IntoElement,
+    ParentElement, SharedString, StatefulInteractiveElement, Styled,
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
@@ -31,7 +32,7 @@ use deckard_core::U256;
 
 use crate::commit_flow::{CommitFlow, Proposal};
 use crate::money::money;
-use crate::shell::{Shell, SHIELD_HOLD};
+use crate::shell::Shell;
 
 /// A single label/value money row in the review's quiet supporting-facts list: label left
 /// (muted), value right (mono). One signature shared by every commit surface.
@@ -107,11 +108,10 @@ pub struct CommitView {
     pub extra_rows: &'static [MoneyRow],
     /// The honesty lines (2 for Send, 3 for Shield), in render order.
     pub honesty: &'static [HonestyLine],
-    /// The hold-to-confirm widget + fill-animation ids, and the idle/holding/busy labels.
+    /// The key-cap confirm button's id, its idle label (the confirm verb, e.g. "Send"), and the
+    /// busy label shown while signing (e.g. "Sending…").
     pub hold_id: &'static str,
-    pub hold_fill_id: &'static str,
     pub hold_label_idle: &'static str,
-    pub hold_label_holding: &'static str,
     pub hold_label_busy: &'static str,
     pub edit_button_id: &'static str,
 
@@ -126,8 +126,9 @@ pub struct CommitView {
     pub on_edit: fn(&mut Shell, &mut Context<Shell>),
     pub on_cancel: fn(&mut Shell, &mut Context<Shell>),
     pub on_done: fn(&mut Shell, &mut Context<Shell>),
+    /// The confirm trigger (button click or ⌘↵). Routes to `confirm_send`/`shield`/`swap` via the
+    /// surface's `*_hold_start` adapter, which re-checks the surface + the arm-delay.
     pub on_hold_start: fn(&mut Shell, &mut Context<Shell>),
-    pub on_hold_cancel: fn(&mut Shell, &mut Context<Shell>),
 }
 
 impl Shell {
@@ -466,79 +467,65 @@ impl Shell {
         let theme = cx.theme();
         let fg = theme.foreground;
         let border = theme.border;
-        let surface = theme.secondary;
-        let amber_tint = crate::theme::amber_tint(theme.is_dark());
+        let fill = theme.muted; // bg.raise2 — the neutral primary fill
+        let base = theme.background;
+        let mono = theme.mono_font_family.clone();
+        let amber = crate::theme::amber(theme.is_dark());
         let flow = (view.flow)(self);
-        let holding = flow.holding;
         let busy = flow.busy;
 
         let label = if busy {
             view.hold_label_busy
-        } else if holding {
-            view.hold_label_holding
         } else {
             view.hold_label_idle
         };
 
-        let fill = if holding {
+        // A keyboard-first key-cap confirm (DESIGN.md v2 §The confirm pattern). A deliberate
+        // click — or ⌘↵ — confirms; this is NOT a hold (the press-and-hold gesture was an
+        // anti-pattern). The ⌘↵ chord plus a short arm-delay (gated in the confirm handler)
+        // keep it spam-proof. The confirm handler is `on_hold_start` (kept as the trigger slot).
+        let keycap = move |g: &'static str| {
             div()
-                .absolute()
-                .left_0()
-                .top_0()
-                .h_full()
-                .bg(amber_tint)
-                .with_animation(
-                    view.hold_fill_id,
-                    Animation::new(SHIELD_HOLD),
-                    |el, delta| el.w(relative(delta)),
-                )
-                .into_any_element()
-        } else {
-            div()
-                .absolute()
-                .left_0()
-                .top_0()
-                .h_full()
-                .w(relative(0.0))
-                .into_any_element()
+                .min_w(px(24.0))
+                .h(px(24.0))
+                .px_1()
+                .rounded(px(6.0))
+                .bg(base)
+                .border_1()
+                .border_color(amber)
+                .flex()
+                .items_center()
+                .justify_center()
+                .font_family(mono.clone())
+                .text_xs()
+                .text_color(amber)
+                .child(g)
         };
 
         div()
             .id(view.hold_id)
-            .relative()
-            .overflow_hidden()
             .w_full()
-            .h(px(44.0))
-            .rounded_md()
+            .h(px(48.0))
+            .rounded(px(10.0))
             .border_1()
             .border_color(border)
-            .bg(surface)
+            .bg(fill)
+            .flex()
+            .items_center()
+            .px_4()
             .cursor_pointer()
-            .child(fill)
             .child(
                 div()
-                    .relative()
-                    .size_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_sm()
                     .font_weight(FontWeight::SEMIBOLD)
+                    .text_sm()
                     .text_color(fg)
                     .child(label),
             )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| (view.on_hold_start)(this, cx)),
-            )
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| (view.on_hold_cancel)(this, cx)),
-            )
-            .on_mouse_up_out(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| (view.on_hold_cancel)(this, cx)),
-            )
+            .child(div().flex_1())
+            .when(!busy, |b| {
+                b.child(h_flex().gap_1().child(keycap("⌘")).child(keycap("↵")))
+            })
+            .on_click(cx.listener(|this, _, _, cx| (view.on_hold_start)(this, cx)))
     }
 
     /// The shared centered shell for every commit state (mirrors `send_shell` / `shield_shell`).

@@ -106,27 +106,6 @@ impl CommitState {
         epoch == self.review_epoch
     }
 
-    /// Begin a confirm hold. Returns `None` (a no-op) when already busy, already holding, or there
-    /// is no proposal to confirm; otherwise sets `holding`, bumps the hold epoch, and returns the
-    /// new epoch for the caller's timer to re-check. Mirrors the guard + state in
-    /// `Shell::shield_hold_start` (shell.rs:1527-1533).
-    pub fn begin_hold(&mut self) -> Option<u64> {
-        if self.busy || self.holding || self.proposal.is_none() {
-            return None;
-        }
-        self.holding = true;
-        self.hold_epoch = self.hold_epoch.wrapping_add(1);
-        Some(self.hold_epoch)
-    }
-
-    /// True when a hold timer firing for `epoch` should still complete: this hold is active, the
-    /// epoch hasn't been superseded, and a proposal is still present. Mirrors the timer-fire guard
-    /// in `shield_hold_start` (shell.rs:1541-1545) MINUS the `surface == Surface::Shield` check,
-    /// which stays in `Shell` (it depends on the live surface, not the flow state).
-    pub fn hold_still_valid(&self, epoch: u64) -> bool {
-        self.holding && self.hold_epoch == epoch && self.proposal.is_some()
-    }
-
     /// Release an in-progress hold before it completed. Returns true when a hold was actually
     /// cancelled (so the caller can `cx.notify()`), bumping the hold epoch to cancel the pending
     /// timer. Mirrors `Shell::shield_hold_cancel` (shell.rs:1557-1563).
@@ -216,67 +195,27 @@ mod tests {
     }
 
     #[test]
-    fn begin_hold_guards_match_shield_hold_start() {
-        // No proposal → no-op.
-        let mut empty = CommitState::new();
-        assert_eq!(empty.begin_hold(), None);
-        assert!(!empty.holding);
-
-        // Busy (even with a proposal) → no-op.
-        let mut busy = state_with_proposal();
-        busy.busy = true;
-        assert_eq!(busy.begin_hold(), None);
-        assert!(!busy.holding);
-
-        // Proposal present, not busy, not holding → starts the hold and returns the epoch.
-        let mut ready = state_with_proposal();
-        let held = ready.begin_hold();
-        assert!(held.is_some());
-        assert!(ready.holding);
-
-        // Already holding → no-op (a second press doesn't restart).
-        assert_eq!(ready.begin_hold(), None);
-    }
-
-    #[test]
-    fn cancelling_or_restarting_a_hold_invalidates_the_old_hold_epoch() {
+    fn cancel_hold_is_a_noop_when_nothing_is_held() {
+        // The hold gesture is retired (confirm is now ⌘↵ / a click); `cancel_hold` survives only
+        // as the leave-a-surface guard and must be a no-op when nothing is held.
         let mut s = state_with_proposal();
-        let first = s.begin_hold().expect("first hold starts");
-        assert!(s.hold_still_valid(first));
-
-        // Cancel: the old hold epoch is now stale (its pending timer would fire as a no-op).
-        assert!(s.cancel_hold());
-        assert!(!s.hold_still_valid(first));
         assert!(!s.holding);
-
-        // cancel_hold is itself a no-op once nothing is held.
         assert!(!s.cancel_hold());
-
-        // Restarting also invalidates an even older epoch: start, then start-again-after-cancel.
-        let second = s.begin_hold().expect("second hold starts");
-        assert!(s.hold_still_valid(second));
-        assert!(s.cancel_hold());
-        let third = s.begin_hold().expect("third hold starts");
-        assert!(s.hold_still_valid(third));
-        assert!(!s.hold_still_valid(second));
     }
 
     #[test]
-    fn reset_invalidates_every_pre_reset_epoch_and_clears_state() {
+    fn reset_invalidates_the_review_epoch_and_clears_state() {
         let mut s = state_with_proposal();
         let review = s.begin_review();
-        // A review sets `busy`; `finish_review` clears it on completion. A hold can only start once
-        // the review is done (begin_hold refuses while busy), so simulate that before holding.
         s.busy = false;
-        let hold = s.begin_hold().expect("hold starts");
+        s.holding = true;
         s.error = Some("boom".into());
         s.tx = Some(B256::repeat_byte(0xab));
 
         s.reset();
 
-        // Both epochs moved past their pre-reset values.
+        // The review epoch moved past its pre-reset value.
         assert!(!s.review_is_current(review));
-        assert!(!s.hold_still_valid(hold));
         // Everything transient is cleared.
         assert!(s.proposal.is_none());
         assert!(s.tx.is_none());

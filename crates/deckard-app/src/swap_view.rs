@@ -67,7 +67,7 @@ pub static SWAP_VIEW: CommitView = CommitView {
 
     // --- review (read by `commit_heading` on the review arm) ---
     review_title: "Review swap",
-    review_subtitle: "Confirm what you sell, the minimum you receive, and where it goes. Hold to swap.",
+    review_subtitle: "Confirm what you sell, the minimum you receive, and where it goes, then swap with ⌘↵.",
     // The bespoke review card builds its own token-denominated rows; the generic ETH money rows
     // don't apply.
     extra_rows: &[],
@@ -82,9 +82,7 @@ pub static SWAP_VIEW: CommitView = CommitView {
         },
     ],
     hold_id: "swap-hold",
-    hold_fill_id: "swap-fill",
-    hold_label_idle: "Hold to swap",
-    hold_label_holding: "Keep holding…",
+    hold_label_idle: "Swap",
     hold_label_busy: "Swapping…",
     edit_button_id: "swap-edit",
 
@@ -101,7 +99,6 @@ pub static SWAP_VIEW: CommitView = CommitView {
     on_cancel: open_home,
     on_done: open_home,
     on_hold_start: swap_hold_start,
-    on_hold_cancel: swap_hold_cancel,
 };
 
 /// Re-acquire the swap flow's state from the shell (the descriptor's `flow` selector).
@@ -123,9 +120,6 @@ fn open_home(shell: &mut Shell, cx: &mut Context<Shell>) {
 }
 fn swap_hold_start(shell: &mut Shell, cx: &mut Context<Shell>) {
     shell.swap_hold_start(cx);
-}
-fn swap_hold_cancel(shell: &mut Shell, cx: &mut Context<Shell>) {
-    shell.swap_hold_cancel(cx);
 }
 
 impl Shell {

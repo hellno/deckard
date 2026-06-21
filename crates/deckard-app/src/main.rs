@@ -60,7 +60,8 @@ gpui::actions!(
         TogglePalette,
         ToggleMask,
         PaletteNext,
-        PalettePrev
+        PalettePrev,
+        ConfirmCommit
     ]
 );
 
@@ -128,6 +129,10 @@ fn main() {
                 // field. (`Root` binds `tab` in its own context, which is always live.)
                 KeyBinding::new("tab", PaletteNext, Some("CommandPalette")),
                 KeyBinding::new("shift-tab", PalettePrev, Some("CommandPalette")),
+                // ⌘↵ confirms a clear-signing review. Scoped to the `Commit` context (the
+                // focused Send/Shield/Swap review surface) so it never shadows Activity's own
+                // ⌘⏎ approve. The handler re-checks the surface + the arm-delay.
+                KeyBinding::new("secondary-enter", ConfirmCommit, Some("Commit")),
             ]);
 
             // 4. Global action handlers. View-local actions (NewItem, OpenSettings,

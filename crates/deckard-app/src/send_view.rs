@@ -37,7 +37,7 @@ pub static SEND_VIEW: CommitView = CommitView {
 
     // --- review ---
     review_title: "Review transfer",
-    review_subtitle: "Confirm the amount and the destination address. Hold to send.",
+    review_subtitle: "Confirm the amount and the destination address, then send with ⌘↵.",
     // No Railgun fee / private net line for a public send.
     extra_rows: &[],
     honesty: &[
@@ -51,9 +51,7 @@ pub static SEND_VIEW: CommitView = CommitView {
         },
     ],
     hold_id: "send-hold",
-    hold_fill_id: "send-fill",
-    hold_label_idle: "Hold to send",
-    hold_label_holding: "Keep holding…",
+    hold_label_idle: "Send",
     hold_label_busy: "Sending…",
     edit_button_id: "send-edit",
 
@@ -70,7 +68,6 @@ pub static SEND_VIEW: CommitView = CommitView {
     on_cancel: open_home,
     on_done: open_home,
     on_hold_start: send_hold_start,
-    on_hold_cancel: send_hold_cancel,
 };
 
 /// Re-acquire the send flow's state from the shell (the descriptor's `flow` selector).
@@ -92,7 +89,4 @@ fn open_home(shell: &mut Shell, cx: &mut Context<Shell>) {
 }
 fn send_hold_start(shell: &mut Shell, cx: &mut Context<Shell>) {
     shell.send_hold_start(cx);
-}
-fn send_hold_cancel(shell: &mut Shell, cx: &mut Context<Shell>) {
-    shell.send_hold_cancel(cx);
 }

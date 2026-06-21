@@ -51,7 +51,7 @@ pub static SHIELD_VIEW: CommitView = CommitView {
 
     // --- review ---
     review_title: "Review deposit",
-    review_subtitle: "Confirm what leaves, where it goes, and the fee. Hold to shield.",
+    review_subtitle: "Confirm what leaves, where it goes, and the fee, then shield with ⌘↵.",
     // The Railgun fee + the net private receipt, computed from the proposal's gross value.
     extra_rows: &[
         MoneyRow {
@@ -78,9 +78,7 @@ pub static SHIELD_VIEW: CommitView = CommitView {
         },
     ],
     hold_id: "shield-hold",
-    hold_fill_id: "shield-fill",
-    hold_label_idle: "Hold to shield",
-    hold_label_holding: "Keep holding…",
+    hold_label_idle: "Shield to private",
     hold_label_busy: "Shielding…",
     edit_button_id: "shield-edit",
 
@@ -97,7 +95,6 @@ pub static SHIELD_VIEW: CommitView = CommitView {
     on_cancel: open_home,
     on_done: open_home,
     on_hold_start: shield_hold_start,
-    on_hold_cancel: shield_hold_cancel,
 };
 
 /// Re-acquire the shield flow's state from the shell (the descriptor's `flow` selector).
@@ -136,7 +133,4 @@ fn open_home(shell: &mut Shell, cx: &mut Context<Shell>) {
 }
 fn shield_hold_start(shell: &mut Shell, cx: &mut Context<Shell>) {
     shell.shield_hold_start(cx);
-}
-fn shield_hold_cancel(shell: &mut Shell, cx: &mut Context<Shell>) {
-    shell.shield_hold_cancel(cx);
 }

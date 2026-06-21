@@ -35,17 +35,17 @@ use crate::signer::{self, AppSigner};
 use crate::theme;
 use crate::wallet;
 use crate::{
-    GoBack, NewItem, OpenApprovals, OpenSettings, PaletteNext, PalettePrev, ToggleMask,
-    TogglePalette, ToggleTheme, APP_NAME,
+    ConfirmCommit, GoBack, NewItem, OpenApprovals, OpenSettings, PaletteNext, PalettePrev,
+    ToggleMask, TogglePalette, ToggleTheme, APP_NAME,
 };
 
 /// Auto-refresh the public wallet balance every this many seconds while the home view is open.
 const BALANCE_POLL_SECS: u64 = 20;
 
-/// How long the user must hold the shield confirm before it signs — the deliberate-gesture
-/// duration (DESIGN: confirm is a hold, never a tap). The amber fill-sweep (`shield_view`)
-/// runs for the same span so the bar fills exactly as the action fires.
-pub(crate) const SHIELD_HOLD: Duration = Duration::from_millis(900);
+/// The confirm arm-delay: a clear-signing review must be on screen this long before ⌘↵ / a
+/// click can confirm, so a keypress or click carried over from the previous screen can't approve
+/// a money move (DESIGN §confirm pattern). The ⌘↵ chord plus this delay replace the old hold.
+const COMMIT_ARM_DELAY: Duration = Duration::from_millis(450);
 
 /// Run `prework` (which seals + writes the keystore for create/import/migrate, or is a no-op
 /// for a plain unlock), then unlock OVER THE DAEMON SOCKET — the key is decrypted in the
@@ -216,6 +216,13 @@ pub struct Shell {
     /// re-arm" banner. The feed stays visible (the daemon answers `ActivityFeed` while locked) so
     /// the revoked rows are seen; the next unlock clears it. `pub` so the view can render it.
     pub activity_stopped: bool,
+    /// The confirm arm-delay timestamp: set when a clear-signing review (Send/Shield/Swap) is
+    /// installed. `commit_armed()` is true once [`COMMIT_ARM_DELAY`] has elapsed, gating the
+    /// ⌘↵/click confirm so a carried-over keypress can't approve (DESIGN §confirm pattern).
+    commit_review_at: Option<std::time::Instant>,
+    /// Focus handle for the commit surfaces (Send/Shield/Swap) so the `key_context("Commit")`
+    /// ⌘↵ binding dispatches to the confirm handler only when a review is on screen.
+    commit_focus: gpui::FocusHandle,
 
     /// The capture-block state last pushed to the OS, so `render` only re-issues the
     /// native `setSharingType` call when `capture_block && mask` actually changes.
@@ -623,6 +630,8 @@ impl Shell {
             activity_poller_running: false,
             activity_stop_arming: false,
             activity_stopped: false,
+            commit_review_at: None,
+            commit_focus: cx.focus_handle(),
             capture_applied: false,
             allow_screen_capture,
             shield,
@@ -1611,33 +1620,11 @@ impl Shell {
     /// only if the hold survives [`SHIELD_HOLD`]. A per-hold epoch guards against a stale timer
     /// firing after an early release / re-press.
     pub fn shield_hold_start(&mut self, cx: &mut Context<Self>) {
-        // begin_hold guards (no-op while busy / already holding / no proposal), sets `holding`,
-        // bumps the hold epoch, and returns it for the timer to re-check.
-        let Some(epoch) = self.shield.begin_hold() else {
-            return;
-        };
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(SHIELD_HOLD).await;
-            this.update(cx, |this, cx| {
-                // Fire only if THIS hold is still valid AND the user is still on Shield — leaving
-                // via ⌘[ / palette / a surface change must never sign after the screen is gone.
-                // (The surface check stays here — it depends on the live surface, not flow state.)
-                if this.surface == Surface::Shield && this.shield.hold_still_valid(epoch) {
-                    this.shield.holding = false;
-                    this.confirm_shield(cx);
-                }
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// Release the confirm hold before it completed — reset the sweep; the epoch bump
-    /// cancels the pending timer.
-    pub fn shield_hold_cancel(&mut self, cx: &mut Context<Self>) {
-        if self.shield.cancel_hold() {
-            cx.notify();
+        // The key-cap confirm trigger (a deliberate button click or ⌘↵, never a hold). Confirm
+        // only while still on Shield AND once the review has ARMED, so a carried-over keypress
+        // can't approve (DESIGN §confirm pattern).
+        if self.surface == Surface::Shield && self.commit_armed() {
+            self.confirm_shield(cx);
         }
     }
 
@@ -1708,6 +1695,11 @@ impl Shell {
                 }
             }
             Err(e) => flow(self).error = Some(short_err(e)),
+        }
+        // Arm the confirm once the review lands: ⌘↵/click can confirm only after the arm-delay,
+        // so a keypress carried over from the compose screen can't approve (DESIGN §confirm).
+        if flow(self).proposal.is_some() {
+            self.commit_review_at = Some(std::time::Instant::now());
         }
         cx.notify();
     }
@@ -1850,33 +1842,11 @@ impl Shell {
     /// only if the hold survives [`SHIELD_HOLD`]. A per-hold epoch guards against a stale timer
     /// firing after an early release / re-press.
     pub fn send_hold_start(&mut self, cx: &mut Context<Self>) {
-        // begin_hold guards (no-op while busy / already holding / no proposal), sets `holding`,
-        // bumps the hold epoch, and returns it for the timer to re-check.
-        let Some(epoch) = self.send.begin_hold() else {
-            return;
-        };
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(SHIELD_HOLD).await;
-            this.update(cx, |this, cx| {
-                // Fire only if THIS hold is still valid AND the user is still on Send — leaving
-                // via ⌘[ / palette / a surface change must never sign after the screen is gone.
-                // (The surface check stays here — it depends on the live surface, not flow state.)
-                if this.surface == Surface::Send && this.send.hold_still_valid(epoch) {
-                    this.send.holding = false;
-                    this.confirm_send(cx);
-                }
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// Release the confirm hold before it completed — reset the sweep; the epoch bump
-    /// cancels the pending timer.
-    pub fn send_hold_cancel(&mut self, cx: &mut Context<Self>) {
-        if self.send.cancel_hold() {
-            cx.notify();
+        // The key-cap confirm trigger (a deliberate button click or ⌘↵, never a hold). Confirm
+        // only while still on Send AND once the review has ARMED (the short arm-delay) so a
+        // keypress carried over from the previous screen can't approve (DESIGN §confirm pattern).
+        if self.surface == Surface::Send && self.commit_armed() {
+            self.confirm_send(cx);
         }
     }
 
@@ -2116,6 +2086,8 @@ impl Shell {
                             recipient: summary,
                             needs_resolve: true,
                         });
+                        // Arm the swap confirm once the priced review lands (DESIGN §confirm).
+                        this.commit_review_at = Some(std::time::Instant::now());
                     }
                     Ok(Decision::Deny { reason }) => {
                         if is_session_ended(&reason) {
@@ -2252,28 +2224,29 @@ impl Shell {
     /// Begin a confirm hold on the swap review: start the amber fill-sweep + a timer that fires
     /// `confirm_swap` only if the hold survives [`SHIELD_HOLD`] and the user is still on Swap.
     pub fn swap_hold_start(&mut self, cx: &mut Context<Self>) {
-        let Some(epoch) = self.swap.begin_hold() else {
-            return;
-        };
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(SHIELD_HOLD).await;
-            this.update(cx, |this, cx| {
-                if this.surface == Surface::Swap && this.swap.hold_still_valid(epoch) {
-                    this.swap.holding = false;
-                    this.confirm_swap(cx);
-                }
-            })
-            .ok();
-        })
-        .detach();
+        // The key-cap confirm trigger (a deliberate button click or ⌘↵, never a hold). Confirm
+        // only while still on Swap AND once the review has ARMED (DESIGN §confirm pattern).
+        if self.surface == Surface::Swap && self.commit_armed() {
+            self.confirm_swap(cx);
+        }
     }
 
-    /// Release the swap confirm hold before it completed — reset the sweep; the epoch bump cancels
-    /// the pending timer.
-    pub fn swap_hold_cancel(&mut self, cx: &mut Context<Self>) {
-        if self.swap.cancel_hold() {
-            cx.notify();
+    /// True once a clear-signing review has been on screen at least [`COMMIT_ARM_DELAY`] — the
+    /// confirm arm gate so a carried-over keypress/click can't approve (DESIGN §confirm pattern).
+    fn commit_armed(&self) -> bool {
+        self.commit_review_at
+            .map(|t| t.elapsed() >= COMMIT_ARM_DELAY)
+            .unwrap_or(false)
+    }
+
+    /// The ⌘↵ confirm action (bound in the `Commit` key context). Routes to the right confirm by
+    /// the live commit surface; each path re-checks the surface + the arm gate.
+    pub fn confirm_commit(&mut self, cx: &mut Context<Self>) {
+        match self.surface {
+            Surface::Send => self.send_hold_start(cx),
+            Surface::Shield => self.shield_hold_start(cx),
+            Surface::Swap => self.swap_hold_start(cx),
+            _ => {}
         }
     }
 
@@ -2653,6 +2626,12 @@ impl Shell {
         self.open_activity(window, cx);
     }
 
+    fn on_confirm_commit(&mut self, _: &ConfirmCommit, _: &mut Window, cx: &mut Context<Self>) {
+        // ⌘↵ on a clear-signing review. Scoped to the focused `Commit` context, so it never fires
+        // on Activity (its own ⌘⏎ approve) or elsewhere. `confirm_commit` re-checks surface + arm.
+        self.confirm_commit(cx);
+    }
+
     fn on_go_back(&mut self, _: &GoBack, _: &mut Window, cx: &mut Context<Self>) {
         if self.palette_open {
             return;
@@ -2907,6 +2886,20 @@ impl Render for Shell {
         // changed, and a no-op entirely off a macOS `--features tray` build).
         self.sync_capture_block();
 
+        // Focus the commit surface on the REVIEW step (a proposal is installed, no input to type)
+        // so the `key_context("Commit")` ⌘↵ confirm dispatches. On compose we leave focus with the
+        // amount input; idempotent (grabs focus only when not already held) so it never steals
+        // focus mid-type.
+        let on_commit_review = match self.surface {
+            Surface::Send => self.send.proposal.is_some(),
+            Surface::Shield => self.shield.proposal.is_some(),
+            Surface::Swap => self.swap.proposal.is_some(),
+            _ => false,
+        };
+        if on_commit_review && !self.commit_focus.is_focused(window) {
+            self.commit_focus.focus(window, cx);
+        }
+
         let body = if self.auth == AuthStep::Ready {
             // The unlocked app: macOS title bar above the two-pane shell grid
             // (sidebar | [breadcrumb / content / status strip]) + command palette.
@@ -2923,11 +2916,20 @@ impl Render for Shell {
                     .child(self.render_settings(window, cx))
                     .into_any_element(),
                 (_, Surface::Receive) => self.render_receive(cx).into_any_element(),
-                (_, Surface::Send) => self
-                    .render_commit(&crate::send_view::SEND_VIEW, cx)
+                // Send/Shield: short centered cards. Wrapped so the review step can hold focus for
+                // the `key_context("Commit")` ⌘↵ confirm. Focus is grabbed on the review step only
+                // (in render() below), so the compose amount input still types.
+                (_, Surface::Send) => v_flex()
+                    .size_full()
+                    .track_focus(&self.commit_focus)
+                    .key_context("Commit")
+                    .child(self.render_commit(&crate::send_view::SEND_VIEW, cx))
                     .into_any_element(),
-                (_, Surface::Shield) => self
-                    .render_commit(&crate::shield_view::SHIELD_VIEW, cx)
+                (_, Surface::Shield) => v_flex()
+                    .size_full()
+                    .track_focus(&self.commit_focus)
+                    .key_context("Commit")
+                    .child(self.render_commit(&crate::shield_view::SHIELD_VIEW, cx))
                     .into_any_element(),
                 // Activity owns its OWN scroll INSIDE the feed body (so the heading + STOP stay
                 // pinned — the panic brake must never scroll off screen); this outer just holds the
@@ -2949,6 +2951,8 @@ impl Render for Shell {
                     .id("scroll-swap")
                     .size_full()
                     .overflow_y_scrollbar()
+                    .track_focus(&self.commit_focus)
+                    .key_context("Commit")
                     .child(self.render_swap(cx))
                     .into_any_element(),
                 (Selection::Wallet, Surface::Home) => div()
@@ -3026,6 +3030,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::on_toggle_mask))
             .on_action(cx.listener(Self::on_palette_next))
             .on_action(cx.listener(Self::on_palette_prev))
+            .on_action(cx.listener(Self::on_confirm_commit))
             .child(body)
     }
 }
