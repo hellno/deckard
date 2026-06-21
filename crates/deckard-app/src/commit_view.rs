@@ -169,10 +169,16 @@ impl Shell {
 
         let amount_raw = flow.amount.read(cx).value().to_string();
         let recipient_raw = flow.recipient.read(cx).value().to_string();
-        let can_review = crate::signer::parse_eth_to_wei(&amount_raw)
-            .map(|w| w > U256::ZERO)
-            .unwrap_or(false)
-            && !recipient_raw.trim().is_empty();
+        // The wallet's spendable native balance gates the amount. Both Send and Shield reduce
+        // native ETH, so an amount over the balance is invalid for either (DESIGN §Required states:
+        // amount > balance disables the action, with an inline error, never a late raw provider
+        // string). `None` balance (pre-sync) leaves the gate open — we can't claim over-balance.
+        let native_wei = self.portfolio.as_ref().map(|p| p.native_wei);
+        let parsed = crate::signer::parse_eth_to_wei(&amount_raw)
+            .ok()
+            .filter(|w| *w > U256::ZERO);
+        let over_balance = matches!((parsed, native_wei), (Some(w), Some(bal)) if w > bal);
+        let can_review = parsed.is_some() && !recipient_raw.trim().is_empty() && !over_balance;
 
         // The compose hint: a dynamic (Shield 3-way) hook takes precedence over the static line.
         // The dynamic hook reuses the `recipient_raw` the renderer already read (no second `cx`
@@ -193,7 +199,13 @@ impl Shell {
                         .w_full()
                         .gap_2()
                         .child(crate::widgets::section_label("Amount", muted))
-                        .child(Input::new(&flow.amount).w_full()),
+                        .child(Input::new(&flow.amount).w_full())
+                        .when(over_balance, |c| {
+                            c.child(crate::widgets::error_line(
+                                danger,
+                                "More than your wallet holds.",
+                            ))
+                        }),
                 )
                 .child(
                     v_flex()
