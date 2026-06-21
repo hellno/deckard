@@ -1166,8 +1166,13 @@ impl Daemon {
         // signing and the post-broadcast commit must not lose the accounting. Skip `value == 0`
         // (shields / shaped approves / contract calls move no ETH via `value`). A reserve-write
         // failure means we can't durably account this spend, so we fail CLOSED — deny rather than
-        // sign un-accounted funds. (The fsync lands under the daemon mutex; accepted for v1, like
-        // the broadcast below.)
+        // sign un-accounted funds.
+        //
+        // The reserve + commit fsyncs land under the daemon mutex that also serves STOP; accepted
+        // for v1 (anvil-instant, same posture as the broadcast below).
+        // TODO(#108 follow-up): if the STOP latency bites on a slow/contended disk, move these two
+        // fsyncs off the reactor via `tokio::task::spawn_blocking` instead of widening the brake's
+        // critical section. Deliberately NOT an issue yet — revisit only if measured latency hurts.
         let reserve_value = value;
         if !reserve_value.is_zero() {
             if let Err(e) = self.spend.reserve(reserve_value) {
