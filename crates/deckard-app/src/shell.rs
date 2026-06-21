@@ -332,6 +332,8 @@ pub struct Shell {
     /// True briefly after the recovery phrase is copied, to flip the demoted Copy button to
     /// "Copied ✓" — never auto-set; only an explicit click sets it (DESIGN §Seed reveal).
     pub seed_copied: bool,
+    /// True briefly after the new wallet address is copied on the "Ready" screen (inline "Copied ✓").
+    pub address_copied: bool,
     /// The auth step whose primary input we've already auto-focused (focus once per step).
     focused_step: Option<AuthStep>,
     // Auth inputs (passphrases are never persisted).
@@ -694,6 +696,7 @@ impl Shell {
             reveal_epoch: 0,
             create_epoch: 0,
             seed_copied: false,
+            address_copied: false,
             focused_step: None,
             create_pass,
             create_pass2,
@@ -800,6 +803,27 @@ impl Shell {
             cx.background_executor().timer(Duration::from_secs(2)).await;
             this.update(cx, |this, cx| {
                 this.seed_copied = false;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Copy the new wallet's address to the clipboard from the "Ready" screen, then flash an inline
+    /// "Copied ✓" for a moment (DESIGN §Trust: addresses are one-click-copy with inline feedback).
+    pub fn copy_wallet_address(&mut self, cx: &mut Context<Self>) {
+        let addr = self.wallet_address_string();
+        if addr.is_empty() {
+            return;
+        }
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(addr));
+        self.address_copied = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(2)).await;
+            this.update(cx, |this, cx| {
+                this.address_copied = false;
                 cx.notify();
             })
             .ok();

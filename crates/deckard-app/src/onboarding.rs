@@ -4,8 +4,8 @@
 //! confirm-a-subset backup, and the (Phase-2) Touch ID affordance shown disabled.
 
 use gpui::{
-    div, px, relative, Context, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, Styled,
+    div, prelude::FluentBuilder, px, relative, Context, FontWeight, Hsla, InteractiveElement,
+    IntoElement, MouseButton, ParentElement, StatefulInteractiveElement, Styled,
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
@@ -61,13 +61,53 @@ impl Shell {
             AuthStep::Unlock => self.render_unlock(cx).into_any_element(),
             AuthStep::Ready => div().into_any_element(),
         };
+        // The create flow is a stepped sequence — show a small progress rail above the content so
+        // the user always knows where they are. Only the four create steps are part of it.
+        let active_step = match self.auth {
+            AuthStep::CreateSetup => Some(0),
+            AuthStep::CreateBackup => Some(1),
+            AuthStep::CreateVerify => Some(2),
+            AuthStep::CreateDone => Some(3),
+            _ => None,
+        };
+        let column = v_flex()
+            .w(px(460.0))
+            .gap_6()
+            .when_some(active_step, |c, step| {
+                c.child(self.auth_step_rail(step, cx))
+            });
         div()
             .flex_1()
             .flex()
             .flex_col()
             .items_center()
             .justify_center()
-            .child(div().w(px(460.0)).child(inner))
+            .child(column.child(inner))
+    }
+
+    /// The create-flow progress rail: the four step labels in a row, the active one in amber, the
+    /// rest muted (DESIGN: amber only on the active step). Labels only — no dots or chrome.
+    fn auth_step_rail(&self, active: usize, cx: &mut Context<Self>) -> impl IntoElement {
+        let (amber, muted) = {
+            let t = cx.theme();
+            (crate::theme::amber(t.is_dark()), t.muted_foreground)
+        };
+        let labels = ["Secure", "Back up", "Verify", "Ready"];
+        let mut row = h_flex().w_full().items_center().gap_2();
+        for (i, label) in labels.iter().enumerate() {
+            if i > 0 {
+                row = row.child(div().text_size(px(12.0)).text_color(muted).child("·"));
+            }
+            let is_active = i == active;
+            row = row.child(
+                div()
+                    .text_size(px(12.0))
+                    .when(is_active, |d| d.font_weight(FontWeight::MEDIUM))
+                    .text_color(if is_active { amber } else { muted })
+                    .child(*label),
+            );
+        }
+        row
     }
 
     // --- screens ---
@@ -143,6 +183,9 @@ impl Shell {
                         .child(div().text_xs().text_color(bar_color).child(band.label())),
                 )
         });
+        // Reserve the meter's height from the start so nothing below shifts when it appears on the
+        // first keystroke — the slot is always present, the bar+label fill it once there's input.
+        let meter_slot = div().w_full().min_h(px(28.0)).children(meter);
         v_flex()
             .gap_5()
             .child(self.auth_heading(
@@ -156,7 +199,7 @@ impl Shell {
                     .child(Input::new(&self.create_pass).w_full())
                     .child(Input::new(&self.create_pass2).w_full()),
             )
-            .children(meter)
+            .child(meter_slot)
             .child(crate::widgets::caution_line(
                 amber,
                 fg,
@@ -363,13 +406,14 @@ impl Shell {
     /// The "you're ready" interstitial: the vault is sealed + unlocked; the user steps into the
     /// live app deliberately (DESIGN §Onboarding: "Ready — a real screen").
     fn render_create_done(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (muted, fg, slate, mono) = {
+        let (muted, fg, slate, mono, success) = {
             let t = cx.theme();
             (
                 t.muted_foreground,
                 t.foreground,
                 crate::theme::identity_square(t.is_dark()),
                 t.mono_font_family.clone(),
+                t.success,
             )
         };
         let addr = self.wallet_address_string();
@@ -381,10 +425,29 @@ impl Shell {
                 cx,
             ))
             // The canonical address treatment (identicon + mono short_addr) — the same widget
-            // every other address row uses (DESIGN §Trust), no ENS during onboarding.
-            .child(crate::widgets::truncated_address(
-                &addr, None, mono, slate, fg, fg, muted,
-            ))
+            // every other address row uses (DESIGN §Trust) — made one-click-copy with inline
+            // "Copied ✓", since every address in the app is copyable.
+            .child(
+                h_flex()
+                    .id("copy-ready-address")
+                    .items_center()
+                    .gap_2()
+                    .cursor_pointer()
+                    .child(crate::widgets::truncated_address(
+                        &addr, None, mono, slate, fg, fg, muted,
+                    ))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(if self.address_copied { success } else { muted })
+                            .child(if self.address_copied {
+                                "Copied ✓"
+                            } else {
+                                "Copy"
+                            }),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.copy_wallet_address(cx))),
+            )
             .child(
                 Button::new("enter-deckard")
                     .primary()
@@ -476,7 +539,6 @@ impl Shell {
                 cx,
             ))
             .child(Input::new(&self.pass_input).w_full())
-            .child(self.touch_id_note(cx))
             .child(self.error_line(cx))
             .child(
                 Button::new("do-unlock")
@@ -512,27 +574,6 @@ impl Shell {
                     .text_size(px(13.0))
                     .text_color(theme.muted_foreground)
                     .child(subtitle.to_string()),
-            )
-    }
-
-    /// The Phase-2 Touch ID affordance — shown disabled, with an honest reason.
-    fn touch_id_note(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        h_flex()
-            .items_center()
-            .gap_2()
-            .child(
-                div()
-                    .size(px(16.0))
-                    .rounded_full()
-                    .border_1()
-                    .border_color(theme.muted_foreground),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child("Touch ID unlock: available after the signed build (Phase 2)"),
             )
     }
 
