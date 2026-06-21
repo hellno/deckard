@@ -9,6 +9,7 @@
 
 use std::path::Path;
 
+use anyhow::Context;
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
@@ -179,12 +180,25 @@ impl Vault {
         words: WordCount,
         kdf: KdfParams,
     ) -> anyhow::Result<(Vault, Zeroizing<String>)> {
+        Self::create_with_rng(&mut OsRng, passphrase, words, kdf)
+    }
+
+    /// Inner of [`Vault::create`], generic over the RNG. Production passes `OsRng`; tests inject
+    /// a failing RNG to exercise the no-entropy error path. Kept private on purpose: the trust
+    /// core must only ever draw key material from the OS CSPRNG, so we never expose a way to
+    /// substitute a non-`OsRng` source.
+    fn create_with_rng<R: RngCore>(
+        rng: &mut R,
+        passphrase: &str,
+        words: WordCount,
+        kdf: KdfParams,
+    ) -> anyhow::Result<(Vault, Zeroizing<String>)> {
         let n = match words {
             WordCount::Twelve => 16,
             WordCount::TwentyFour => 32,
         };
         let mut entropy = Zeroizing::new(vec![0u8; n]);
-        OsRng.fill_bytes(&mut entropy);
+        fill_secure_with(rng, &mut entropy)?;
 
         let phrase = entropy_to_phrase(&entropy)?;
         let kind = if n == 16 {
@@ -192,7 +206,7 @@ impl Vault {
         } else {
             SecretKind::Entropy32
         };
-        let vault = Self::seal(kind, &entropy, passphrase, kdf)?;
+        let vault = Self::seal_with_rng(rng, kind, &entropy, passphrase, kdf)?;
         Ok((vault, phrase))
     }
 
@@ -232,6 +246,22 @@ impl Vault {
         passphrase: &str,
         kdf: KdfParams,
     ) -> anyhow::Result<Vault> {
+        Self::seal_with_rng(&mut OsRng, kind, secret, passphrase, kdf)
+    }
+
+    /// Inner of [`Vault::seal`], generic over the RNG (see [`Vault::create_with_rng`] for why it
+    /// stays private). `try_fill_bytes` leaves a buffer in an unspecified state on error, but
+    /// every fill aborts the seal on `Err` before any `Vault` is constructed, and the only secret
+    /// buffers (`dek` here, and `entropy` in `create_with_rng`) are `Zeroizing`, so a partial fill
+    /// is scrubbed on the early return. `vault_id`/`salt`/`wrap_nonce`/`entropy_nonce` are public
+    /// header fields (stored in cleartext), so a partial fill of them leaks nothing.
+    fn seal_with_rng<R: RngCore>(
+        rng: &mut R,
+        kind: SecretKind,
+        secret: &[u8],
+        passphrase: &str,
+        kdf: KdfParams,
+    ) -> anyhow::Result<Vault> {
         kdf.validate()?;
 
         let mut vault_id = [0u8; VAULT_ID_LEN];
@@ -239,11 +269,11 @@ impl Vault {
         let mut wrap_nonce = [0u8; NONCE_LEN];
         let mut entropy_nonce = [0u8; NONCE_LEN];
         let mut dek = Zeroizing::new([0u8; DEK_LEN]);
-        OsRng.fill_bytes(&mut vault_id);
-        OsRng.fill_bytes(&mut salt);
-        OsRng.fill_bytes(&mut wrap_nonce);
-        OsRng.fill_bytes(&mut entropy_nonce);
-        OsRng.fill_bytes(dek.as_mut_slice());
+        fill_secure_with(rng, &mut vault_id)?;
+        fill_secure_with(rng, &mut salt)?;
+        fill_secure_with(rng, &mut wrap_nonce)?;
+        fill_secure_with(rng, &mut entropy_nonce)?;
+        fill_secure_with(rng, dek.as_mut_slice())?;
 
         let header = Header {
             secret_kind: kind,
@@ -572,15 +602,53 @@ fn unlock_failed() -> anyhow::Error {
     anyhow::anyhow!("could not unlock — wrong passphrase, or the vault was tampered with")
 }
 
+/// Fill `buf` with cryptographically secure bytes from the OS CSPRNG, or fail.
+/// The single entropy-acquisition chokepoint for the trust core: production code routes every
+/// random fill through here (or [`fill_secure_with`]) rather than `RngCore::fill_bytes` /
+/// `SliceRandom::shuffle`, which panic on CSPRNG failure and are banned in `clippy.toml`.
+fn fill_secure(buf: &mut [u8]) -> anyhow::Result<()> {
+    fill_secure_with(&mut OsRng, buf)
+}
+
+/// [`fill_secure`] generic over the RNG, so tests can inject a failing RNG to exercise the
+/// error path. Production only ever passes `OsRng`. The OS error is preserved as the source
+/// (it carries no key material — the buffer is output-only); the top-line message stays plain.
+fn fill_secure_with<R: RngCore>(rng: &mut R, buf: &mut [u8]) -> anyhow::Result<()> {
+    rng.try_fill_bytes(buf)
+        .context("could not gather secure random bytes from the OS")
+}
+
 /// Pick `k` distinct word positions (0-indexed, sorted) to quiz during backup
 /// confirmation, chosen with the OS CSPRNG so a user can't pre-learn which to write.
-pub fn random_word_positions(word_count: usize, k: usize) -> Vec<usize> {
-    use rand::seq::SliceRandom;
+/// Returns an error if the OS CSPRNG is unavailable (fails closed rather than panicking).
+pub fn random_word_positions(word_count: usize, k: usize) -> anyhow::Result<Vec<usize>> {
+    // Fisher–Yates over fallible OS entropy (rand 0.8 has no fallible `shuffle`), with
+    // rejection sampling so there's no modulo bias — negligible at word_count <= 24, but we
+    // avoid modelling a biased `% n` pattern that could be copied somewhere it matters.
     let mut idx: Vec<usize> = (0..word_count).collect();
-    idx.shuffle(&mut OsRng);
+    for i in (1..word_count).rev() {
+        let j = bounded_index(i + 1)?;
+        idx.swap(i, j);
+    }
     let mut chosen: Vec<usize> = idx.into_iter().take(k.min(word_count)).collect();
     chosen.sort_unstable();
-    chosen
+    Ok(chosen)
+}
+
+/// Uniform random index in `0..n` (`n >= 1`) from the OS CSPRNG, rejection-sampled to remove
+/// modulo bias. Used only for small `n` (word positions), so the reject rate is ~0.
+fn bounded_index(n: usize) -> anyhow::Result<usize> {
+    let n = n as u32;
+    // Reject the final partial bucket so every residue class is equally likely.
+    let zone = u32::MAX - (u32::MAX % n);
+    loop {
+        let mut b = [0u8; 4];
+        fill_secure(&mut b)?;
+        let v = u32::from_le_bytes(b);
+        if v < zone {
+            return Ok((v % n) as usize);
+        }
+    }
 }
 
 /// BIP-39 entropy bytes → mnemonic phrase (in a zeroizing buffer).
@@ -655,6 +723,66 @@ mod tests {
     use super::*;
 
     const PW: &str = "correct horse battery staple";
+
+    /// An RNG that always fails its fallible API — stands in for an unavailable OS CSPRNG so we
+    /// can prove create/seal fail closed (return `Err`, never a `Vault`). Real `OsRng` can't be
+    /// made to fail on demand, so this private seam is the only way to exercise that path.
+    struct FailingRng;
+    impl RngCore for FailingRng {
+        fn next_u32(&mut self) -> u32 {
+            0
+        }
+        fn next_u64(&mut self) -> u64 {
+            0
+        }
+        fn fill_bytes(&mut self, _dest: &mut [u8]) {
+            // Production code must use the fallible `try_fill_bytes`; reaching the infallible
+            // path is a bug, so fail the test loudly.
+            panic!("FailingRng: production code must use try_fill_bytes, not fill_bytes");
+        }
+        fn try_fill_bytes(&mut self, _dest: &mut [u8]) -> Result<(), rand::Error> {
+            Err(rand::Error::from(
+                core::num::NonZeroU32::new(0xDEAD_BEEF).unwrap(),
+            ))
+        }
+    }
+
+    #[test]
+    fn create_fails_closed_when_entropy_unavailable() {
+        // The new fallible RNG path: an OS CSPRNG failure surfaces as an error and never yields
+        // a Vault — so the caller has nothing to write to disk.
+        let r =
+            Vault::create_with_rng(&mut FailingRng, PW, WordCount::Twelve, KdfParams::FAST_TEST);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn seal_fails_closed_when_entropy_unavailable() {
+        let r = Vault::seal_with_rng(
+            &mut FailingRng,
+            SecretKind::Entropy16,
+            &[0u8; 16],
+            PW,
+            KdfParams::FAST_TEST,
+        );
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn random_word_positions_distinct_sorted_in_range() {
+        let pos = random_word_positions(12, 3).unwrap();
+        assert_eq!(pos.len(), 3);
+        let mut dedup = pos.clone();
+        dedup.dedup();
+        assert_eq!(dedup.len(), 3, "positions must be distinct");
+        assert!(
+            pos.windows(2).all(|w| w[0] < w[1]),
+            "positions must be sorted ascending"
+        );
+        assert!(pos.iter().all(|&p| p < 12), "positions must be in range");
+        // k is capped at word_count.
+        assert_eq!(random_word_positions(2, 5).unwrap().len(), 2);
+    }
 
     #[test]
     fn create_unlock_round_trip_and_stable_address() {

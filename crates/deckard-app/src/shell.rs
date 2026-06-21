@@ -780,12 +780,17 @@ impl Shell {
                 match res {
                     Ok((vault, phrase, pass)) => {
                         let wc = phrase.split_whitespace().count();
-                        this.confirm_positions = deckard_core::random_word_positions(wc, 3);
-                        this.pending_vault = Some(vault);
-                        this.pending_phrase = Some(phrase);
-                        this.pending_pass = Some(pass);
-                        this.reveal_seed = false;
-                        this.auth = AuthStep::CreateBackup;
+                        match deckard_core::random_word_positions(wc, 3) {
+                            Ok(positions) => {
+                                this.confirm_positions = positions;
+                                this.pending_vault = Some(vault);
+                                this.pending_phrase = Some(phrase);
+                                this.pending_pass = Some(pass);
+                                this.reveal_seed = false;
+                                this.auth = AuthStep::CreateBackup;
+                            }
+                            Err(e) => this.auth_error = Some(short_err(e)),
+                        }
                     }
                     Err(e) => this.auth_error = Some(short_err(e)),
                 }
