@@ -77,8 +77,8 @@ impl Shell {
         v_flex()
             .gap_6()
             .child(self.auth_heading(
-                "Your money on autopilot. You can see and stop everything.",
-                "A self-custodial Ethereum wallet. Your keys are generated and encrypted on this device, and they never leave it.",
+                "Deckard, your new favorite wallet.",
+                "A self-custodial Ethereum wallet. Your keys never leave this device.",
                 cx,
             ))
             .child(
@@ -147,7 +147,7 @@ impl Shell {
             .gap_5()
             .child(self.auth_heading(
                 "Set a passphrase",
-                "You'll enter this each time you open Deckard. Choose something long you'll remember — length matters more than symbols.",
+                "You'll enter this each time you open Deckard. Choose something long you'll remember.",
                 cx,
             ))
             .child(
@@ -161,14 +161,8 @@ impl Shell {
                 amber,
                 fg,
                 false,
-                "If you forget it, no one can reset it — not even us.",
+                "If you forget it, no one can reset it, not even us.",
             ))
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(muted)
-                    .child("Encrypted at rest with Argon2id + XChaCha20-Poly1305."),
-            )
             .child(self.error_line(cx))
             .child(
                 h_flex()
@@ -291,7 +285,7 @@ impl Shell {
             .gap_4()
             .child(self.auth_heading(
                 "Back up your recovery phrase",
-                "These 12 words are the only way to restore your wallet. Write them down and store them offline — anyone who has them controls your funds, and Deckard can't recover them for you.",
+                "These 12 words are the only way to restore your wallet. Write them down and keep them offline. Anyone who has them controls your funds.",
                 cx,
             ))
             .child(grid)
@@ -334,7 +328,7 @@ impl Shell {
             .gap_4()
             .child(self.auth_heading(
                 "Verify your backup",
-                "Type the words below to confirm you saved them. Your recovery phrase is hidden now.",
+                "Type the words below to confirm you saved them.",
                 cx,
             ))
             .child(div().pt_1().text_sm().text_color(muted).child(prompt))
@@ -380,7 +374,7 @@ impl Shell {
             .gap_5()
             .child(self.auth_heading(
                 "Your wallet is ready",
-                "It's encrypted on this device. Only your passphrase can open it — and your recovery phrase can restore it.",
+                "Only your passphrase can open it. Your recovery phrase can restore it.",
                 cx,
             ))
             // The canonical address treatment (identicon + mono short_addr) — the same widget
@@ -407,7 +401,7 @@ impl Shell {
             .gap_5()
             .child(self.auth_heading(
                 "Import a wallet",
-                "Paste a 12 or 24-word recovery phrase, or a 0x private key. It's encrypted on this device with your passphrase.",
+                "Paste a 12 or 24-word recovery phrase, or a 0x private key.",
                 cx,
             ))
             .child(
@@ -475,7 +469,7 @@ impl Shell {
             .gap_5()
             .child(self.auth_heading(
                 "Unlock Deckard",
-                "Enter your passphrase to decrypt your wallet on this device.",
+                "Enter your passphrase to unlock your wallet.",
                 cx,
             ))
             .child(Input::new(&self.pass_input).w_full())
