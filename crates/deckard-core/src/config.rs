@@ -14,6 +14,10 @@ use directories::ProjectDirs;
 pub const VAULT_FILE: &str = "vault.bin";
 /// The signer policy filename inside [`config_dir`].
 pub const POLICY_FILE: &str = "policy.json";
+/// The durable daily-spend counter filename inside [`config_dir`] (issue #108). Single-writer:
+/// only the signer daemon writes it; it survives restart so the daily cap isn't zeroed on every
+/// crash/OOM/update.
+pub const SPEND_FILE: &str = "spend.json";
 
 /// The config dir every Deckard process resolves through, so the GUI app, onboarding, the
 /// signer daemon, and the demo all agree on where `vault.bin` / `policy.json` / `settings.json`
@@ -58,6 +62,11 @@ pub fn vault_path() -> Option<PathBuf> {
 /// The signer policy path (`<config_dir>/policy.json`).
 pub fn policy_path() -> Option<PathBuf> {
     Some(config_dir()?.join(POLICY_FILE))
+}
+
+/// The durable daily-spend counter path (`<config_dir>/spend.json`).
+pub fn spend_path() -> Option<PathBuf> {
+    Some(config_dir()?.join(SPEND_FILE))
 }
 
 #[cfg(test)]
