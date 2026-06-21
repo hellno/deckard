@@ -28,6 +28,7 @@ pub mod request_id;
 pub mod server;
 pub mod signing;
 pub mod socket;
+pub mod spend_store;
 pub mod supervise;
 
 pub use client::SignerClient;

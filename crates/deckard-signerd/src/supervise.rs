@@ -36,7 +36,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use deckard_contract::{RequestId, SignerRequest, SignerResponse};
 
@@ -331,6 +331,24 @@ fn set_cloexec<F: AsRawFd>(fd: &F) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Crash-budget (issue #108, Option D): if the daemon exits this many times within
+/// [`RESPAWN_WINDOW`] *without* a sustained healthy run in between, the supervisor stops respawning
+/// and surfaces a loud error instead of hot-looping forever. The per-spawn `backoff` resets on any
+/// healthy 200ms poll, so a same-uid attacker crash-looping the daemon to reset the in-memory cap
+/// would otherwise be respawned at the floor indefinitely.
+///
+/// Only a TIGHT loop trips it: any run that lasts at least [`HEALTHY_RUN_RESET`] clears the counter
+/// (see `monitor_loop`), so a daemon that stays up for a while and then crashes — even repeatedly,
+/// e.g. an intermittent RPC outage once a minute — is respawned each time and never permanently
+/// bricked. The budget only fires when the daemon can't even stay alive `HEALTHY_RUN_RESET`,
+/// `RESPAWN_BUDGET` times in a row inside the window.
+const RESPAWN_BUDGET: usize = 5;
+const RESPAWN_WINDOW: Duration = Duration::from_secs(300);
+/// A child that stayed alive at least this long was a genuinely healthy run; its eventual exit
+/// resets the crash-budget so sparse, recoverable crashes can't accumulate into a permanent brick.
+/// Short enough that a tight crash-loop (each instance dies fast) never reaches it.
+const HEALTHY_RUN_RESET: Duration = Duration::from_secs(60);
+
 /// A running, self-restarting daemon child. Dropping it stops the supervisor and kills the
 /// child.
 pub struct DaemonSupervisor {
@@ -338,6 +356,9 @@ pub struct DaemonSupervisor {
     child: Arc<Mutex<Option<Child>>>,
     socket_path: PathBuf,
     control: ControlChannel,
+    /// Set true once the crash-budget is exhausted (the daemon is no longer being respawned). The
+    /// app can poll [`is_crashed_out`](Self::is_crashed_out) to surface "wallet unavailable".
+    crashed_out: Arc<AtomicBool>,
 }
 
 impl DaemonSupervisor {
@@ -351,6 +372,7 @@ impl DaemonSupervisor {
     pub fn spawn(socket_path: PathBuf, rpc_url: String, chain_id: u64) -> Self {
         let shutdown = Arc::new(AtomicBool::new(false));
         let child: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));
+        let crashed_out = Arc::new(AtomicBool::new(false));
         let control = ControlChannel::disconnected();
         let env = ChildEnv {
             socket_path: socket_path.clone(),
@@ -364,11 +386,12 @@ impl DaemonSupervisor {
             child: Arc::clone(&child),
             socket_path,
             control: control.clone(),
+            crashed_out: Arc::clone(&crashed_out),
         };
 
         std::thread::Builder::new()
             .name("deckard-signerd-sup".into())
-            .spawn(move || monitor_loop(env, shutdown, child, control))
+            .spawn(move || monitor_loop(env, shutdown, child, control, crashed_out))
             .ok();
 
         sup
@@ -389,6 +412,13 @@ impl DaemonSupervisor {
     /// (the public socket refuses it). Cheap to clone.
     pub fn control(&self) -> ControlChannel {
         self.control.clone()
+    }
+
+    /// True once the daemon crash-looped past its budget and the supervisor stopped respawning it
+    /// (issue #108, Option D). The wallet is unavailable until the app restarts; the app can poll
+    /// this to surface that instead of silently failing every request.
+    pub fn is_crashed_out(&self) -> bool {
+        self.crashed_out.load(Ordering::SeqCst)
     }
 }
 
@@ -501,6 +531,17 @@ fn backoff_and_continue(backoff: &mut Duration, shutdown: &AtomicBool) -> bool {
     true
 }
 
+/// Record an instability event at `now` and report whether the crash-budget is exhausted (issue
+/// #108, Option D). Prunes events older than [`RESPAWN_WINDOW`] first, so only a burst of
+/// `RESPAWN_BUDGET` exits *within the window* trips it — a daemon healthy for long stretches that
+/// then crashes once never does. Pure (instants injected) so the policy is unit-tested without
+/// spawning processes.
+fn over_crash_budget(crash_times: &mut Vec<Instant>, now: Instant) -> bool {
+    crash_times.retain(|t| now.duration_since(*t) < RESPAWN_WINDOW);
+    crash_times.push(now);
+    crash_times.len() >= RESPAWN_BUDGET
+}
+
 /// Spawn → poll-until-exit → backoff → respawn, until shutdown is signalled. Each spawn mints a
 /// FRESH capability channel (an inherited fd serves exactly one daemon instance), publishes the
 /// app end while the daemon is alive, and disconnects it when the daemon exits — so a restarted
@@ -510,8 +551,12 @@ fn monitor_loop(
     shutdown: Arc<AtomicBool>,
     child_slot: Arc<Mutex<Option<Child>>>,
     control: ControlChannel,
+    crashed_out: Arc<AtomicBool>,
 ) {
     let mut backoff = Duration::from_millis(200);
+    // Crash-budget window (issue #108): timestamps of recent unexpected exits / spawn failures.
+    // A clean shutdown (Drop → `shutdown`) returns out of the poll loop and never records here.
+    let mut crash_times: Vec<Instant> = Vec::new();
     while !shutdown.load(Ordering::SeqCst) {
         // Resolve + provenance-check the daemon binary on every spawn attempt. In a release build
         // this is the ONE canonical bundled path (ownership/permission/symlink verified); a failure
@@ -561,6 +606,7 @@ fn monitor_loop(
                 if let Ok(mut slot) = child_slot.lock() {
                     *slot = Some(child);
                 }
+                let started = Instant::now();
                 // Poll for exit, releasing the lock between polls so Drop can kill the child.
                 loop {
                     if shutdown.load(Ordering::SeqCst) {
@@ -592,10 +638,34 @@ fn monitor_loop(
                 // The daemon is gone: tear down its capability channel so a stale end is never
                 // used against the next instance (the next iteration mints a fresh one).
                 control.disconnect();
+                // A sustained healthy run resets the crash-budget: only a TIGHT loop (each instance
+                // dying fast) should ever stop respawns. A daemon that stayed up past
+                // `HEALTHY_RUN_RESET` and then crashed — even repeatedly, e.g. an RPC outage once a
+                // minute — must keep being respawned, not accumulate toward a permanent brick.
+                if started.elapsed() >= HEALTHY_RUN_RESET {
+                    crash_times.clear();
+                }
             }
             Err(e) => {
                 eprintln!("deckard: failed to spawn signerd ({}): {e}", bin.display());
             }
+        }
+
+        // Crash-budget (issue #108): the daemon just exited unexpectedly (or failed to spawn) —
+        // an instability event. Count events in a sliding window with NO sustained healthy run in
+        // between (a healthy run clears the window above); too many ⇒ stop respawning and surface,
+        // rather than hot-loop forever (the backoff resets on any healthy poll, so it can't stop a
+        // fast crash-loop on its own). A clean Drop-shutdown returns from the poll loop and never
+        // reaches here.
+        if over_crash_budget(&mut crash_times, Instant::now()) {
+            eprintln!(
+                "deckard: signerd exited {} times in under {}s — NOT respawning. The wallet is \
+                 unavailable until the app restarts; check the logs above for the cause.",
+                crash_times.len(),
+                RESPAWN_WINDOW.as_secs()
+            );
+            crashed_out.store(true, Ordering::SeqCst);
+            return;
         }
 
         if !backoff_and_continue(&mut backoff, &shutdown) {
@@ -607,6 +677,40 @@ fn monitor_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Crash-budget (issue #108): a burst of `RESPAWN_BUDGET` exits inside the window trips it; a
+    /// run of fewer does not.
+    #[test]
+    fn crash_budget_trips_only_on_a_burst() {
+        let base = Instant::now();
+        let mut times = Vec::new();
+        for _ in 0..(RESPAWN_BUDGET - 1) {
+            assert!(
+                !over_crash_budget(&mut times, base),
+                "under budget must not trip"
+            );
+        }
+        assert!(
+            over_crash_budget(&mut times, base),
+            "the {RESPAWN_BUDGET}th exit within the window trips the budget"
+        );
+    }
+
+    /// Events older than the window are pruned, so a daemon that's stable for long stretches and
+    /// crashes occasionally never trips it (no permanent lockout from sparse failures).
+    #[test]
+    fn crash_budget_ages_out_old_events() {
+        let base = Instant::now();
+        let mut times = Vec::new();
+        for _ in 0..(RESPAWN_BUDGET - 1) {
+            over_crash_budget(&mut times, base);
+        }
+        let later = base + RESPAWN_WINDOW + Duration::from_secs(1);
+        assert!(
+            !over_crash_budget(&mut times, later),
+            "events older than the window are pruned → not over budget"
+        );
+    }
 
     fn child_env() -> ChildEnv {
         ChildEnv {
