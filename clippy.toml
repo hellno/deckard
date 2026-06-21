@@ -32,4 +32,6 @@ disallowed-methods = [
     { path = "std::mem::forget", reason = "skips Drop, so skips zeroize scrubbing of key material; use drop()" },
     { path = "core::mem::forget", reason = "same as std::mem::forget (re-export) — skips zeroize scrubbing; use drop()" },
     { path = "rand::thread_rng", reason = "use OsRng for anything key-derived (keystore.rs already does)" },
+    { path = "rand::RngCore::fill_bytes", reason = "panics if the OS CSPRNG fails; in deckard-core use keystore::fill_secure() (try_fill_bytes) and propagate the error" },
+    { path = "rand::seq::SliceRandom::shuffle", reason = "calls fill_bytes internally (latent panic on CSPRNG failure); use a try_fill_bytes-based selection instead" },
 ]
