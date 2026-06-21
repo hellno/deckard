@@ -101,6 +101,10 @@ pub const SHIELD_UNAVAILABLE: &str = "shield_unavailable";
 /// self-approve. The pending record is left untouched (`Pending`); the public caller is
 /// refused with this typed denial.
 pub const RESOLVE_NOT_AUTHORIZED: &str = "resolve_not_authorized";
+/// The durable daily-spend reservation could not be persisted before signing (issue #108):
+/// the disk write/fsync failed, so the daemon refuses to sign rather than move funds it cannot
+/// durably account against the cap. Fail-closed; the cause is logged, never put on the wire.
+pub const RESERVE_FAILED: &str = "reserve_failed";
 
 // ───────────────────────── Swap v1 (CoW) ─────────────────────────
 // Shaped-approve admission + order sign/cancel guards in the daemon, and the swap mock.

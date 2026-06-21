@@ -106,6 +106,12 @@ impl Config {
         self.config_dir.join(deckard_core::config::POLICY_FILE)
     }
 
+    /// The durable daily-spend counter path (issue #108). Missing on first run; the daemon
+    /// recovers prior spend from it on boot so a restart can't silently zero the daily cap.
+    pub fn spend_path(&self) -> PathBuf {
+        self.config_dir.join(deckard_core::config::SPEND_FILE)
+    }
+
     /// The RPC endpoint with any embedded credentials/host elided — safe to log.
     pub fn redacted_rpc(&self) -> String {
         redact_url(&self.rpc_url)

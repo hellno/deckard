@@ -163,6 +163,43 @@ impl Header {
     }
 }
 
+/// Atomically write `bytes` to `path` with `0600` perms: write a temp file, fsync it, rename
+/// over the target, then fsync the parent dir so the rename itself survives a crash/power loss.
+/// Never leaves a partially written file — a reader sees the old file or the whole new one.
+///
+/// Extracted from [`Vault::write_atomic`] so any durable single-writer state (the signer's daily
+/// spend counter, `deckard-signerd`) reuses the exact same recipe instead of re-deriving it. The
+/// temp name is `<stem>.tmp`; two writers that share a directory must use distinct file stems
+/// (e.g. `vault.bin` → `vault.tmp`, `spend.json` → `spend.tmp`) so their temps never collide.
+pub fn atomic_write(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    use std::io::Write;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("tmp");
+    {
+        // Open the temp file already at 0600 — no window where it exists world-readable.
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)?;
+    // fsync the directory so the rename itself is durable across a crash/power loss.
+    if let Some(dir) = path.parent() {
+        if let Ok(dirf) = std::fs::File::open(dir) {
+            let _ = dirf.sync_all();
+        }
+    }
+    Ok(())
+}
+
 /// The on-disk vault: header + the two ciphertexts. Carries no plaintext secret.
 #[derive(Clone)]
 #[must_use]
@@ -403,35 +440,11 @@ impl Vault {
         })
     }
 
-    /// Atomically write the vault to `path` with `0600` perms: write a temp file, fsync,
-    /// rename over the target. Never leaves a partially written vault.
+    /// Atomically write the vault to `path` with `0600` perms (temp file → fsync → rename →
+    /// dir-fsync). Never leaves a partially written vault. Delegates to the free [`atomic_write`]
+    /// so the daemon's spend counter shares the identical durability recipe.
     pub fn write_atomic(&self, path: &Path) -> anyhow::Result<()> {
-        use std::io::Write;
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let tmp = path.with_extension("tmp");
-        {
-            // Open the temp file already at 0600 — no window where it exists world-readable.
-            let mut opts = std::fs::OpenOptions::new();
-            opts.write(true).create(true).truncate(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                opts.mode(0o600);
-            }
-            let mut f = opts.open(&tmp)?;
-            f.write_all(&self.to_bytes())?;
-            f.sync_all()?;
-        }
-        std::fs::rename(&tmp, path)?;
-        // fsync the directory so the rename itself is durable across a crash/power loss.
-        if let Some(dir) = path.parent() {
-            if let Ok(dirf) = std::fs::File::open(dir) {
-                let _ = dirf.sync_all();
-            }
-        }
-        Ok(())
+        atomic_write(path, &self.to_bytes())
     }
 
     /// Read and parse a vault from `path`, refusing an implausibly large file before

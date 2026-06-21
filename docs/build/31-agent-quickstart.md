@@ -130,6 +130,7 @@ error is to retry — for two of these (marked **do NOT retry**) that instinct i
 | `chain_mismatch` | Sidecar and daemon disagree on the chain (e.g. demo sidecar → real daemon). | Re-run `deckard-mcp install --demo` and make sure `just demo` is what's running. |
 | `over_cap` | Over the cap with `require_approval = never` — nothing can authorize it. | Lower the amount under `per_tx_cap_wei` (read it with `deckard_policy_get`). |
 | `cap_exceeded` | Executing would pass the spending caps as re-checked at sign time. | Lower the amount or wait for the UTC-midnight rollover; re-read the policy for current numbers. |
+| `reserve_failed` | The daemon could not durably record the spend before signing (a disk/fsync error), so it refused to sign rather than move funds it can't account against the cap. | Transient — check disk space, then re-run from `deckard_shield`. If it persists, a human checks the daemon host. |
 | `off_allowlist` | The recipient isn't in `allow_to`. | Use an allowed recipient, or a human edits `policy.json`. |
 | `undecodable` | The intent's calldata doesn't match its kind (client-side bug if it recurs). | Re-run the flow from `deckard_shield`. |
 | `shield_to_mismatch` | The shield doesn't target the official Railgun contract for this chain. | Re-run from `deckard_shield` (it builds the right target); recurring means the chain is unsupported. |

@@ -35,6 +35,7 @@ use crate::config::Config;
 use crate::policy_store::{self, current_utc_day};
 use crate::request_id::{request_id_for, request_id_for_order};
 use crate::signing;
+use crate::spend_store::SpendStore;
 
 /// Default lifetime of a `NeedsApproval` before `status`/`execute` report `Expired`.
 /// Overridable via `DECKARD_APPROVAL_TTL_SECS` (used by tests to exercise expiry quickly).
@@ -220,8 +221,10 @@ pub struct Daemon {
     cfg: Config,
     state: VaultState,
     policy: Policy,
-    /// UTC day of the current `spent_today_wei` window (for the midnight rollover).
-    spent_day: u64,
+    /// Durable daily-spend accounting (issue #108): persists the cap across restart and reserves a
+    /// spend before signing. Owns the forward-only UTC-day window; `policy.spent_today_wei` is a
+    /// clamped mirror of `spend.effective_spent()` kept in sync after every mutation.
+    spend: SpendStore,
     /// Lifetime of a `NeedsApproval` record.
     approval_ttl: Duration,
     requests: HashMap<RequestId, PendingReq>,
@@ -239,20 +242,37 @@ pub struct Daemon {
 }
 
 impl Daemon {
-    /// Build a `Locked` daemon, loading the policy (or its safe default) up front.
+    /// Build a `Locked` daemon, loading the policy (or its safe default) and the durable spend
+    /// counter (issue #108) up front. The counter is recovered into `policy.spent_today_wei` so a
+    /// restart can't silently zero the day's accounting; a forward-only rollover applies if the
+    /// UTC day has advanced since the last write. The account is bound later at unlock.
     pub fn new(cfg: Config) -> Self {
-        let policy = policy_store::load_policy(&cfg.policy_path());
+        let mut policy = policy_store::load_policy(&cfg.policy_path());
+        let today = current_utc_day();
+        let mut spend = SpendStore::load(cfg.spend_path(), cfg.chain_id, today);
+        spend.rollover(today);
+        // Recover the day's durable spend, clamped to the cap so the reported running total never
+        // exceeds it (a crash-orphaned over-cap reservation reads as "fully spent", not a ghost
+        // number above the cap).
+        policy.spent_today_wei = spend.effective_spent().min(policy.daily_cap_wei);
         Self {
             cfg,
             state: VaultState::Locked,
             policy,
-            spent_day: current_utc_day(),
+            spend,
             approval_ttl: approval_ttl(),
             requests: HashMap::new(),
             seq_counter: 0,
             #[cfg(feature = "verified-reads")]
             helios: HeliosCell::new(),
         }
+    }
+
+    /// Mirror the durable counter into the live policy's running total, clamped to the daily cap
+    /// (so `evaluate` and `PolicyGet` see the persisted accounting and the reported number never
+    /// exceeds the cap). Called after every spend mutation.
+    fn sync_policy_spend(&mut self) {
+        self.policy.spent_today_wei = self.spend.effective_spent().min(self.policy.daily_cap_wei);
     }
 
     /// A clone of the daemon's [`HeliosCell`] handle, so the server can prime the Helios
@@ -411,6 +431,13 @@ impl Daemon {
                     };
                     self.policy.revoked = false; // a fresh unlock re-arms
                     self.requests.clear(); // fresh session: no stale approvals survive a re-unlock
+                                           // Roll the window forward first (a re-unlock may cross a UTC midnight since
+                                           // boot), then bind the durable spend window to this account (issue #108): a
+                                           // different account (a re-key) starts a fresh window; the same account recovers
+                                           // the day's spend. Re-sync the live policy mirror to the durable counter.
+                    self.rollover();
+                    self.spend.bind_account(address, current_utc_day());
+                    self.sync_policy_spend();
                     UnlockOutcome::Unlocked { address }
                 }
                 // A successfully decrypted vault that can't derive an address is corrupt;
@@ -1120,6 +1147,28 @@ impl Daemon {
             (intent.to, intent.value, intent.calldata.clone(), scalar)
         };
 
+        // Reserve the spend DURABLY before releasing the signature (issue #108): a crash between
+        // signing and the post-broadcast commit must not lose the accounting. Skip `value == 0`
+        // (shields / shaped approves / contract calls move no ETH via `value`). A reserve-write
+        // failure means we can't durably account this spend, so we fail CLOSED — deny rather than
+        // sign un-accounted funds.
+        //
+        // The reserve + commit fsyncs land under the daemon mutex that also serves STOP; accepted
+        // for v1 (anvil-instant, same posture as the broadcast below).
+        // TODO(#108 follow-up): if the STOP latency bites on a slow/contended disk, move these two
+        // fsyncs off the reactor via `tokio::task::spawn_blocking` instead of widening the brake's
+        // critical section. Deliberately NOT an issue yet — revisit only if measured latency hurts.
+        let reserve_value = value;
+        if !reserve_value.is_zero() {
+            if let Err(e) = self.spend.reserve(reserve_value) {
+                eprintln!("signerd: ⚠ spend reserve failed ({e}); refusing to sign (fail-closed)");
+                return ExecuteResult::Denied {
+                    reason: deny_reasons::RESERVE_FAILED.into(),
+                };
+            }
+            self.sync_policy_spend();
+        }
+
         // Phase 2: sign + broadcast (lock held — serialized; acceptable for v1). A bounded
         // timeout keeps a hung RPC from wedging the daemon (and STOP) behind the held lock.
         let broadcast = signing::broadcast_intent(
@@ -1133,22 +1182,49 @@ impl Daemon {
         let tx_hash = match tokio::time::timeout(BROADCAST_TIMEOUT, broadcast).await {
             Ok(Ok(hash)) => hash,
             Ok(Err(e)) => {
+                // Clean RPC rejection: the tx did NOT go out → release the reservation (give the
+                // headroom back). Safe because nothing moved.
+                if !reserve_value.is_zero() {
+                    self.spend.release(reserve_value);
+                    self.sync_policy_spend();
+                }
                 return ExecuteResult::Denied {
                     reason: deny_reasons::broadcast_failed(one_line(&e)),
-                }
+                };
             }
             Err(_elapsed) => {
+                // Timeout: the tx MAY have landed (status UNKNOWN) → KEEP the reservation counted
+                // (commit it). Releasing here would re-open the double-spend the durable counter
+                // exists to close. Exact reconciliation is deferred (issue #108 / post-#72).
+                if !reserve_value.is_zero() {
+                    self.spend.commit(reserve_value);
+                    self.sync_policy_spend();
+                }
+                // Mark the request TERMINAL so it can't be re-executed. The tx status is unknown
+                // and may have landed; a retry would reserve+broadcast a SECOND time (a double-spend
+                // — and for a human-approved over-cap request the sign-time cap re-check is skipped,
+                // so nothing else would stop it). This is the "do NOT retry" BROADCAST_TIMEOUT
+                // contract, enforced at the daemon instead of trusting the caller.
+                if let Some(req) = self.requests.get_mut(&request_id) {
+                    req.status = ApprovalStatus::Denied {
+                        reason: deny_reasons::BROADCAST_TIMEOUT.into(),
+                    };
+                }
                 return ExecuteResult::Denied {
                     reason: deny_reasons::BROADCAST_TIMEOUT.into(),
-                }
+                };
             }
         };
 
-        // Phase 3: record the broadcast + bump the daily spend.
+        // Phase 3: record the broadcast + commit the reserved spend (reserved → committed). The
+        // durable counter is the source of truth; `sync_policy_spend` mirrors it into the policy.
         if let Some(req) = self.requests.get_mut(&request_id) {
             req.broadcast = Some(tx_hash);
         }
-        self.policy.spent_today_wei = self.policy.spent_today_wei.saturating_add(value);
+        if !reserve_value.is_zero() {
+            self.spend.commit(reserve_value);
+            self.sync_policy_spend();
+        }
         ExecuteResult::Broadcast { tx_hash }
     }
 
@@ -1379,12 +1455,13 @@ impl Daemon {
         !self.cfg.autonomy_override && !deckard_core::chain::is_testnet_or_dev(self.cfg.chain_id)
     }
 
-    /// Reset the daily spend window when the UTC day ticks over.
+    /// Reset the daily spend window when the UTC day ticks over — **forward-only** (issue #108):
+    /// the durable counter resets only when the day advances, so a backward wall-clock can't reset
+    /// the cap. The counter is the single source of truth for the window; the policy mirror is
+    /// re-synced when it rolls.
     fn rollover(&mut self) {
-        let today = current_utc_day();
-        if today != self.spent_day {
-            self.spent_day = today;
-            self.policy.spent_today_wei = U256::ZERO;
+        if self.spend.rollover(current_utc_day()) {
+            self.sync_policy_spend();
         }
     }
 }

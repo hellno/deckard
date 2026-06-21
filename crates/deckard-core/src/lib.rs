@@ -94,7 +94,9 @@ pub use env::{demo_fork_block, screen_capture_allowed, verified_reads_enabled};
 pub use eth::{probe_rpc_chain_id, EthProvider, Read, DEFAULT_RPC};
 #[cfg(feature = "verified-reads")]
 pub use helios::{launch_verified, VerifiedReader, DEFAULT_CONSENSUS_RPC};
-pub use keystore::{random_word_positions, KdfParams, SecretKind, UnlockedVault, Vault, WordCount};
+pub use keystore::{
+    atomic_write, random_word_positions, KdfParams, SecretKind, UnlockedVault, Vault, WordCount,
+};
 // The key-less shield-calldata builder + the 0zk recipient type, re-exported so the daemon
 // and its tests can name them through core without a direct `railgun` dependency.
 #[cfg(feature = "shield")]
