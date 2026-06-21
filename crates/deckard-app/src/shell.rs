@@ -719,8 +719,10 @@ impl Shell {
     // --- auth / keystore actions (Chunk 3) ---
 
     pub fn start_create(&mut self, cx: &mut Context<Self>) {
-        // A fresh attempt invalidates any still-running create from a previous, abandoned try.
-        self.create_epoch = self.create_epoch.wrapping_add(1);
+        // Start clean + self-sufficient (don't rely on the caller having abandoned a prior try):
+        // invalidate any still-running KDF, clear the busy flag, and wipe anything a previous
+        // attempt staged.
+        self.abandon_create();
         self.auth = AuthStep::CreateSetup;
         self.auth_error = None;
         cx.notify();
@@ -819,6 +821,9 @@ impl Shell {
     /// CreateVerify → CreateBackup: let the user go back to re-read the phrase before verifying.
     pub fn back_to_backup(&mut self, cx: &mut Context<Self>) {
         self.reveal_seed = false;
+        // Invalidate any pending auto-hide timer, same as advance_to_verify — keep the reveal-epoch
+        // discipline symmetric across both backup↔verify transitions.
+        self.reveal_epoch = self.reveal_epoch.wrapping_add(1);
         self.auth_error = None;
         self.auth = AuthStep::CreateBackup;
         cx.notify();
@@ -919,14 +924,16 @@ impl Shell {
         if self.auth_busy {
             return;
         }
-        let p1 = self.create_pass.read(cx).value().to_string();
-        let p2 = self.create_pass2.read(cx).value().to_string();
+        // Both passphrase copies stay in `Zeroizing` so neither the entry nor the confirm field's
+        // plaintext lingers in freed heap after this call (the discipline the rest of the flow keeps).
+        let p1 = Zeroizing::new(self.create_pass.read(cx).value().to_string());
+        let p2 = Zeroizing::new(self.create_pass2.read(cx).value().to_string());
         if p1.chars().count() < 8 {
             self.auth_error = Some("Passphrase must be at least 8 characters".into());
             cx.notify();
             return;
         }
-        if p1 != p2 {
+        if *p1 != *p2 {
             self.auth_error = Some("Passphrases don't match".into());
             cx.notify();
             return;
@@ -937,7 +944,7 @@ impl Shell {
         // Tag this KDF so a result that lands after the user backed out (which bumps the epoch via
         // `abandon_create`) is dropped instead of staging orphaned secrets in memory.
         let epoch = self.create_epoch;
-        let pass = Zeroizing::new(p1);
+        let pass = p1;
         let task = cx.background_spawn(async move {
             let made = Vault::create(&pass, WordCount::Twelve, KdfParams::PRODUCTION);
             made.map(|(v, phrase)| (v, phrase, pass))
@@ -1018,8 +1025,9 @@ impl Shell {
                         this.reveal_seed = false;
                         this.seed_copied = false;
                         // Land on the "you're ready" interstitial rather than dropping straight into
-                        // the app. `wallet_address` is read only once `auth == Ready`, so stashing it
-                        // here is inert until "Enter Deckard" calls `finish_unlock`.
+                        // the app. The address is shown on that screen and then handed to
+                        // `finish_unlock` by the "Enter Deckard" click; the live app's portfolio /
+                        // pollers don't start until then (they fence on `auth == Ready`).
                         this.wallet_address = Some(addr);
                         this.auth = AuthStep::CreateDone;
                         cx.notify();
@@ -1360,6 +1368,14 @@ impl Shell {
     /// Auto-focus the primary input for the current auth step (so the user — and the
     /// keyboard — can type immediately). Called once per step from `render`.
     fn focus_auth_input(&self, window: &mut Window, cx: &mut Context<Self>) {
+        // The verify field holds real seed words (3 of the 12) the user typed to prove their
+        // backup, and `InputState` is not `Zeroizing`. Once we've left the verify step — on success
+        // to CreateDone, or Back to CreateBackup — wipe it so those words don't linger in memory for
+        // the rest of the session. (On the verify step itself the `target` clear below handles it.)
+        if self.auth != AuthStep::CreateVerify {
+            self.confirm_words
+                .update(cx, |input, cx| input.set_value("", window, cx));
+        }
         let target = match self.auth {
             AuthStep::CreateSetup => Some(&self.create_pass),
             // The backup screen is reveal-only (no text input); the verify step takes the words.

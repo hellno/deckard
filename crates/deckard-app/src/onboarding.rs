@@ -126,16 +126,11 @@ impl Shell {
             )
         };
         // Live strength meter — shown only once there's something to score. Length dominates; the
-        // value never leaves the input (we read length + classes, never store or log it).
-        let (frac, label) = passphrase_strength(&self.create_pass.read(cx).value());
+        // value never leaves the input (we read length + classes, never store or log it). The band
+        // is the single source of truth for BOTH the colour and the word, so they can't drift.
+        let (frac, band) = passphrase_strength(&self.create_pass.read(cx).value());
         let meter = (frac > 0.0).then(|| {
-            let bar_color = if frac < 0.5 {
-                danger
-            } else if frac < 0.72 {
-                warning
-            } else {
-                success
-            };
+            let bar_color = band.fill(danger, warning, success);
             v_flex()
                 .w_full()
                 .gap_1p5()
@@ -145,7 +140,7 @@ impl Shell {
                         .w_full()
                         .justify_between()
                         .child(crate::widgets::section_label("Passphrase strength", muted))
-                        .child(div().text_xs().text_color(bar_color).child(label)),
+                        .child(div().text_xs().text_color(bar_color).child(band.label())),
                 )
         });
         v_flex()
@@ -353,6 +348,9 @@ impl Shell {
                         Button::new("back-to-backup")
                             .ghost()
                             .label("Back")
+                            // Pinned during the seal/unlock write so the user can't navigate away
+                            // mid-flight and get force-jumped when the result lands.
+                            .disabled(self.auth_busy)
                             .on_click(cx.listener(|this, _, _, cx| this.back_to_backup(cx))),
                     )
                     .child(
@@ -368,12 +366,13 @@ impl Shell {
     /// The "you're ready" interstitial: the vault is sealed + unlocked; the user steps into the
     /// live app deliberately (DESIGN §Onboarding: "Ready — a real screen").
     fn render_create_done(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (muted, fg, slate) = {
+        let (muted, fg, slate, mono) = {
             let t = cx.theme();
             (
                 t.muted_foreground,
                 t.foreground,
                 crate::theme::identity_square(t.is_dark()),
+                t.mono_font_family.clone(),
             )
         };
         let addr = self.wallet_address_string();
@@ -384,19 +383,11 @@ impl Shell {
                 "It's encrypted on this device. Only your passphrase can open it — and your recovery phrase can restore it.",
                 cx,
             ))
-            .child(
-                h_flex()
-                    .items_center()
-                    .gap_2()
-                    .child(crate::widgets::identity_mark(&addr, px(22.0), px(6.0), slate, fg))
-                    .child(
-                        div()
-                            .font_family(cx.theme().mono_font_family.clone())
-                            .text_sm()
-                            .text_color(muted)
-                            .child(crate::widgets::short_addr(&addr)),
-                    ),
-            )
+            // The canonical address treatment (identicon + mono short_addr) — the same widget
+            // every other address row uses (DESIGN §Trust), no ENS during onboarding.
+            .child(crate::widgets::truncated_address(
+                &addr, None, mono, slate, fg, fg, muted,
+            ))
             .child(
                 Button::new("enter-deckard")
                     .primary()
@@ -557,14 +548,49 @@ impl Shell {
     }
 }
 
-/// A calm, advisory passphrase-strength estimate as `(fill 0–1, one-word label)`. Length is the
-/// dominant factor; using more character classes nudges it up within a band. Advisory only — the
-/// real defence is the Argon2id KDF — and deliberately dictionary-free so it pulls in no new
-/// dependency. Reads only the length + which classes are present; never stores or logs the value.
-fn passphrase_strength(pass: &str) -> (f32, &'static str) {
+/// One band of passphrase strength. The SINGLE source of truth for both the meter's word and its
+/// colour — derived once in [`passphrase_strength`] so the label and the bar colour can never drift
+/// apart (the threshold cut-points live in exactly one place).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PassBand {
+    Empty,
+    TooShort,
+    Weak,
+    Fair,
+    Good,
+    Strong,
+}
+
+impl PassBand {
+    fn label(self) -> &'static str {
+        match self {
+            PassBand::Empty => "",
+            PassBand::TooShort => "Too short",
+            PassBand::Weak => "Weak",
+            PassBand::Fair => "Fair",
+            PassBand::Good => "Good",
+            PassBand::Strong => "Strong",
+        }
+    }
+
+    /// danger for too-short/weak, warning (amber) for fair, success (green) for good/strong.
+    fn fill(self, danger: Hsla, warning: Hsla, success: Hsla) -> Hsla {
+        match self {
+            PassBand::Empty | PassBand::TooShort | PassBand::Weak => danger,
+            PassBand::Fair => warning,
+            PassBand::Good | PassBand::Strong => success,
+        }
+    }
+}
+
+/// A calm, advisory passphrase-strength estimate as `(fill 0–1, band)`. Length is the dominant
+/// factor; using more character classes nudges it up within a band. Advisory only — the real
+/// defence is the Argon2id KDF — and deliberately dictionary-free so it pulls in no new dependency.
+/// Reads only the length + which classes are present; never stores or logs the value.
+fn passphrase_strength(pass: &str) -> (f32, PassBand) {
     let len = pass.chars().count();
     if len == 0 {
-        return (0.0, "");
+        return (0.0, PassBand::Empty);
     }
     let lower = pass.chars().any(|c| c.is_lowercase());
     let upper = pass.chars().any(|c| c.is_uppercase());
@@ -580,18 +606,18 @@ fn passphrase_strength(pass: &str) -> (f32, &'static str) {
     };
     let variety_bonus = classes.saturating_sub(1) as f32 * 0.05;
     let frac = (len_score + variety_bonus).min(1.0);
-    let label = if len < 8 {
-        "Too short"
+    let band = if len < 8 {
+        PassBand::TooShort
     } else if frac < 0.5 {
-        "Weak"
+        PassBand::Weak
     } else if frac < 0.72 {
-        "Fair"
+        PassBand::Fair
     } else if frac < 0.9 {
-        "Good"
+        PassBand::Good
     } else {
-        "Strong"
+        PassBand::Strong
     };
-    (frac, label)
+    (frac, band)
 }
 
 /// The thin strength bar: a 4px track with a fill whose width tracks `frac` and whose color is
@@ -609,21 +635,22 @@ fn strength_bar(frac: f32, fill: Hsla, track: Hsla) -> impl IntoElement {
 
 #[cfg(test)]
 mod tests {
-    use super::passphrase_strength;
+    use super::{passphrase_strength, PassBand};
 
     #[test]
     fn empty_passphrase_is_unscored() {
-        let (frac, label) = passphrase_strength("");
+        let (frac, band) = passphrase_strength("");
         assert_eq!(frac, 0.0);
-        assert_eq!(label, "");
+        assert_eq!(band, PassBand::Empty);
+        assert_eq!(band.label(), "");
     }
 
     #[test]
     fn below_minimum_length_reads_too_short() {
         // Under the 8-char floor `do_create` enforces — the meter must say so, never "Weak".
-        let (frac, label) = passphrase_strength("short");
+        let (frac, band) = passphrase_strength("short");
         assert!(frac < 0.5);
-        assert_eq!(label, "Too short");
+        assert_eq!(band, PassBand::TooShort);
     }
 
     #[test]
@@ -638,19 +665,19 @@ mod tests {
 
     #[test]
     fn variety_lifts_within_a_length() {
-        // Same length (12), more character classes → higher score + a better label.
-        let (plain, plain_label) = passphrase_strength("abcdefghijkl");
-        let (varied, varied_label) = passphrase_strength("Abcdefgh1jkl");
+        // Same length (12), more character classes → higher score + a better band.
+        let (plain, plain_band) = passphrase_strength("abcdefghijkl");
+        let (varied, varied_band) = passphrase_strength("Abcdefgh1jkl");
         assert!(varied > plain);
-        assert_eq!(plain_label, "Fair");
-        assert_eq!(varied_label, "Good");
+        assert_eq!(plain_band, PassBand::Fair);
+        assert_eq!(varied_band, PassBand::Good);
     }
 
     #[test]
     fn long_and_varied_reads_strong() {
-        let (frac, label) = passphrase_strength("Abcdefghijklmnop1!");
+        let (frac, band) = passphrase_strength("Abcdefghijklmnop1!");
         assert!(frac >= 0.9);
-        assert_eq!(label, "Strong");
+        assert_eq!(band, PassBand::Strong);
     }
 
     #[test]
