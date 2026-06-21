@@ -4,14 +4,14 @@
 //! confirm-a-subset backup, and the (Phase-2) Touch ID affordance shown disabled.
 
 use gpui::{
-    div, px, Context, FontWeight, InteractiveElement, IntoElement, MouseButton, ParentElement,
-    Styled,
+    div, px, relative, Context, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton,
+    ParentElement, Styled,
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
     h_flex,
     input::Input,
-    v_flex, ActiveTheme, IconName, TitleBar,
+    v_flex, ActiveTheme, Disableable, IconName, TitleBar,
 };
 
 use crate::settings::ThemeModePref;
@@ -54,6 +54,8 @@ impl Shell {
             AuthStep::Choose => self.render_choose(cx).into_any_element(),
             AuthStep::CreateSetup => self.render_create_setup(cx).into_any_element(),
             AuthStep::CreateBackup => self.render_create_backup(cx).into_any_element(),
+            AuthStep::CreateVerify => self.render_create_verify(cx).into_any_element(),
+            AuthStep::CreateDone => self.render_create_done(cx).into_any_element(),
             AuthStep::Import => self.render_import(cx).into_any_element(),
             AuthStep::Migrate => self.render_migrate(cx).into_any_element(),
             AuthStep::Unlock => self.render_unlock(cx).into_any_element(),
@@ -111,11 +113,46 @@ impl Shell {
         } else {
             "Continue"
         };
+        let (amber, danger, warning, success, track, muted, fg) = {
+            let t = cx.theme();
+            (
+                crate::theme::amber(t.is_dark()),
+                t.danger,
+                t.warning,
+                t.success,
+                t.border,
+                t.muted_foreground,
+                t.foreground,
+            )
+        };
+        // Live strength meter — shown only once there's something to score. Length dominates; the
+        // value never leaves the input (we read length + classes, never store or log it).
+        let (frac, label) = passphrase_strength(&self.create_pass.read(cx).value());
+        let meter = (frac > 0.0).then(|| {
+            let bar_color = if frac < 0.5 {
+                danger
+            } else if frac < 0.72 {
+                warning
+            } else {
+                success
+            };
+            v_flex()
+                .w_full()
+                .gap_1p5()
+                .child(strength_bar(frac, bar_color, track))
+                .child(
+                    h_flex()
+                        .w_full()
+                        .justify_between()
+                        .child(crate::widgets::section_label("Passphrase strength", muted))
+                        .child(div().text_xs().text_color(bar_color).child(label)),
+                )
+        });
         v_flex()
             .gap_5()
             .child(self.auth_heading(
                 "Set a passphrase",
-                "This encrypts your wallet at rest with Argon2id + XChaCha20-Poly1305. You'll enter it each time you open Deckard.",
+                "You'll enter this each time you open Deckard. Choose something long you'll remember — length matters more than symbols.",
                 cx,
             ))
             .child(
@@ -124,7 +161,19 @@ impl Shell {
                     .child(Input::new(&self.create_pass).w_full())
                     .child(Input::new(&self.create_pass2).w_full()),
             )
-            .child(self.touch_id_note(cx))
+            .children(meter)
+            .child(crate::widgets::caution_line(
+                amber,
+                fg,
+                false,
+                "If you forget it, no one can reset it — not even us.",
+            ))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child("Encrypted at rest with Argon2id + XChaCha20-Poly1305."),
+            )
             .child(self.error_line(cx))
             .child(
                 h_flex()
@@ -145,18 +194,21 @@ impl Shell {
             )
     }
 
+    /// Step 1 of backup: reveal the phrase (read-only). Verification is the *next*, separate step
+    /// (DESIGN §Onboarding) — there's no quiz input on this screen.
     fn render_create_backup(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (border, surface, fg, muted) = {
+        let (border, surface, fg, muted, amber) = {
             let t = cx.theme();
-            (t.border, t.secondary, t.foreground, t.muted_foreground)
-        };
-        let busy_label = if self.auth_busy {
-            "Saving…"
-        } else {
-            "Confirm & finish"
+            (
+                t.border,
+                t.secondary,
+                t.foreground,
+                t.muted_foreground,
+                crate::theme::amber(t.is_dark()),
+            )
         };
 
-        // The 12-word grid: each cell shows the word only while held-to-reveal.
+        // The 12-word grid: each cell shows the word only while held-to-reveal; otherwise dots.
         let words: Vec<String> = self
             .pending_phrase
             .as_ref()
@@ -196,14 +248,15 @@ impl Shell {
             grid = grid.child(row);
         }
 
-        // Press-and-hold to reveal; releasing (even off the button) re-hides.
+        // Press-and-hold to reveal; releasing (even off the button) re-hides, and it auto-hides
+        // after `SEED_REVEAL_TIMEOUT` even while held.
         let reveal_btn = div()
             .id("hold-reveal")
             .flex()
             .items_center()
             .justify_center()
             .gap_2()
-            .w_full()
+            .flex_1()
             .py_2()
             .rounded_md()
             .border_1()
@@ -229,32 +282,127 @@ impl Shell {
                 cx.listener(|this, _, _, cx| this.set_reveal_seed(false, cx)),
             );
 
-        // The confirm prompt: 1-indexed word positions.
-        let positions: Vec<String> = self
-            .confirm_positions
-            .iter()
-            .map(|i| format!("#{}", i + 1))
-            .collect();
-        let prompt = format!("Confirm words {}", positions.join(", "));
+        // The demoted Copy — explicit click only, never auto-copied (DESIGN §Seed reveal).
+        let copy_btn = Button::new("copy-phrase")
+            .ghost()
+            .label(if self.seed_copied {
+                "Copied ✓"
+            } else {
+                "Copy"
+            })
+            .on_click(cx.listener(|this, _, _, cx| this.copy_recovery_phrase(cx)));
 
         v_flex()
             .gap_4()
             .child(self.auth_heading(
                 "Back up your recovery phrase",
-                "Write these 12 words down and store them offline. Anyone with them controls your funds, and Deckard can't recover them for you.",
+                "These 12 words are the only way to restore your wallet. Write them down and store them offline — anyone who has them controls your funds, and Deckard can't recover them for you.",
                 cx,
             ))
             .child(grid)
-            .child(reveal_btn)
+            .child(crate::widgets::caution_line(
+                amber,
+                fg,
+                false,
+                "Make sure nobody can see your screen before you reveal.",
+            ))
+            .child(h_flex().w_full().gap_2().child(reveal_btn).child(copy_btn))
+            .child(
+                Button::new("written-down")
+                    .primary()
+                    .w_full()
+                    .label("I've written it down")
+                    .on_click(cx.listener(|this, _, _, cx| this.advance_to_verify(cx))),
+            )
+    }
+
+    /// Step 2 of backup: verify by retyping requested words, with the grid hidden. The primary
+    /// stays disabled until the typed words match (DESIGN §Onboarding).
+    fn render_create_verify(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let muted = cx.theme().muted_foreground;
+        let busy_label = if self.auth_busy {
+            "Saving…"
+        } else {
+            "Confirm & finish"
+        };
+        let matches = self.backup_words_match(cx);
+
+        // The prompt: 1-indexed word positions.
+        let positions: Vec<String> = self
+            .confirm_positions
+            .iter()
+            .map(|i| format!("#{}", i + 1))
+            .collect();
+        let prompt = format!("Enter words {}", positions.join(", "));
+
+        v_flex()
+            .gap_4()
+            .child(self.auth_heading(
+                "Verify your backup",
+                "Type the words below to confirm you saved them. Your recovery phrase is hidden now.",
+                cx,
+            ))
             .child(div().pt_1().text_sm().text_color(muted).child(prompt))
             .child(Input::new(&self.confirm_words).w_full())
             .child(self.error_line(cx))
             .child(
-                Button::new("finish")
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .child(
+                        Button::new("back-to-backup")
+                            .ghost()
+                            .label("Back")
+                            .on_click(cx.listener(|this, _, _, cx| this.back_to_backup(cx))),
+                    )
+                    .child(
+                        Button::new("finish")
+                            .primary()
+                            .label(busy_label)
+                            .disabled(self.auth_busy || !matches)
+                            .on_click(cx.listener(|this, _, _, cx| this.confirm_backup(cx))),
+                    ),
+            )
+    }
+
+    /// The "you're ready" interstitial: the vault is sealed + unlocked; the user steps into the
+    /// live app deliberately (DESIGN §Onboarding: "Ready — a real screen").
+    fn render_create_done(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (muted, fg, slate) = {
+            let t = cx.theme();
+            (
+                t.muted_foreground,
+                t.foreground,
+                crate::theme::identity_square(t.is_dark()),
+            )
+        };
+        let addr = self.wallet_address_string();
+        v_flex()
+            .gap_5()
+            .child(self.auth_heading(
+                "Your wallet is ready",
+                "It's encrypted on this device. Only your passphrase can open it — and your recovery phrase can restore it.",
+                cx,
+            ))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(crate::widgets::identity_mark(&addr, px(22.0), px(6.0), slate, fg))
+                    .child(
+                        div()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .text_sm()
+                            .text_color(muted)
+                            .child(crate::widgets::short_addr(&addr)),
+                    ),
+            )
+            .child(
+                Button::new("enter-deckard")
                     .primary()
                     .w_full()
-                    .label(busy_label)
-                    .on_click(cx.listener(|this, _, _, cx| this.confirm_backup(cx))),
+                    .label("Enter Deckard")
+                    .on_click(cx.listener(|this, _, _, cx| this.enter_after_create(cx))),
             )
     }
 
@@ -406,5 +554,109 @@ impl Shell {
                 .as_ref()
                 .map(|e| crate::widgets::error_line(danger, e.clone())),
         )
+    }
+}
+
+/// A calm, advisory passphrase-strength estimate as `(fill 0–1, one-word label)`. Length is the
+/// dominant factor; using more character classes nudges it up within a band. Advisory only — the
+/// real defence is the Argon2id KDF — and deliberately dictionary-free so it pulls in no new
+/// dependency. Reads only the length + which classes are present; never stores or logs the value.
+fn passphrase_strength(pass: &str) -> (f32, &'static str) {
+    let len = pass.chars().count();
+    if len == 0 {
+        return (0.0, "");
+    }
+    let lower = pass.chars().any(|c| c.is_lowercase());
+    let upper = pass.chars().any(|c| c.is_uppercase());
+    let digit = pass.chars().any(|c| c.is_ascii_digit());
+    let symbol = pass.chars().any(|c| !c.is_alphanumeric());
+    let classes = [lower, upper, digit, symbol].iter().filter(|&&b| b).count();
+    let len_score = match len {
+        0..=7 => 0.18,
+        8..=11 => 0.46,
+        12..=15 => 0.70,
+        16..=19 => 0.88,
+        _ => 1.0,
+    };
+    let variety_bonus = classes.saturating_sub(1) as f32 * 0.05;
+    let frac = (len_score + variety_bonus).min(1.0);
+    let label = if len < 8 {
+        "Too short"
+    } else if frac < 0.5 {
+        "Weak"
+    } else if frac < 0.72 {
+        "Fair"
+    } else if frac < 0.9 {
+        "Good"
+    } else {
+        "Strong"
+    };
+    (frac, label)
+}
+
+/// The thin strength bar: a 4px track with a fill whose width tracks `frac` and whose color is
+/// chosen by the caller (danger → warning → success as strength rises). Mirrors the
+/// [`crate::widgets::budget_gauge`] track/fill shape, inverted in meaning.
+fn strength_bar(frac: f32, fill: Hsla, track: Hsla) -> impl IntoElement {
+    div().w_full().h(px(4.0)).rounded(px(2.0)).bg(track).child(
+        div()
+            .h(px(4.0))
+            .w(relative(frac.clamp(0.06, 1.0)))
+            .rounded(px(2.0))
+            .bg(fill),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::passphrase_strength;
+
+    #[test]
+    fn empty_passphrase_is_unscored() {
+        let (frac, label) = passphrase_strength("");
+        assert_eq!(frac, 0.0);
+        assert_eq!(label, "");
+    }
+
+    #[test]
+    fn below_minimum_length_reads_too_short() {
+        // Under the 8-char floor `do_create` enforces — the meter must say so, never "Weak".
+        let (frac, label) = passphrase_strength("short");
+        assert!(frac < 0.5);
+        assert_eq!(label, "Too short");
+    }
+
+    #[test]
+    fn length_dominates_the_band() {
+        // Same single class (lowercase), longer → strictly stronger.
+        let (weak, _) = passphrase_strength("abcdefgh"); // 8
+        let (fair, _) = passphrase_strength("abcdefghijkl"); // 12
+        let (good, _) = passphrase_strength("abcdefghijklmnop"); // 16
+        assert!(weak < fair, "8 < 12 chars");
+        assert!(fair < good, "12 < 16 chars");
+    }
+
+    #[test]
+    fn variety_lifts_within_a_length() {
+        // Same length (12), more character classes → higher score + a better label.
+        let (plain, plain_label) = passphrase_strength("abcdefghijkl");
+        let (varied, varied_label) = passphrase_strength("Abcdefgh1jkl");
+        assert!(varied > plain);
+        assert_eq!(plain_label, "Fair");
+        assert_eq!(varied_label, "Good");
+    }
+
+    #[test]
+    fn long_and_varied_reads_strong() {
+        let (frac, label) = passphrase_strength("Abcdefghijklmnop1!");
+        assert!(frac >= 0.9);
+        assert_eq!(label, "Strong");
+    }
+
+    #[test]
+    fn frac_never_exceeds_one() {
+        // The variety bonus must never push the bar past a full track.
+        let (frac, _) = passphrase_strength("Abcdefghijklmnopqrstuvwxyz0123456789!@#");
+        assert!(frac <= 1.0);
     }
 }

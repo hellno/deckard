@@ -47,6 +47,11 @@ const BALANCE_POLL_SECS: u64 = 20;
 /// a money move (DESIGN §confirm pattern). The ⌘↵ chord plus this delay replace the old hold.
 const COMMIT_ARM_DELAY: Duration = Duration::from_millis(450);
 
+/// How long the recovery phrase stays visible on a single hold-to-reveal before it auto-hides
+/// (DESIGN §Seed reveal: "auto-hides after a few seconds"). A defence against walking away with
+/// the seed on screen — even while the button is still held, the words blur back after this.
+const SEED_REVEAL_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Run `prework` (which seals + writes the keystore for create/import/migrate, or is a no-op
 /// for a plain unlock), then unlock OVER THE DAEMON SOCKET — the key is decrypted in the
 /// daemon, never here. Returns the wallet address or a one-line, user-facing error. Always
@@ -125,8 +130,12 @@ pub enum AuthStep {
     Choose,
     /// Create: set the passphrase.
     CreateSetup,
-    /// Create: reveal the recovery phrase and confirm a subset.
+    /// Create: reveal the recovery phrase (read-only; verification is a separate step).
     CreateBackup,
+    /// Create: verify the backup by retyping requested words, with the grid hidden.
+    CreateVerify,
+    /// Create: the vault is sealed + unlocked — a calm "you're ready" interstitial.
+    CreateDone,
     /// Import an existing phrase or raw key.
     Import,
     /// A legacy plaintext key was found — set a passphrase to encrypt it.
@@ -313,6 +322,16 @@ pub struct Shell {
     pub confirm_positions: Vec<usize>,
     /// Hold-to-reveal state for the recovery phrase.
     pub reveal_seed: bool,
+    /// Monotonic guard so a stale auto-hide timer can't blank a *later* reveal (each
+    /// reveal/hide bumps it; the timer only fires if its epoch still matches).
+    reveal_epoch: u64,
+    /// Monotonic guard for an in-flight `Vault::create`: bumped whenever the create flow is
+    /// (re)started or abandoned, so a slow KDF that finishes *after* the user backed out drops
+    /// its freshly-derived secrets instead of populating them into memory.
+    create_epoch: u64,
+    /// True briefly after the recovery phrase is copied, to flip the demoted Copy button to
+    /// "Copied ✓" — never auto-set; only an explicit click sets it (DESIGN §Seed reveal).
+    pub seed_copied: bool,
     /// The auth step whose primary input we've already auto-focused (focus once per step).
     focused_step: Option<AuthStep>,
     // Auth inputs (passphrases are never persisted).
@@ -522,17 +541,30 @@ impl Shell {
         let swap = CommitFlow::new(swap_amount, swap_recipient);
 
         // Submit-on-Enter for each auth field (keyboard-first).
+        // The first passphrase field re-renders on every edit so the live strength meter tracks
+        // it (DESIGN §Onboarding); Enter on the confirm field submits.
+        cx.subscribe(&create_pass, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        })
+        .detach();
         cx.subscribe(&create_pass2, |this, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
                 this.do_create(cx);
             }
         })
         .detach();
-        cx.subscribe(&confirm_words, |this, _, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::PressEnter { .. }) {
-                this.confirm_backup(cx);
-            }
-        })
+        // The verify field re-renders on every edit so the "Confirm & finish" button can stay
+        // disabled until the typed words match (DESIGN §Onboarding); Enter submits.
+        cx.subscribe(
+            &confirm_words,
+            |this, _, event: &InputEvent, cx| match event {
+                InputEvent::Change => cx.notify(),
+                InputEvent::PressEnter { .. } => this.confirm_backup(cx),
+                _ => {}
+            },
+        )
         .detach();
         cx.subscribe(&import_pass, |this, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
@@ -659,6 +691,9 @@ impl Shell {
             pending_pass: None,
             confirm_positions: Vec::new(),
             reveal_seed: false,
+            reveal_epoch: 0,
+            create_epoch: 0,
+            seed_copied: false,
             focused_step: None,
             create_pass,
             create_pass2,
@@ -684,26 +719,145 @@ impl Shell {
     // --- auth / keystore actions (Chunk 3) ---
 
     pub fn start_create(&mut self, cx: &mut Context<Self>) {
+        // A fresh attempt invalidates any still-running create from a previous, abandoned try.
+        self.create_epoch = self.create_epoch.wrapping_add(1);
         self.auth = AuthStep::CreateSetup;
         self.auth_error = None;
         cx.notify();
     }
 
     pub fn start_import(&mut self, cx: &mut Context<Self>) {
+        // Leaving create for import abandons any in-flight KDF + clears anything it staged.
+        self.abandon_create();
         self.auth = AuthStep::Import;
         self.auth_error = None;
         cx.notify();
     }
 
     pub fn auth_back_to_choose(&mut self, cx: &mut Context<Self>) {
+        self.abandon_create();
         self.auth = AuthStep::Choose;
         self.auth_error = None;
         cx.notify();
     }
 
+    /// Tear down any in-progress create: invalidate a still-running KDF (so its result is dropped,
+    /// not stored), clear the busy flag, and wipe every secret it may have staged. Secrets live in
+    /// `Zeroizing`, so dropping them here zeroizes them.
+    fn abandon_create(&mut self) {
+        self.create_epoch = self.create_epoch.wrapping_add(1);
+        self.auth_busy = false;
+        self.clear_pending_secrets();
+    }
+
+    /// Drop every staged-but-uncommitted create secret + the reveal/copy UI state. Each secret is
+    /// `Zeroizing`, so `= None` zeroizes it.
+    fn clear_pending_secrets(&mut self) {
+        self.pending_phrase = None;
+        self.pending_pass = None;
+        self.pending_vault = None;
+        self.reveal_seed = false;
+        self.seed_copied = false;
+    }
+
     pub fn set_reveal_seed(&mut self, reveal: bool, cx: &mut Context<Self>) {
         self.reveal_seed = reveal;
+        // Every reveal/hide invalidates any pending auto-hide timer (so releasing then re-holding
+        // restarts the clock instead of inheriting the old one).
+        self.reveal_epoch = self.reveal_epoch.wrapping_add(1);
+        if reveal {
+            let epoch = self.reveal_epoch;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(SEED_REVEAL_TIMEOUT).await;
+                this.update(cx, |this, cx| {
+                    // Only blank if this is still the same (un-superseded) reveal.
+                    if this.reveal_epoch == epoch && this.reveal_seed {
+                        this.reveal_seed = false;
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
         cx.notify();
+    }
+
+    /// Copy the recovery phrase to the clipboard — only ever from an explicit click on the demoted
+    /// Copy button (never auto-copied; DESIGN §Seed reveal). The phrase lives in `Zeroizing`; this
+    /// hands a plain copy to the OS clipboard at the user's deliberate request, then flips the
+    /// button to "Copied ✓" for a moment.
+    pub fn copy_recovery_phrase(&mut self, cx: &mut Context<Self>) {
+        let Some(phrase) = self.pending_phrase.as_ref() else {
+            return;
+        };
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(phrase.to_string()));
+        self.seed_copied = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(2)).await;
+            this.update(cx, |this, cx| {
+                this.seed_copied = false;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// CreateBackup → CreateVerify: the user confirms they saved the phrase; hide it and move to
+    /// the separate verify step (the grid is not shown there).
+    pub fn advance_to_verify(&mut self, cx: &mut Context<Self>) {
+        self.reveal_seed = false;
+        self.reveal_epoch = self.reveal_epoch.wrapping_add(1);
+        self.seed_copied = false;
+        self.auth_error = None;
+        self.auth = AuthStep::CreateVerify;
+        cx.notify();
+    }
+
+    /// CreateVerify → CreateBackup: let the user go back to re-read the phrase before verifying.
+    pub fn back_to_backup(&mut self, cx: &mut Context<Self>) {
+        self.reveal_seed = false;
+        self.auth_error = None;
+        self.auth = AuthStep::CreateBackup;
+        cx.notify();
+    }
+
+    /// CreateDone → the live app: the vault is already sealed + unlocked (the verify step did it);
+    /// this just wires up the app's live session (portfolio, pollers, agent policy).
+    pub fn enter_after_create(&mut self, cx: &mut Context<Self>) {
+        if let Some(addr) = self.wallet_address {
+            self.finish_unlock(addr, cx);
+        }
+    }
+
+    /// Whether the words typed on the verify step match the requested backup positions. Pure (no
+    /// side effects) so the "Confirm & finish" button can read it to stay disabled until correct,
+    /// and `confirm_backup` can gate on the same check. Case-insensitive, whitespace-tolerant.
+    pub fn backup_words_match(&self, cx: &Context<Self>) -> bool {
+        let Some(phrase) = self.pending_phrase.as_ref() else {
+            return false;
+        };
+        let words: Vec<&str> = phrase.split_whitespace().collect();
+        let expected: Vec<String> = self
+            .confirm_positions
+            .iter()
+            .map(|&i| words.get(i).copied().unwrap_or("").to_lowercase())
+            .collect();
+        // A missing/empty expected word means the positions are out of sync with the phrase — never
+        // treat that as a match (fail closed).
+        if expected.is_empty() || expected.iter().any(|w| w.is_empty()) {
+            return false;
+        }
+        let entered: Vec<String> = self
+            .confirm_words
+            .read(cx)
+            .value()
+            .split_whitespace()
+            .map(|s| s.trim().to_lowercase())
+            .collect();
+        entered == expected
     }
 
     /// Enter pressed on the single passphrase field → unlock or migrate.
@@ -780,6 +934,9 @@ impl Shell {
         self.auth_error = None;
         self.auth_busy = true;
         cx.notify();
+        // Tag this KDF so a result that lands after the user backed out (which bumps the epoch via
+        // `abandon_create`) is dropped instead of staging orphaned secrets in memory.
+        let epoch = self.create_epoch;
         let pass = Zeroizing::new(p1);
         let task = cx.background_spawn(async move {
             let made = Vault::create(&pass, WordCount::Twelve, KdfParams::PRODUCTION);
@@ -788,6 +945,12 @@ impl Shell {
         cx.spawn(async move |this, cx| {
             let res = task.await;
             this.update(cx, |this, cx| {
+                // Abandoned mid-KDF: drop `res` (its `Zeroizing` secrets zeroize) and leave whatever
+                // the user is doing now untouched — don't even clear `auth_busy`, which a newer
+                // operation may legitimately own.
+                if this.create_epoch != epoch {
+                    return;
+                }
                 this.auth_busy = false;
                 match res {
                     Ok((vault, phrase, pass)) => {
@@ -808,32 +971,20 @@ impl Shell {
         .detach();
     }
 
-    /// CreateBackup → check the quizzed words, then write + unlock the vault.
+    /// CreateVerify → check the quizzed words, then write + unlock the vault and land on the
+    /// "you're ready" interstitial.
     pub fn confirm_backup(&mut self, cx: &mut Context<Self>) {
         if self.auth_busy {
             return;
         }
-        let (Some(phrase), Some(vault), Some(pass)) = (
-            self.pending_phrase.clone(),
-            self.pending_vault.clone(),
-            self.pending_pass.clone(),
-        ) else {
+        let (Some(vault), Some(pass)) = (self.pending_vault.clone(), self.pending_pass.clone())
+        else {
             return;
         };
-        let words: Vec<&str> = phrase.split_whitespace().collect();
-        let expected: Vec<String> = self
-            .confirm_positions
-            .iter()
-            .map(|&i| words.get(i).copied().unwrap_or("").to_lowercase())
-            .collect();
-        let entered: Vec<String> = self
-            .confirm_words
-            .read(cx)
-            .value()
-            .split_whitespace()
-            .map(|s| s.trim().to_lowercase())
-            .collect();
-        if entered != expected {
+        // Same check the "Confirm & finish" button gates on — keep them on one predicate so the
+        // disabled state and the submit can never disagree. (It also re-checks `pending_phrase`,
+        // so a missing phrase fails closed here too.)
+        if !self.backup_words_match(cx) {
             self.auth_error = Some("Those words don't match your backup. Try again.".into());
             cx.notify();
             return;
@@ -859,12 +1010,26 @@ impl Shell {
                 match res {
                     Ok(addr) => {
                         wallet::delete_legacy_key();
+                        // The phrase is now backed up + verified — drop every pending secret. The
+                        // vault is sealed and the daemon is unlocked; we hold only the address.
                         this.pending_phrase = None;
                         this.pending_pass = None;
                         this.pending_vault = None;
-                        this.finish_unlock(addr, cx);
+                        this.reveal_seed = false;
+                        this.seed_copied = false;
+                        // Land on the "you're ready" interstitial rather than dropping straight into
+                        // the app. `wallet_address` is read only once `auth == Ready`, so stashing it
+                        // here is inert until "Enter Deckard" calls `finish_unlock`.
+                        this.wallet_address = Some(addr);
+                        this.auth = AuthStep::CreateDone;
+                        cx.notify();
                     }
                     Err(msg) => {
+                        // Deliberately KEEP the pending secrets on a write/unlock failure: the user
+                        // stays on Verify and the retry needs the same vault + phrase + passphrase
+                        // (regenerating would hand them a *different* phrase they never backed up).
+                        // The phrase already has to live in memory throughout backup/verify; an
+                        // error doesn't widen that, and `Zeroizing` wipes it when the app exits.
                         this.auth_error = Some(msg);
                         cx.notify();
                     }
@@ -1197,10 +1362,13 @@ impl Shell {
     fn focus_auth_input(&self, window: &mut Window, cx: &mut Context<Self>) {
         let target = match self.auth {
             AuthStep::CreateSetup => Some(&self.create_pass),
-            AuthStep::CreateBackup => Some(&self.confirm_words),
+            // The backup screen is reveal-only (no text input); the verify step takes the words.
+            AuthStep::CreateVerify => Some(&self.confirm_words),
             AuthStep::Import => Some(&self.import_secret),
             AuthStep::Migrate | AuthStep::Unlock => Some(&self.pass_input),
-            AuthStep::Choose | AuthStep::Ready => None,
+            AuthStep::Choose | AuthStep::CreateBackup | AuthStep::CreateDone | AuthStep::Ready => {
+                None
+            }
         };
         if let Some(input) = target {
             // Clear any stale text (e.g. a passphrase left after lock) before focusing, so
