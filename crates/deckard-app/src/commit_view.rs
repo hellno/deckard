@@ -68,7 +68,12 @@ pub struct MoneyRow {
 /// rest are muted (matches `send_honesty` / `shield_honesty` exactly).
 pub struct HonestyLine {
     pub text: &'static str,
+    /// Stronger weight within the calm caution (amber) register.
     pub emphasized: bool,
+    /// The loud-red DANGER register (irreversible / funds-are-lost), not amber caution. Explicit
+    /// per line so severity never depends on substring-sniffing the copy: a reword can't silently
+    /// downgrade a danger line (DESIGN §Color rule 6).
+    pub danger: bool,
 }
 
 /// The `&'static` descriptor that turns the generic renderer into a specific surface. Every field
@@ -171,8 +176,11 @@ impl Shell {
         let recipient_raw = flow.recipient.read(cx).value().to_string();
         // The wallet's spendable native balance gates the amount. Both Send and Shield reduce
         // native ETH, so an amount over the balance is invalid for either (DESIGN §Required states:
-        // amount > balance disables the action, with an inline error, never a late raw provider
-        // string). `None` balance (pre-sync) leaves the gate open — we can't claim over-balance.
+        // amount > balance disables the action with an inline error, rather than a late provider
+        // failure). The strict `>` still lets an exactly-full-balance amount through; the daemon's
+        // gas-aware check + humanized error is the backstop for the gas-leaves-nothing edge (a
+        // precise up-front reserve needs a gas estimate we don't have here). `None` balance
+        // (pre-sync) leaves the gate open — we can't claim over-balance.
         let native_wei = self.portfolio.as_ref().map(|p| p.native_wei);
         let parsed = crate::signer::parse_eth_to_wei(&amount_raw)
             .ok()
@@ -261,7 +269,6 @@ impl Shell {
         let theme = cx.theme();
         let fg = theme.foreground;
         let muted = theme.muted_foreground;
-        let secondary = theme.secondary;
         let border = theme.border;
         let danger = theme.danger;
         let is_dark = theme.is_dark();
@@ -298,21 +305,36 @@ impl Shell {
                     )),
             );
 
-        // The recipient: a tiny `To` label + the trust-grade identicon/address (no ENS plumbed
-        // through the proposal yet, so `None`).
+        // The recipient: a tiny `To` label + the identicon + the FULL address. This is the single
+        // most security-critical string at the moment of authorization, so unlike a tight row
+        // (which uses the 6+4 `short_addr`) the confirm shows EVERY character, in `fg` (not dimmed),
+        // and wraps for a long 0zk shield address — maximal distinguishability before signing.
         let to = v_flex()
             .w_full()
             .gap_2()
             .child(crate::widgets::section_label("To", muted))
-            .child(crate::widgets::truncated_address(
-                recipient.trim(),
-                None,
-                mono.clone(),
-                crate::theme::identity_square(is_dark),
-                fg,
-                secondary,
-                muted,
-            ));
+            .child(
+                h_flex()
+                    .w_full()
+                    .items_start()
+                    .gap_2()
+                    .child(crate::widgets::identity_mark(
+                        recipient.trim(),
+                        px(16.0),
+                        px(4.0),
+                        crate::theme::identity_square(is_dark),
+                        fg,
+                    ))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .font_family(mono.clone())
+                            .text_sm()
+                            .text_color(fg)
+                            .child(SharedString::from(recipient.trim().to_string())),
+                    ),
+            );
 
         // The quiet supporting facts (Shield's Railgun fee + net), demoted between two hairlines.
         // Empty for a public send, where there is nothing to demote.
@@ -452,9 +474,9 @@ impl Shell {
 
         let mut col = v_flex().w_full().gap_2();
         for line in view.honesty {
-            // The irreversible / funds-are-lost line is the danger register; the rest are amber.
-            let danger_line = line.text.contains("can't be undone") || line.text.contains("lost");
-            let el = if danger_line {
+            // Danger (loud red) vs caution (amber) is an EXPLICIT per-line flag, never sniffed from
+            // the copy, so an editorial reword can't silently downgrade a danger line.
+            let el = if line.danger {
                 crate::widgets::error_line(danger, line.text)
             } else {
                 crate::widgets::caution_line(amber, muted, line.emphasized, line.text)
@@ -483,8 +505,14 @@ impl Shell {
         let base = theme.background;
         let mono = theme.mono_font_family.clone();
         let amber = crate::theme::amber(theme.is_dark());
+        let muted = theme.muted_foreground;
         let flow = (view.flow)(self);
         let busy = flow.busy;
+
+        // The key-cap arms ~450ms after the review appears (the spam-guard). Dim it until then so a
+        // too-early click / ⌘↵ reads as "not ready yet" instead of a silently-dead button. The
+        // arm timer (`arm_commit`) wakes a re-render at the boundary so it visibly brightens.
+        let keycap_color = if self.commit_armed() { amber } else { muted };
 
         let label = if busy {
             view.hold_label_busy
@@ -504,13 +532,13 @@ impl Shell {
                 .rounded(px(6.0))
                 .bg(base)
                 .border_1()
-                .border_color(amber)
+                .border_color(keycap_color)
                 .flex()
                 .items_center()
                 .justify_center()
                 .font_family(mono.clone())
                 .text_xs()
-                .text_color(amber)
+                .text_color(keycap_color)
                 .child(g)
         };
 

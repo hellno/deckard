@@ -1460,6 +1460,20 @@ impl Shell {
             self.activity_reviewing = None;
         }
         self.surface = surface;
+        // The confirm arm-delay fails closed: clear it on every nav, then re-arm if we are landing
+        // on a clear-signing review that already has a proposal (a re-entered review). A
+        // stale-but-elapsed timestamp can never fire a confirm; ⌘↵/click stays gated by a fresh
+        // delay every time the review appears.
+        self.commit_review_at = None;
+        let on_review = match surface {
+            Surface::Send => self.send.proposal.is_some(),
+            Surface::Shield => self.shield.proposal.is_some(),
+            Surface::Swap => self.swap.proposal.is_some(),
+            _ => false,
+        };
+        if on_review {
+            self.arm_commit(cx);
+        }
         cx.notify();
     }
 
@@ -1699,7 +1713,7 @@ impl Shell {
         // Arm the confirm once the review lands: ⌘↵/click can confirm only after the arm-delay,
         // so a keypress carried over from the compose screen can't approve (DESIGN §confirm).
         if flow(self).proposal.is_some() {
-            self.commit_review_at = Some(std::time::Instant::now());
+            self.arm_commit(cx);
         }
         cx.notify();
     }
@@ -2087,7 +2101,7 @@ impl Shell {
                             needs_resolve: true,
                         });
                         // Arm the swap confirm once the priced review lands (DESIGN §confirm).
-                        this.commit_review_at = Some(std::time::Instant::now());
+                        this.arm_commit(cx);
                     }
                     Ok(Decision::Deny { reason }) => {
                         if is_session_ended(&reason) {
@@ -2231,9 +2245,22 @@ impl Shell {
         }
     }
 
+    /// Start the confirm arm-delay: stamp now AND schedule a single re-render at the arm boundary,
+    /// so the key-cap button visibly flips from "arming" (dimmed) to active. GPUI only re-renders
+    /// on notify, so without this wake the gate would flip silently and an early click would
+    /// no-op with no feedback.
+    fn arm_commit(&mut self, cx: &mut Context<Self>) {
+        self.commit_review_at = Some(std::time::Instant::now());
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(COMMIT_ARM_DELAY).await;
+            this.update(cx, |_, cx| cx.notify()).ok();
+        })
+        .detach();
+    }
+
     /// True once a clear-signing review has been on screen at least [`COMMIT_ARM_DELAY`] — the
     /// confirm arm gate so a carried-over keypress/click can't approve (DESIGN §confirm pattern).
-    fn commit_armed(&self) -> bool {
+    pub(crate) fn commit_armed(&self) -> bool {
         self.commit_review_at
             .map(|t| t.elapsed() >= COMMIT_ARM_DELAY)
             .unwrap_or(false)
@@ -2639,10 +2666,10 @@ impl Shell {
         // Back = leave any action surface and return to the selection's Home view.
         if self.surface != Surface::Home {
             self.open(Surface::Home, cx);
-            // Landing on the wallet cockpit via back (not a re-select) must still freshen the
-            // agent fence — otherwise a STOP fired from the feed, then ⌘[ back, shows a stale
-            // "ready" brake. select() does this on click; do it here for the back-path too.
-            if self.selection == Selection::Wallet {
+            // Landing on the wallet cockpit OR the agent surface via back (not a re-select) must
+            // still freshen the live policy — otherwise a STOP fired from the feed, then ⌘[ back,
+            // shows a stale "ready" brake. select() kicks for both on click; do it here too.
+            if matches!(self.selection, Selection::Wallet | Selection::Agent) {
                 self.kick_agent_policy(cx);
             }
         }

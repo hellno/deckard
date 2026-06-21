@@ -218,15 +218,11 @@ impl Shell {
                                         .ghost()
                                         .label("Adjust limits")
                                         .disabled(true),
-                                )
-                                .child(
-                                    Button::new("agent-revoke")
-                                        .danger()
-                                        .label("Revoke")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.stop_button_clicked(cx)
-                                        })),
                                 ),
+                            // NB: the agent's kill switch is the header "Revoke & STOP" (the one
+                            // two-step brake). A second Revoke here would share its arming flag
+                            // without reflecting the armed label — a single visually-unchanged
+                            // button could then fire the irreversible key-zeroize on its 2nd click.
                         )
                     }
                     // No policy yet — a single quiet line, exactly as the old fence did.

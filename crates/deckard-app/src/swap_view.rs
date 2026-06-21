@@ -75,10 +75,12 @@ pub static SWAP_VIEW: CommitView = CommitView {
         HonestyLine {
             text: "This order is public on the CoW orderbook.",
             emphasized: true,
+            danger: false,
         },
         HonestyLine {
             text: "You receive at least the minimum shown. A worse price never settles.",
             emphasized: false,
+            danger: false,
         },
     ],
     hold_id: "swap-hold",

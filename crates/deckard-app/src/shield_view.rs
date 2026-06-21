@@ -67,14 +67,17 @@ pub static SHIELD_VIEW: CommitView = CommitView {
         HonestyLine {
             text: "This deposit is public on Ethereum.",
             emphasized: true,
+            danger: false,
         },
         HonestyLine {
             text: "Avoid round or unusual amounts.",
             emphasized: true,
+            danger: false,
         },
         HonestyLine {
             text: "A 0.25% Railgun fee is deducted; your private balance will read slightly less.",
             emphasized: false,
+            danger: false,
         },
     ],
     hold_id: "shield-hold",

@@ -44,10 +44,12 @@ pub static SEND_VIEW: CommitView = CommitView {
         HonestyLine {
             text: "This transfer is public on Ethereum and can't be undone.",
             emphasized: true,
+            danger: true,
         },
         HonestyLine {
             text: "Double-check the destination address: funds sent to the wrong address are lost.",
             emphasized: false,
+            danger: true,
         },
     ],
     hold_id: "send-hold",
