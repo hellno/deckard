@@ -2,9 +2,11 @@
 # Run locally with: cargo install cargo-deny && cargo deny check  (or `cargo deny check advisories`).
 #
 # CI splits this into two jobs (ci.yml):
-#   • cargo-deny-advisories  — `check advisories`        → BLOCKING. Every advisory is fixed or
-#                                                           carries a justified `ignore` below.
-#   • cargo-deny-supply-chain — `check bans sources licenses` → non-blocking until seeded (issue #40).
+#   • cargo-deny-advisories  — `check advisories`        → BLOCKING on real advisories. Every advisory
+#                                                           is fixed or carries a justified `ignore`
+#                                                           below. On PRs a bare yank only warns;
+#                                                           release + nightly still block yanks (#82).
+#   • cargo-deny-supply-chain — `check bans sources licenses` → BLOCKING (required PR check).
 # A daily `check advisories` re-scan runs from .github/workflows/audit.yml.
 
 [graph]
@@ -17,7 +19,15 @@ all-features = true
 
 [advisories]
 # RustSec advisory DB. Vulnerabilities and unmaintained crates are denied by default in cargo-deny
-# v2; we additionally refuse yanked crates. Add to `ignore` ONLY with a written justification.
+# v2 — a real advisory blocks PRs AND releases until it is fixed or given a justified `ignore` below.
+#
+# `yanked = "deny"` is the BASELINE: releases, pushes to main, and the nightly audit (audit.yml) all
+# refuse a yanked crate. The PR-time `cargo-deny-advisories` job in ci.yml alone downgrades this to a
+# warning (`--warn yanked`, gated on `pull_request`) so a crates.io "yank" — non-deterministic
+# outside-world drift that can flip with no change on our side, like the `bitcoin_hashes` yank that
+# blocked unrelated PR #81 — stays visible on the PR without gating it. We keep the release boundary
+# strict (not assume "a security yank always carries a RUSTSEC advisory") because a security-motivated
+# yank can PRECEDE its advisory. Add to `ignore` ONLY with a written justification. (#82)
 #
 # Every entry below is a TRANSITIVE advisory with NO in-tree fix; removing them is tracked in #40.
 # Re-evaluate the whole list on each `just bump-gpui` / Helios / alloy bump — drop any that resolve.

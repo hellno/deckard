@@ -16,12 +16,47 @@ on:
 
 permissions:
   contents: read
+  issues: write # so a failed scan can open/refresh a tracking issue (#82)
+
+# One audit at a time: a manual workflow_dispatch overlapping the 07:00 cron must not race the
+# search-then-create issue de-dup below into duplicate trackers. (#82)
+concurrency:
+  group: supply-chain-audit
+  cancel-in-progress: false
 
 jobs:
   advisories:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - id: deny
+        uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check advisories
+      # Make the daily watch LOUD (#82): if the ADVISORY SCAN itself failed (the `steps.deny.outcome`
+      # guard, so a checkout / action-infra error does NOT masquerade as an advisory), a new RUSTSEC
+      # advisory or a yanked crate was found — the nightly keeps `yanked = "deny"` even though PRs only
+      # warn. A red scheduled run just emails admins by default, easy to miss, so open a tracking issue
+      # (or comment on the open one). `gh` is preinstalled: no third-party action added.
+      - name: Open or refresh advisory tracking issue on failure
+        if: failure() && steps.deny.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          title="Daily cargo-deny advisory scan is failing"
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          body=$(printf '%s\n\n%s\n\n%s' \
+            "The nightly \`cargo deny check advisories\` run failed — a new RustSec advisory or a yanked dependency was found. See the run for the crate and RUSTSEC id." \
+            "Failed run: ${run_url}" \
+            "Triage in \`deny.toml\`: bump the dependency, or add a justified \`ignore\` entry. Close this issue once the nightly scan is green again.")
+          # Tolerate a transient list failure (|| true) so a flaky API can't swallow the alert, and
+          # match the title EXACTLY (gh search is tokenized/fuzzy) so we never comment on a look-alike.
+          existing=$(gh issue list -R "$REPO" --state open --search "${title} in:title" \
+            --json number,title --jq "map(select(.title == \"${title}\")) | .[0].number // empty" || true)
+          if [ -n "${existing}" ]; then
+            gh issue comment "${existing}" -R "$REPO" --body "${body}"
+          else
+            gh issue create -R "$REPO" --title "${title}" --body "${body}"
+          fi
