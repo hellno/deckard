@@ -10,7 +10,7 @@ name: CI
 #
 #   quick (fmt, ~1 min) ──┬── linux : full build + clippy + test --workspace (+ anvil/Foundry)
 #                         ├── macos : build the shipping binaries + lint the macOS-only tray path
-#                         ├── cargo-deny-advisories  : security advisories gate (BLOCKING)
+#                         ├── cargo-deny-advisories  : security advisories gate (BLOCKING; a bare yank only warns on PRs, #82)
 #                         └── cargo-deny-supply-chain : bans/licenses/sources gate (BLOCKING)
 #
 # The `quick` gate fails cheap on the most common trivial mistake (unformatted code) before the two
@@ -111,10 +111,11 @@ jobs:
   # Supply-chain SECURITY gate — advisories only. BLOCKING on real RUSTSEC advisories. Config:
   # deny.toml. Every advisory the RustSec DB reports is either fixed or carries a written, justified
   # `ignore` in deny.toml; a new, untriaged advisory fails this check and blocks the merge until a
-  # human triages it. A bare crates.io *yank* is warn-level (deny.toml `yanked = "warn"`, #82) so
-  # outside-world drift can't block an unrelated PR — but a real advisory still does, here and at
-  # release. A daily re-scan against the committed Cargo.lock runs from .github/workflows/audit.yml
-  # (which also opens a tracking issue on failure). Rationale: docs/AGENTIC-ENGINEERING.md §4.
+  # human triages it. deny.toml sets `yanked = "deny"`; ON PULL REQUESTS ONLY we downgrade a bare
+  # crates.io yank to a warning (`--warn yanked`) so outside-world drift can't block an unrelated PR
+  # (#82). At release (workflow_call → event_name=push), on push to main, and in the nightly audit,
+  # yanks still block. A daily re-scan runs from .github/workflows/audit.yml (which opens a tracking
+  # issue on failure). Rationale: docs/AGENTIC-ENGINEERING.md §4.
   cargo-deny-advisories:
     needs: quick
     runs-on: ubuntu-latest
@@ -123,6 +124,10 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check advisories
+          # PR-only yank downgrade (warn, not block). Empty elsewhere → deny.toml's `yanked = "deny"`
+          # stands, so release/push/nightly still block yanks. cargo-deny-action appends
+          # command-arguments after the command: `cargo-deny … check advisories --warn yanked`. (#82)
+          command-arguments: ${{ github.event_name == 'pull_request' && '--warn yanked' || '' }}
 
   # Supply-chain HYGIENE — bans / licenses / sources. BLOCKING. The license allow-list and bans
   # policy are now fully seeded (deny.toml): permissive licenses allowed, GPL-3.0 scoped per-crate to

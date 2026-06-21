@@ -142,7 +142,7 @@ disallowed licenses, and untrusted sources. New `deny.toml`:
 
 ```toml
 [advisories]
-yanked = "warn"   # see "Advisory policy" below (#82) — a bare yank shouldn't block unrelated PRs
+yanked = "deny"   # baseline; the PR-time job alone downgrades to warn — see "Advisory policy" below (#82)
 ignore = []   # add { id = "RUSTSEC-…", reason = "…" } only with written justification
 
 [licenses]
@@ -187,22 +187,26 @@ duplicates crates. We therefore land the CI job **non-blocking** and promote it 
 so they stay **required, blocking PR gates**. The advisory check is different: it re-reads the live
 RustSec database and crates.io yank status on every run, so a dependency yank or a freshly-published
 CVE can turn a PR red with **no change on our side**, blocking work that never touched that
-dependency (this is what bit PR #81). We handle that by *kind*:
+dependency (this is what bit PR #81). We handle that by *kind*, and by *where*:
 
-- **A real RUSTSEC advisory still blocks** — on PRs, at release, and in the daily scan. A known
-  vulnerability stops the line until it is fixed or given a justified `ignore`.
-- **A bare crates.io yank is warn-level** (`yanked = "warn"`). A yank is usually a pulled publish,
-  not a vulnerability; if it *is* a security pull it also carries a RUSTSEC advisory and still
-  blocks. So yanks stay visible without gating unrelated PRs.
+- **A real RUSTSEC advisory always blocks** — on PRs, at release, on push to main, and in the daily
+  scan. A known vulnerability stops the line until it is fixed or given a justified `ignore`.
+- **A bare crates.io yank blocks everywhere EXCEPT pull requests.** `deny.toml` keeps
+  `yanked = "deny"`; the PR-time `cargo-deny-advisories` job alone downgrades it to a warning
+  (`--warn yanked`, gated on `pull_request`), so a yank stays visible on the PR without blocking
+  unrelated work — while the release boundary, push-to-main, and the nightly audit still refuse a
+  yanked dependency. A yank is usually a pulled publish, not a vulnerability; but because a
+  security-motivated yank can *precede* its RustSec advisory, we keep the release boundary strict
+  rather than assume the advisory already exists.
 
 The safety net is three things, not the PR gate: continuous **daily detection**
-(`.github/workflows/audit.yml`, which opens a tracking issue on failure so a new advisory is loud,
-not just an email), a **hard gate at the release boundary** (the reusable `ci.yml` runs the advisory
-check blocking when invoked from `release.yml`, so a known-vulnerable tree can never ship), and the
-`ignore` list as the **deliberate, reviewed** escape hatch for transitive advisories with no in-tree
-fix. This is the mainstream Rust-OSS posture (schedule the non-deterministic check, gate the
-deterministic ones), tuned so "we take security seriously" means *never ship a vulnerable build*,
-not *block every contributor on outside-world drift*.
+(`.github/workflows/audit.yml`, which opens a tracking issue on failure so a new advisory or yank is
+loud, not just an email), a **hard gate at the release boundary** (the reusable `ci.yml` runs the
+advisory check — yanks included — blocking when invoked from `release.yml`, so a known-vulnerable or
+yanked tree can never ship), and the `ignore` list as the **deliberate, reviewed** escape hatch for
+transitive advisories with no in-tree fix. This is the mainstream Rust-OSS posture (schedule the
+non-deterministic check, gate the deterministic ones), tuned so "we take security seriously" means
+*never ship a vulnerable build*, not *block every contributor on outside-world drift*.
 
 ### 5. Close the CI gaps
 
