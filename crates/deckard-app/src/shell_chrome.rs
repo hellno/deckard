@@ -24,14 +24,10 @@ use crate::settings::ThemeModePref;
 use crate::shell::{Selection, Shell, Surface};
 use crate::theme;
 
-/// Middle-truncate an address for a tight row, e.g. `0xA1b2…9F3c`.
-pub(crate) fn short_addr(a: &str) -> String {
-    if a.len() >= 12 {
-        format!("{}…{}", &a[..6], &a[a.len() - 4..])
-    } else {
-        a.to_string()
-    }
-}
+/// Middle-truncate an address for a tight row, e.g. `0xA1b2…9F3c`. Re-exported from
+/// [`crate::widgets`] so existing call sites (`crate::shell_chrome::short_addr`) keep working
+/// while the single canonical definition lives in the shared widget vocabulary.
+pub(crate) use crate::widgets::short_addr;
 
 /// The agent's cyan squircle monogram — the ONE cyan surface (DESIGN §Actor model): a
 /// rounded square (NEVER `rounded_full`) with the "A" monogram. Always static — the cyan
@@ -75,6 +71,7 @@ impl Shell {
             Surface::Home => match self.selection {
                 Selection::Project => "Personal",
                 Selection::Wallet => "Wallet",
+                Selection::Agent => "Atlas",
             },
         }
     }
@@ -103,6 +100,9 @@ impl Shell {
         let project_selected =
             self.surface == Surface::Home && self.selection == Selection::Project;
         let wallet_selected = self.surface == Surface::Home && self.selection == Selection::Wallet;
+        let agent_selected = self.surface == Surface::Home && self.selection == Selection::Agent;
+        let agent = theme::agent(is_dark);
+        let agent_tint = theme::agent_tint(is_dark);
 
         let addr = short_addr(&self.wallet_address_string());
         let balance = self
@@ -111,15 +111,14 @@ impl Shell {
             .map(|p| mask_money(self.mask, &deckard_core::format_amount(p.native_wei, 18, 4)))
             .unwrap_or_else(|| "—".to_string());
 
-        // A tiny uppercase section label (10px, +letterspacing per DESIGN typography).
+        // A tiny uppercase section label (DESIGN §Typography label tier) via the shared
+        // `section_label` widget; the wrapper carries only the row's padding.
         let group_label = |text: &'static str| {
             div()
                 .px_3()
                 .pt_3()
                 .pb_1()
-                .text_xs()
-                .text_color(muted)
-                .child(text)
+                .child(crate::widgets::section_label(text, muted))
         };
 
         v_flex()
@@ -145,7 +144,13 @@ impl Shell {
                         h_flex()
                             .items_center()
                             .gap_2()
-                            .child(div().size(px(16.0)).rounded(px(4.0)).bg(id_square))
+                            .child(crate::widgets::identity_mark(
+                                "Personal",
+                                px(16.0),
+                                px(4.0),
+                                id_square,
+                                fg,
+                            ))
                             .child(div().text_sm().text_color(fg).child("Personal")),
                     )
                     .on_click(cx.listener(|this, _, _, cx| this.select(Selection::Project, cx))),
@@ -171,7 +176,13 @@ impl Shell {
                                     .items_center()
                                     .gap_2()
                                     .min_w_0()
-                                    .child(div().size(px(16.0)).rounded(px(4.0)).bg(id_square))
+                                    .child(crate::widgets::identity_mark(
+                                        &addr,
+                                        px(16.0),
+                                        px(4.0),
+                                        id_square,
+                                        fg,
+                                    ))
                                     .child(
                                         div()
                                             .font_family(mono.clone())
@@ -189,6 +200,29 @@ impl Shell {
                             ),
                     )
                     .on_click(cx.listener(|this, _, _, cx| this.select(Selection::Wallet, cx))),
+            )
+            // Agents group — first-class (DESIGN.md v2 §The agent interaction model): the agent is
+            // its own entity with its own surface, no longer folded into the wallet home.
+            .child(group_label("Agents"))
+            .child(
+                div()
+                    .id("nav-agent")
+                    .mx_2()
+                    .px_2()
+                    .py_1p5()
+                    .rounded_md()
+                    .when(agent_selected, |e| e.bg(lift))
+                    .cursor_pointer()
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_2()
+                            .child(agent_squircle(px(18.0), px(5.0), agent, agent_tint))
+                            .child(div().text_sm().text_color(fg).child("Atlas"))
+                            .child(div().flex_1())
+                            .child(div().size(px(6.0)).rounded_full().bg(agent)),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.select(Selection::Agent, cx))),
             )
             // Spacer pushes the footer rows to the bottom.
             .child(div().flex_1())
@@ -282,7 +316,13 @@ impl Shell {
                 h_flex()
                     .items_center()
                     .gap_2()
-                    .child(div().size(px(16.0)).rounded(px(4.0)).bg(id_square))
+                    .child(crate::widgets::identity_mark(
+                        "Personal",
+                        px(16.0),
+                        px(4.0),
+                        id_square,
+                        fg,
+                    ))
                     .child(div().text_sm().text_color(fg).child("Personal"))
                     // Skip the trailing "› <view>" when it would just repeat the project name
                     // (Project Home's label is "Personal" → avoid "Personal › Personal").
@@ -354,9 +394,13 @@ impl Shell {
             Some(deckard_core::ReadStatus::Unsynced { .. }) => " · NOT VERIFIED",
             None => "",
         };
-        let status_line = if let Some(err) = &self.portfolio_error {
-            format!("⚠ {err}")
-        } else if first_sync {
+        // A read failure is the loud danger register: the shared `error_line` widget (Lucide
+        // TriangleAlert + danger text), with the raw provider error humanized to one calm line.
+        let error_el = self.portfolio_error.as_ref().map(|err| {
+            crate::widgets::error_line(theme.danger, crate::errors::humanize_read_error(err))
+        });
+
+        let status_line = if first_sync {
             "Syncing over Ethereum…".to_string()
         } else if let Some(block) = self.synced_block {
             let watching = if self.viewing_watch {
@@ -374,13 +418,7 @@ impl Shell {
             self.read_status,
             Some(deckard_core::ReadStatus::Unsynced { .. })
         );
-        let status_color = if self.portfolio_error.is_some() {
-            theme.danger
-        } else if unverified {
-            theme.warning
-        } else {
-            muted
-        };
+        let status_color = if unverified { theme.warning } else { muted };
 
         // An active shield's lifecycle (the "where's my money?" reassurance line). The glyph
         // token maps to a small colored dot: amber in-flight, success done, danger failed.
@@ -429,7 +467,7 @@ impl Shell {
                 .child(
                     div()
                         .text_color(theme.foreground)
-                        .child("DEMO FORK — not mainnet"),
+                        .child("Demo fork: not mainnet"),
                 )
         });
 
@@ -449,7 +487,11 @@ impl Shell {
                     .gap_3()
                     .children(fork_caution)
                     .children(shield_chip)
-                    .child(div().text_color(status_color).child(status_line)),
+                    // A read failure renders the danger `error_line`; otherwise the calm status line.
+                    .children(error_el)
+                    .when(self.portfolio_error.is_none(), |row| {
+                        row.child(div().text_color(status_color).child(status_line))
+                    }),
             )
             .child(div().text_color(muted).child("Ethereum"))
     }

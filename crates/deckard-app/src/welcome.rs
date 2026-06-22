@@ -19,6 +19,7 @@ use crate::money::money;
 use crate::shell::{Shell, Surface};
 use crate::shell_chrome::agent_squircle;
 use crate::theme;
+use crate::widgets::{budget_gauge, identity_mark, section_label, short_addr};
 
 /// One row in the holdings table. Carries the raw balance (not a pre-formatted
 /// string) so the amount column can render mono-for-money with dimmed decimals.
@@ -31,27 +32,15 @@ struct Holding {
     max_frac: usize,
 }
 
-/// The primary modifier label, per platform (⌘ on macOS, "Ctrl " elsewhere).
-#[cfg(target_os = "macos")]
-const MOD: &str = "⌘";
-#[cfg(not(target_os = "macos"))]
-const MOD: &str = "Ctrl ";
-
-/// Middle-truncate an address string for a tight pill, e.g. `0xA1b2…9F3c`.
-fn short_addr(a: &str) -> String {
-    if a.len() >= 12 {
-        format!("{}…{}", &a[..6], &a[a.len() - 4..])
-    } else {
-        a.to_string()
-    }
-}
-
 /// The agent policy card's rows, built from the daemon's LIVE policy — the same fence
 /// `deckard_policy_get` shows an MCP client. Pure so the mapping is testable: an empty
 /// allowlist honestly reads "any", the approval mode is spelled out, and a STOP
 /// (`revoked`) is never hidden. `masked` bullets only the spent-today figure — that is
 /// activity; the caps are config the user set, not a balance to hide.
-fn agent_policy_rows(p: &deckard_contract::Policy, masked: bool) -> Vec<(&'static str, String)> {
+pub(crate) fn agent_policy_rows(
+    p: &deckard_contract::Policy,
+    masked: bool,
+) -> Vec<(&'static str, String)> {
     use deckard_contract::ApprovalMode;
     let eth = |wei: U256| format!("{} ETH", deckard_core::format_amount(wei, 18, 6));
     vec![
@@ -85,7 +74,7 @@ fn agent_policy_rows(p: &deckard_contract::Policy, masked: bool) -> Vec<(&'stati
         (
             "STOP brake",
             if p.revoked {
-                "engaged — unlock to re-arm".to_string()
+                "engaged, unlock to re-arm".to_string()
             } else {
                 "ready".to_string()
             },
@@ -103,28 +92,7 @@ impl Shell {
         let fg = theme.foreground;
         let muted = theme.muted_foreground;
         let border = theme.border;
-        let surface = theme.secondary;
         let mono: SharedString = theme.mono_font_family.clone();
-
-        // A small bordered key-hint chip, e.g. ⌘K.
-        let chip = move |keys: String, label: String| {
-            h_flex()
-                .items_center()
-                .gap_1p5()
-                .child(
-                    div()
-                        .px_1p5()
-                        .py_0p5()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(border)
-                        .bg(surface)
-                        .text_color(fg)
-                        .text_xs()
-                        .child(keys),
-                )
-                .child(div().text_xs().text_color(muted).child(label))
-        };
 
         // --- Derive view state from the live portfolio. ---
         let addr_str = self.display_address.to_string();
@@ -205,7 +173,13 @@ impl Shell {
                                 h_flex()
                                     .items_center()
                                     .gap_3()
-                                    .child(div().size(px(28.0)).rounded(px(6.0)).bg(id_square))
+                                    .child(identity_mark(
+                                        &wallet_name,
+                                        px(28.0),
+                                        px(6.0),
+                                        id_square,
+                                        fg,
+                                    ))
                                     .child(
                                         v_flex()
                                             .gap_0p5()
@@ -245,10 +219,13 @@ impl Shell {
                     .child(
                         h_flex()
                             .w_full()
-                            .gap_2()
-                            // Shield signs from YOUR wallet, so it's disabled while viewing a
-                            // watched read-only account (don't show a funds-moving action in a
-                            // someone-else's-address context).
+                            .items_center()
+                            .gap_2p5()
+                            // Shield (the privacy hero) is the ONE neutral primary CTA. Send /
+                            // Receive / Swap follow as a ghost cluster set off by a thin vertical
+                            // hairline (DESIGN §Balance hero action row). Shield signs from YOUR
+                            // wallet, so it's disabled while viewing a watched read-only account
+                            // (don't show a funds-moving action in a someone-else's-address context).
                             .child(
                                 Button::new("shield")
                                     .primary()
@@ -256,9 +233,8 @@ impl Shell {
                                     .disabled(self.viewing_watch)
                                     .on_click(cx.listener(|this, _, _, cx| this.open_shield(cx))),
                             )
-                            .child(Button::new("receive").ghost().label("Receive").on_click(
-                                cx.listener(|this, _, _, cx| this.open(Surface::Receive, cx)),
-                            ))
+                            // The divider that separates the primary CTA from the ghost cluster.
+                            .child(div().w(px(1.0)).h(px(20.0)).bg(border))
                             .child(
                                 Button::new("send")
                                     .ghost()
@@ -266,6 +242,9 @@ impl Shell {
                                     .disabled(self.viewing_watch)
                                     .on_click(cx.listener(|this, _, _, cx| this.open_send(cx))),
                             )
+                            .child(Button::new("receive").ghost().label("Receive").on_click(
+                                cx.listener(|this, _, _, cx| this.open(Surface::Receive, cx)),
+                            ))
                             .child(
                                 Button::new("swap")
                                     .ghost()
@@ -279,109 +258,103 @@ impl Shell {
                     )
                     // Holdings, or a state.
                     .child(self.render_holdings(first_sync, has_tokens, holdings, cx))
-                    // "What Atlas may do" — the agent policy fence. Atlas is key-less automation
-                    // ON this same wallet (same EOA), not a separate account, so its limits live
-                    // here in the wallet cockpit. The rows are the daemon's LIVE policy (the same
-                    // fence `deckard_policy_get` shows an MCP client), never invented.
-                    .child(self.render_agent_fence(cx))
-                    // Keyboard hints — the Superhuman/Linear signal.
-                    .child(
-                        h_flex()
-                            .gap_4()
-                            .pt_1()
-                            .child(chip(format!("{MOD}K"), "Command palette".into()))
-                            .child(chip(format!("{MOD}["), "Back".into()))
-                            .child(chip(format!("{MOD},"), "Settings".into())),
-                    ),
+                    // Compact agent presence — ONE clickable Atlas row that opens the agent
+                    // surface (where the full policy fence now lives). Atlas is key-less
+                    // automation ON this same wallet (same EOA); the home only carries a calm
+                    // status + budget glance, not the full configuration.
+                    .child(self.render_agent_presence(cx)),
             )
     }
 
-    /// The agent policy fence card ("What Atlas may do") for the wallet home. Atlas is key-less
-    /// automation on the SAME wallet EOA — not a separate account — so its limits belong here in
-    /// the wallet cockpit, not on a standalone page. The card shows the daemon's LIVE policy fence
-    /// (per-tx cap, daily budget, spent-today, recipients, auto-shield minimum, approval mode, the
-    /// STOP brake) via `agent_policy_rows` — the same numbers `deckard_policy_get` returns to an
-    /// MCP client, never invented. `None` until the first `PolicyGet` lands → a quiet "loading…".
-    /// The cyan squircle is the static two-signal identity marker (no pulse).
-    fn render_agent_fence(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The compact agent presence for the wallet home — a single clickable Atlas row that
+    /// navigates to the agent surface (`Selection::Agent`), where the full policy fence lives.
+    /// Set off from the holdings above by whitespace + a top hairline (editorial section, NOT a
+    /// card). The row carries the cyan identity squircle, the "Atlas" name, a small "acting" cyan
+    /// status, and a thin Spent-today/Daily-budget gauge (from the daemon's LIVE policy, never
+    /// invented) in a ~200px container on the right, plus a muted chevron. When the policy hasn't
+    /// landed yet (`agent_policy == None`) the row reads just "Atlas · idle" with no gauge.
+    fn render_agent_presence(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let fg = theme.foreground;
         let muted = theme.muted_foreground;
         let border = theme.border;
-        let surface = theme.secondary;
-        let mono: SharedString = theme.mono_font_family.clone();
+        let track = theme.secondary; // bg.raise — the calm gauge track tone
+        let danger = theme.danger;
         let is_dark = theme.is_dark();
         let agent = theme::agent(is_dark);
         let agent_tint = theme::agent_tint(is_dark);
+        let amber = theme::amber(is_dark);
 
-        // One policy row: label left (muted), value right (mono, primary). No per-row hairline —
-        // grouping is whitespace.
-        let mono_for_row = mono.clone();
-        let policy_row = move |label: &'static str, value: String| {
-            h_flex()
-                .w_full()
-                .justify_between()
-                .items_center()
-                .py_1p5()
-                .child(div().text_sm().text_color(muted).child(label))
-                .child(
-                    div()
-                        .font_family(mono_for_row.clone())
-                        .text_sm()
-                        .text_color(fg)
-                        .child(value),
-                )
-        };
+        // The Spent-today / Daily-budget gauge in a ~200px container, computed from the live policy
+        // (never invented). `frac = spent_today / daily_cap` via the integer-safe `fraction` helper;
+        // the gauge color escalates with pressure (cyan → amber ≥90% → red ≥100%). `None` until the
+        // first fetch, in which case the row shows a muted "idle" instead of a gauge.
+        let eth = |wei: U256| format!("{} ETH", deckard_core::format_amount(wei, 18, 6));
+        let gauge = self.agent_policy.as_ref().map(|p| {
+            let frac = fraction(p.spent_today_wei, p.daily_cap_wei);
+            let pct = (frac.clamp(0.0, 1.0) * 100.0).round() as u32;
+            let cap_eth = deckard_core::format_amount(p.daily_cap_wei, 18, 6);
+            div().w(px(200.0)).child(budget_gauge(
+                frac,
+                agent,
+                amber,
+                danger,
+                track,
+                muted,
+                format!("{} / {} today", eth(p.spent_today_wei), cap_eth),
+                format!("{pct}%"),
+            ))
+        });
+        let has_policy = self.agent_policy.is_some();
 
+        // The agent presence is a SECTION, not a card (DESIGN editorial rule: no bordered/filled
+        // box to group content). A top hairline + margin sets it off from the holdings above.
         v_flex()
             .w_full()
-            .gap_3()
-            // Section header: the cyan squircle (the ONLY cyan here — static identity, no pulse)
-            // + a plain title. The agent name H1 (text.primary, NEVER cyan) sits beside it.
+            .gap_1p5()
+            .mt_4()
+            .pt_4()
+            .border_t_1()
+            .border_color(border)
+            .child(section_label("Agents", muted))
+            // The one clickable row → the agent surface. The cyan squircle is the static
+            // two-signal identity marker; the gauge (when known) sits right; the chevron signals
+            // "drill in".
             .child(
                 h_flex()
+                    .id("agent-presence-row")
+                    .w_full()
                     .items_center()
-                    .gap_2()
-                    .child(agent_squircle(px(20.0), px(5.0), agent, agent_tint))
+                    .gap_3()
+                    .py_1p5()
+                    .cursor_pointer()
+                    .child(agent_squircle(px(18.0), px(5.0), agent, agent_tint))
                     .child(
                         div()
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(fg)
-                            .child("What Atlas may do"),
-                    ),
+                            .child("Atlas"),
+                    )
+                    // Status: "acting" (cyan) when the policy is live, a muted "idle" otherwise.
+                    .child(if has_policy {
+                        div().text_xs().text_color(agent).child("acting")
+                    } else {
+                        div().text_xs().text_color(muted).child("idle")
+                    })
+                    // The gauge (if known) is pushed to the right; the chevron caps the row.
+                    .children(gauge.map(|g| div().ml_auto().child(g)))
+                    .child(
+                        div()
+                            .when(!has_policy, |el| el.ml_auto())
+                            .text_sm()
+                            .text_color(muted)
+                            .child("›"),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.select(crate::shell::Selection::Agent, cx)
+                    })),
             )
-            // Policy card: one faint frame, no interior grid lines. The rows are the daemon's live
-            // fence; until the first fetch lands the card says so instead of showing invented numbers.
-            .child(
-                v_flex()
-                    .w_full()
-                    .gap_0()
-                    .p_4()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(border)
-                    .bg(surface)
-                    .map(|card| match self.agent_policy.as_ref() {
-                        Some(p) => card.children(
-                            agent_policy_rows(p, self.mask)
-                                .into_iter()
-                                .map(|(label, value)| policy_row(label, value)),
-                        ),
-                        None => card.child(
-                            div()
-                                .text_sm()
-                                .text_color(muted)
-                                .child("Reading the signer's policy…"),
-                        ),
-                    }),
-            )
-            // The fence is read-only here; it's enforced by the signer, edited via policy.json.
-            .child(div().text_xs().text_color(muted).child(
-                "Atlas acts through the key-less deckard-mcp sidecar, signing from this same \
-                     wallet. The signer checks every move against this fence — edit policy.json in \
-                     the Deckard config dir to change it.",
-            ))
     }
 
     /// The merged Total hero (Wave 2 T10): `Total = public + private` when both are known, a
@@ -415,10 +388,14 @@ impl Shell {
             _ => None,
         };
 
+        // The editorial hero: the balance is the LARGEST object on screen (DESIGN
+        // §Balance hero). Oversized mono (~64px) with the integer in text.primary and
+        // the decimals + ticker dimmed — `money()` already dims by color, we only step
+        // up the size at this site. The "Syncing…" placeholder keeps a calm body size.
         let hero = div()
             .id("balance-hero")
             .cursor_pointer()
-            .text_3xl()
+            .text_size(px(64.0))
             .font_weight(FontWeight::SEMIBOLD)
             .map(|el| match total {
                 Some(wei) => el.child(money(
@@ -431,7 +408,12 @@ impl Shell {
                     fg,
                     muted,
                 )),
-                None => el.font_family(mono.clone()).text_color(muted).child("—"),
+                // The placeholder stays a calm body size, not the 64px hero step.
+                None => el
+                    .text_2xl()
+                    .font_family(mono.clone())
+                    .text_color(muted)
+                    .child("Syncing…"),
             })
             .on_click(cx.listener(|this, _, _, cx| this.toggle_mask(cx)));
 
@@ -516,7 +498,7 @@ impl Shell {
                     )),
             )
             .child(div().text_xs().text_color(muted).child(
-                "Private is WETH-equivalent, net of the 0.25% fee, and synced over raw RPC (not independently verified).",
+                "Private balance is shown in ETH, after the 0.25% fee, and read from the network without independent verification.",
             ))
             .into_any_element()
     }
@@ -575,6 +557,9 @@ impl Shell {
                 .into_any_element();
         }
 
+        // The ledger heading (DESIGN §Holdings table): a tiny muted section label, not a
+        // card title. Grouping is whitespace + the per-row hairline below.
+        col = col.child(div().pb_1().child(section_label("Holdings", muted)));
         for h in holdings {
             col = col.child(render_row(
                 theme.foreground,
@@ -598,7 +583,7 @@ impl Shell {
                     .text_xs()
                     .text_color(muted)
                     .pt_1()
-                    .child("Only listed tokens are shown — long-tail tokens may be missing."),
+                    .child("Only listed tokens are shown. Lesser-known tokens may be missing."),
             );
         } else {
             col = col.child(
@@ -641,7 +626,7 @@ impl Shell {
                         h_flex()
                             .items_center()
                             .gap_3()
-                            .child(div().size(px(28.0)).rounded(px(6.0)).bg(id_square))
+                            .child(identity_mark("Personal", px(28.0), px(6.0), id_square, fg))
                             .child(
                                 div()
                                     .text_xl()
@@ -674,7 +659,7 @@ impl Shell {
                                         None => el
                                             .font_family(mono.clone())
                                             .text_color(muted)
-                                            .child("—"),
+                                            .child("Syncing…"),
                                     })
                                     .on_click(cx.listener(|this, _, _, cx| this.toggle_mask(cx))),
                             )
@@ -780,7 +765,7 @@ fn allocation_bar(
 
 /// `part / total` as a 0..=1 fraction, via integer (bps) math — f32 only at the edge so a
 /// huge `U256` can't lose precision in the ratio. Zero `total` → 0.
-fn fraction(part: U256, total: U256) -> f32 {
+pub(crate) fn fraction(part: U256, total: U256) -> f32 {
     if total.is_zero() {
         return 0.0;
     }
@@ -811,7 +796,7 @@ fn composition_line(
         .child(div().text_xs().map(|el| match wei {
             Some(w) => el.child(money(w, 18, 4, Some("ETH"), masked, mono, fg, muted)),
             None if syncing => el.text_color(muted).child("syncing…"),
-            None => el.text_color(muted).child("—"),
+            None => el.text_color(muted).child("Syncing…"),
         }))
 }
 
@@ -959,6 +944,6 @@ mod tests {
         assert_eq!(get("Spent today"), crate::money::MASK_BULLETS);
         assert_eq!(get("Per-transaction cap"), "0.1 ETH"); // config, not a balance
         assert_eq!(get("Recipients"), "1 allowed");
-        assert_eq!(get("STOP brake"), "engaged — unlock to re-arm");
+        assert_eq!(get("STOP brake"), "engaged, unlock to re-arm");
     }
 }

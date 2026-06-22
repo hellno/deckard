@@ -212,6 +212,9 @@ impl Shell {
             Selection::Project => row
                 .child(div().size(px(14.0)).rounded(px(4.0)).bg(id_square))
                 .child(div().text_color(muted).child("Personal")),
+            Selection::Agent => row
+                .child(div().size(px(14.0)).rounded(px(4.0)).bg(id_square))
+                .child(div().text_color(muted).child("Atlas")),
         }
     }
 

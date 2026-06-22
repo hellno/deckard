@@ -35,17 +35,22 @@ use crate::signer::{self, AppSigner};
 use crate::theme;
 use crate::wallet;
 use crate::{
-    GoBack, NewItem, OpenApprovals, OpenSettings, PaletteNext, PalettePrev, ToggleMask,
-    TogglePalette, ToggleTheme, APP_NAME,
+    ConfirmCommit, GoBack, NewItem, OpenApprovals, OpenSettings, PaletteNext, PalettePrev,
+    ToggleMask, TogglePalette, ToggleTheme, APP_NAME,
 };
 
 /// Auto-refresh the public wallet balance every this many seconds while the home view is open.
 const BALANCE_POLL_SECS: u64 = 20;
 
-/// How long the user must hold the shield confirm before it signs — the deliberate-gesture
-/// duration (DESIGN: confirm is a hold, never a tap). The amber fill-sweep (`shield_view`)
-/// runs for the same span so the bar fills exactly as the action fires.
-pub(crate) const SHIELD_HOLD: Duration = Duration::from_millis(900);
+/// The confirm arm-delay: a clear-signing review must be on screen this long before ⌘↵ / a
+/// click can confirm, so a keypress or click carried over from the previous screen can't approve
+/// a money move (DESIGN §confirm pattern). The ⌘↵ chord plus this delay replace the old hold.
+const COMMIT_ARM_DELAY: Duration = Duration::from_millis(450);
+
+/// How long the recovery phrase stays visible on a single hold-to-reveal before it auto-hides
+/// (DESIGN §Seed reveal: "auto-hides after a few seconds"). A defence against walking away with
+/// the seed on screen — even while the button is still held, the words blur back after this.
+const SEED_REVEAL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Run `prework` (which seals + writes the keystore for create/import/migrate, or is a no-op
 /// for a plain unlock), then unlock OVER THE DAEMON SOCKET — the key is decrypted in the
@@ -63,12 +68,15 @@ fn write_then_unlock(
 
 /// What the sidebar tree selects — the contextual-view driver. The home surface
 /// renders differently per selection (project / wallet). Demo scope is a single
-/// project + wallet; Atlas (key-less automation on the SAME wallet EOA) is not a
-/// separate entity — its policy fence lives in the wallet home.
+/// project + wallet; and Atlas, the agent. Atlas is now a FIRST-CLASS entity
+/// (DESIGN.md v2 §The agent interaction model): a standalone sidebar row that opens
+/// its own surface (policy + controls + its activity), no longer folded into the
+/// wallet home. It is still key-less automation on the same wallet EOA.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Selection {
     Project,
     Wallet,
+    Agent,
 }
 
 /// Transient full-pane surfaces opened FROM a selection. `Home` = the contextual
@@ -122,8 +130,12 @@ pub enum AuthStep {
     Choose,
     /// Create: set the passphrase.
     CreateSetup,
-    /// Create: reveal the recovery phrase and confirm a subset.
+    /// Create: reveal the recovery phrase (read-only; verification is a separate step).
     CreateBackup,
+    /// Create: verify the backup by retyping requested words, with the grid hidden.
+    CreateVerify,
+    /// Create: the vault is sealed + unlocked — a calm "you're ready" interstitial.
+    CreateDone,
     /// Import an existing phrase or raw key.
     Import,
     /// A legacy plaintext key was found — set a passphrase to encrypt it.
@@ -213,6 +225,13 @@ pub struct Shell {
     /// re-arm" banner. The feed stays visible (the daemon answers `ActivityFeed` while locked) so
     /// the revoked rows are seen; the next unlock clears it. `pub` so the view can render it.
     pub activity_stopped: bool,
+    /// The confirm arm-delay timestamp: set when a clear-signing review (Send/Shield/Swap) is
+    /// installed. `commit_armed()` is true once [`COMMIT_ARM_DELAY`] has elapsed, gating the
+    /// ⌘↵/click confirm so a carried-over keypress can't approve (DESIGN §confirm pattern).
+    commit_review_at: Option<std::time::Instant>,
+    /// Focus handle for the commit surfaces (Send/Shield/Swap) so the `key_context("Commit")`
+    /// ⌘↵ binding dispatches to the confirm handler only when a review is on screen.
+    commit_focus: gpui::FocusHandle,
 
     /// The capture-block state last pushed to the OS, so `render` only re-issues the
     /// native `setSharingType` call when `capture_block && mask` actually changes.
@@ -303,6 +322,18 @@ pub struct Shell {
     pub confirm_positions: Vec<usize>,
     /// Hold-to-reveal state for the recovery phrase.
     pub reveal_seed: bool,
+    /// Monotonic guard so a stale auto-hide timer can't blank a *later* reveal (each
+    /// reveal/hide bumps it; the timer only fires if its epoch still matches).
+    reveal_epoch: u64,
+    /// Monotonic guard for an in-flight `Vault::create`: bumped whenever the create flow is
+    /// (re)started or abandoned, so a slow KDF that finishes *after* the user backed out drops
+    /// its freshly-derived secrets instead of populating them into memory.
+    create_epoch: u64,
+    /// True briefly after the recovery phrase is copied, to flip the demoted Copy button to
+    /// "Copied ✓" — never auto-set; only an explicit click sets it (DESIGN §Seed reveal).
+    pub seed_copied: bool,
+    /// True briefly after the new wallet address is copied on the "Ready" screen (inline "Copied ✓").
+    pub address_copied: bool,
     /// The auth step whose primary input we've already auto-focused (focus once per step).
     focused_step: Option<AuthStep>,
     // Auth inputs (passphrases are never persisted).
@@ -512,17 +543,30 @@ impl Shell {
         let swap = CommitFlow::new(swap_amount, swap_recipient);
 
         // Submit-on-Enter for each auth field (keyboard-first).
+        // The first passphrase field re-renders on every edit so the live strength meter tracks
+        // it (DESIGN §Onboarding); Enter on the confirm field submits.
+        cx.subscribe(&create_pass, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        })
+        .detach();
         cx.subscribe(&create_pass2, |this, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
                 this.do_create(cx);
             }
         })
         .detach();
-        cx.subscribe(&confirm_words, |this, _, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::PressEnter { .. }) {
-                this.confirm_backup(cx);
-            }
-        })
+        // The verify field re-renders on every edit so the "Confirm & finish" button can stay
+        // disabled until the typed words match (DESIGN §Onboarding); Enter submits.
+        cx.subscribe(
+            &confirm_words,
+            |this, _, event: &InputEvent, cx| match event {
+                InputEvent::Change => cx.notify(),
+                InputEvent::PressEnter { .. } => this.confirm_backup(cx),
+                _ => {}
+            },
+        )
         .detach();
         cx.subscribe(&import_pass, |this, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
@@ -622,6 +666,8 @@ impl Shell {
             activity_poller_running: false,
             activity_stop_arming: false,
             activity_stopped: false,
+            commit_review_at: None,
+            commit_focus: cx.focus_handle(),
             capture_applied: false,
             allow_screen_capture,
             shield,
@@ -649,6 +695,10 @@ impl Shell {
             pending_pass: None,
             confirm_positions: Vec::new(),
             reveal_seed: false,
+            reveal_epoch: 0,
+            create_epoch: 0,
+            seed_copied: false,
+            address_copied: false,
             focused_step: None,
             create_pass,
             create_pass2,
@@ -674,26 +724,171 @@ impl Shell {
     // --- auth / keystore actions (Chunk 3) ---
 
     pub fn start_create(&mut self, cx: &mut Context<Self>) {
+        // Start clean + self-sufficient (don't rely on the caller having abandoned a prior try):
+        // invalidate any still-running KDF, clear the busy flag, and wipe anything a previous
+        // attempt staged.
+        self.abandon_create();
         self.auth = AuthStep::CreateSetup;
         self.auth_error = None;
         cx.notify();
     }
 
     pub fn start_import(&mut self, cx: &mut Context<Self>) {
+        // Leaving create for import abandons any in-flight KDF + clears anything it staged.
+        self.abandon_create();
         self.auth = AuthStep::Import;
         self.auth_error = None;
         cx.notify();
     }
 
     pub fn auth_back_to_choose(&mut self, cx: &mut Context<Self>) {
+        self.abandon_create();
         self.auth = AuthStep::Choose;
         self.auth_error = None;
         cx.notify();
     }
 
+    /// Tear down any in-progress create: invalidate a still-running KDF (so its result is dropped,
+    /// not stored), clear the busy flag, and wipe every secret it may have staged. Secrets live in
+    /// `Zeroizing`, so dropping them here zeroizes them.
+    fn abandon_create(&mut self) {
+        self.create_epoch = self.create_epoch.wrapping_add(1);
+        self.auth_busy = false;
+        self.clear_pending_secrets();
+    }
+
+    /// Drop every staged-but-uncommitted create secret + the reveal/copy UI state. Each secret is
+    /// `Zeroizing`, so `= None` zeroizes it.
+    fn clear_pending_secrets(&mut self) {
+        self.pending_phrase = None;
+        self.pending_pass = None;
+        self.pending_vault = None;
+        self.reveal_seed = false;
+        self.seed_copied = false;
+    }
+
     pub fn set_reveal_seed(&mut self, reveal: bool, cx: &mut Context<Self>) {
         self.reveal_seed = reveal;
+        // Every reveal/hide invalidates any pending auto-hide timer (so releasing then re-holding
+        // restarts the clock instead of inheriting the old one).
+        self.reveal_epoch = self.reveal_epoch.wrapping_add(1);
+        if reveal {
+            let epoch = self.reveal_epoch;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(SEED_REVEAL_TIMEOUT).await;
+                this.update(cx, |this, cx| {
+                    // Only blank if this is still the same (un-superseded) reveal.
+                    if this.reveal_epoch == epoch && this.reveal_seed {
+                        this.reveal_seed = false;
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
         cx.notify();
+    }
+
+    /// Copy the recovery phrase to the clipboard — only ever from an explicit click on the demoted
+    /// Copy button (never auto-copied; DESIGN §Seed reveal). The phrase lives in `Zeroizing`; this
+    /// hands a plain copy to the OS clipboard at the user's deliberate request, then flips the
+    /// button to "Copied ✓" for a moment.
+    pub fn copy_recovery_phrase(&mut self, cx: &mut Context<Self>) {
+        let Some(phrase) = self.pending_phrase.as_ref() else {
+            return;
+        };
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(phrase.to_string()));
+        self.seed_copied = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(2)).await;
+            this.update(cx, |this, cx| {
+                this.seed_copied = false;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Copy the new wallet's address to the clipboard from the "Ready" screen, then flash an inline
+    /// "Copied ✓" for a moment (DESIGN §Trust: addresses are one-click-copy with inline feedback).
+    pub fn copy_wallet_address(&mut self, cx: &mut Context<Self>) {
+        let addr = self.wallet_address_string();
+        if addr.is_empty() {
+            return;
+        }
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(addr));
+        self.address_copied = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(2)).await;
+            this.update(cx, |this, cx| {
+                this.address_copied = false;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// CreateBackup → CreateVerify: the user confirms they saved the phrase; hide it and move to
+    /// the separate verify step (the grid is not shown there).
+    pub fn advance_to_verify(&mut self, cx: &mut Context<Self>) {
+        self.reveal_seed = false;
+        self.reveal_epoch = self.reveal_epoch.wrapping_add(1);
+        self.seed_copied = false;
+        self.auth_error = None;
+        self.auth = AuthStep::CreateVerify;
+        cx.notify();
+    }
+
+    /// CreateVerify → CreateBackup: let the user go back to re-read the phrase before verifying.
+    pub fn back_to_backup(&mut self, cx: &mut Context<Self>) {
+        self.reveal_seed = false;
+        // Invalidate any pending auto-hide timer, same as advance_to_verify — keep the reveal-epoch
+        // discipline symmetric across both backup↔verify transitions.
+        self.reveal_epoch = self.reveal_epoch.wrapping_add(1);
+        self.auth_error = None;
+        self.auth = AuthStep::CreateBackup;
+        cx.notify();
+    }
+
+    /// CreateDone → the live app: the vault is already sealed + unlocked (the verify step did it);
+    /// this just wires up the app's live session (portfolio, pollers, agent policy).
+    pub fn enter_after_create(&mut self, cx: &mut Context<Self>) {
+        if let Some(addr) = self.wallet_address {
+            self.finish_unlock(addr, cx);
+        }
+    }
+
+    /// Whether the words typed on the verify step match the requested backup positions. Pure (no
+    /// side effects) so the "Confirm & finish" button can read it to stay disabled until correct,
+    /// and `confirm_backup` can gate on the same check. Case-insensitive, whitespace-tolerant.
+    pub fn backup_words_match(&self, cx: &Context<Self>) -> bool {
+        let Some(phrase) = self.pending_phrase.as_ref() else {
+            return false;
+        };
+        let words: Vec<&str> = phrase.split_whitespace().collect();
+        let expected: Vec<String> = self
+            .confirm_positions
+            .iter()
+            .map(|&i| words.get(i).copied().unwrap_or("").to_lowercase())
+            .collect();
+        // A missing/empty expected word means the positions are out of sync with the phrase — never
+        // treat that as a match (fail closed).
+        if expected.is_empty() || expected.iter().any(|w| w.is_empty()) {
+            return false;
+        }
+        let entered: Vec<String> = self
+            .confirm_words
+            .read(cx)
+            .value()
+            .split_whitespace()
+            .map(|s| s.trim().to_lowercase())
+            .collect();
+        entered == expected
     }
 
     /// Enter pressed on the single passphrase field → unlock or migrate.
@@ -755,14 +950,16 @@ impl Shell {
         if self.auth_busy {
             return;
         }
-        let p1 = self.create_pass.read(cx).value().to_string();
-        let p2 = self.create_pass2.read(cx).value().to_string();
+        // Both passphrase copies stay in `Zeroizing` so neither the entry nor the confirm field's
+        // plaintext lingers in freed heap after this call (the discipline the rest of the flow keeps).
+        let p1 = Zeroizing::new(self.create_pass.read(cx).value().to_string());
+        let p2 = Zeroizing::new(self.create_pass2.read(cx).value().to_string());
         if p1.chars().count() < 8 {
             self.auth_error = Some("Passphrase must be at least 8 characters".into());
             cx.notify();
             return;
         }
-        if p1 != p2 {
+        if *p1 != *p2 {
             self.auth_error = Some("Passphrases don't match".into());
             cx.notify();
             return;
@@ -770,7 +967,10 @@ impl Shell {
         self.auth_error = None;
         self.auth_busy = true;
         cx.notify();
-        let pass = Zeroizing::new(p1);
+        // Tag this KDF so a result that lands after the user backed out (which bumps the epoch via
+        // `abandon_create`) is dropped instead of staging orphaned secrets in memory.
+        let epoch = self.create_epoch;
+        let pass = p1;
         let task = cx.background_spawn(async move {
             let made = Vault::create(&pass, WordCount::Twelve, KdfParams::PRODUCTION);
             made.map(|(v, phrase)| (v, phrase, pass))
@@ -778,6 +978,12 @@ impl Shell {
         cx.spawn(async move |this, cx| {
             let res = task.await;
             this.update(cx, |this, cx| {
+                // Abandoned mid-KDF: drop `res` (its `Zeroizing` secrets zeroize) and leave whatever
+                // the user is doing now untouched — don't even clear `auth_busy`, which a newer
+                // operation may legitimately own.
+                if this.create_epoch != epoch {
+                    return;
+                }
                 this.auth_busy = false;
                 match res {
                     Ok((vault, phrase, pass)) => {
@@ -803,33 +1009,21 @@ impl Shell {
         .detach();
     }
 
-    /// CreateBackup → check the quizzed words, then write + unlock the vault.
+    /// CreateVerify → check the quizzed words, then write + unlock the vault and land on the
+    /// "you're ready" interstitial.
     pub fn confirm_backup(&mut self, cx: &mut Context<Self>) {
         if self.auth_busy {
             return;
         }
-        let (Some(phrase), Some(vault), Some(pass)) = (
-            self.pending_phrase.clone(),
-            self.pending_vault.clone(),
-            self.pending_pass.clone(),
-        ) else {
+        let (Some(vault), Some(pass)) = (self.pending_vault.clone(), self.pending_pass.clone())
+        else {
             return;
         };
-        let words: Vec<&str> = phrase.split_whitespace().collect();
-        let expected: Vec<String> = self
-            .confirm_positions
-            .iter()
-            .map(|&i| words.get(i).copied().unwrap_or("").to_lowercase())
-            .collect();
-        let entered: Vec<String> = self
-            .confirm_words
-            .read(cx)
-            .value()
-            .split_whitespace()
-            .map(|s| s.trim().to_lowercase())
-            .collect();
-        if entered != expected {
-            self.auth_error = Some("Those words don't match your backup — try again".into());
+        // Same check the "Confirm & finish" button gates on — keep them on one predicate so the
+        // disabled state and the submit can never disagree. (It also re-checks `pending_phrase`,
+        // so a missing phrase fails closed here too.)
+        if !self.backup_words_match(cx) {
+            self.auth_error = Some("Those words don't match your backup. Try again.".into());
             cx.notify();
             return;
         }
@@ -854,12 +1048,27 @@ impl Shell {
                 match res {
                     Ok(addr) => {
                         wallet::delete_legacy_key();
+                        // The phrase is now backed up + verified — drop every pending secret. The
+                        // vault is sealed and the daemon is unlocked; we hold only the address.
                         this.pending_phrase = None;
                         this.pending_pass = None;
                         this.pending_vault = None;
-                        this.finish_unlock(addr, cx);
+                        this.reveal_seed = false;
+                        this.seed_copied = false;
+                        // Land on the "you're ready" interstitial rather than dropping straight into
+                        // the app. The address is shown on that screen and then handed to
+                        // `finish_unlock` by the "Enter Deckard" click; the live app's portfolio /
+                        // pollers don't start until then (they fence on `auth == Ready`).
+                        this.wallet_address = Some(addr);
+                        this.auth = AuthStep::CreateDone;
+                        cx.notify();
                     }
                     Err(msg) => {
+                        // Deliberately KEEP the pending secrets on a write/unlock failure: the user
+                        // stays on Verify and the retry needs the same vault + phrase + passphrase
+                        // (regenerating would hand them a *different* phrase they never backed up).
+                        // The phrase already has to live in memory throughout backup/verify; an
+                        // error doesn't widen that, and `Zeroizing` wipes it when the app exits.
                         this.auth_error = Some(msg);
                         cx.notify();
                     }
@@ -1190,12 +1399,23 @@ impl Shell {
     /// Auto-focus the primary input for the current auth step (so the user — and the
     /// keyboard — can type immediately). Called once per step from `render`.
     fn focus_auth_input(&self, window: &mut Window, cx: &mut Context<Self>) {
+        // The verify field holds real seed words (3 of the 12) the user typed to prove their
+        // backup, and `InputState` is not `Zeroizing`. Once we've left the verify step — on success
+        // to CreateDone, or Back to CreateBackup — wipe it so those words don't linger in memory for
+        // the rest of the session. (On the verify step itself the `target` clear below handles it.)
+        if self.auth != AuthStep::CreateVerify {
+            self.confirm_words
+                .update(cx, |input, cx| input.set_value("", window, cx));
+        }
         let target = match self.auth {
             AuthStep::CreateSetup => Some(&self.create_pass),
-            AuthStep::CreateBackup => Some(&self.confirm_words),
+            // The backup screen is reveal-only (no text input); the verify step takes the words.
+            AuthStep::CreateVerify => Some(&self.confirm_words),
             AuthStep::Import => Some(&self.import_secret),
             AuthStep::Migrate | AuthStep::Unlock => Some(&self.pass_input),
-            AuthStep::Choose | AuthStep::Ready => None,
+            AuthStep::Choose | AuthStep::CreateBackup | AuthStep::CreateDone | AuthStep::Ready => {
+                None
+            }
         };
         if let Some(input) = target {
             // Clear any stale text (e.g. a passphrase left after lock) before focusing, so
@@ -1377,7 +1597,7 @@ impl Shell {
                         Ok(Err(e)) => {
                             this.portfolio_loading = false;
                             this.portfolio_error =
-                                Some(format!("couldn't resolve name — {}", short_err(e)));
+                                Some(format!("couldn't resolve name: {}", short_err(e)));
                             cx.notify();
                         }
                         Err(_) => {
@@ -1426,7 +1646,7 @@ impl Shell {
         // The wallet home now carries the "What Atlas may do" policy fence — re-fetch the
         // daemon's live policy on every visit so an out-of-band edit to policy.json (or a
         // STOP) shows up without a relaunch.
-        if sel == Selection::Wallet {
+        if matches!(sel, Selection::Wallet | Selection::Agent) {
             self.kick_agent_policy(cx);
         }
         cx.notify();
@@ -1457,6 +1677,20 @@ impl Shell {
             self.activity_reviewing = None;
         }
         self.surface = surface;
+        // The confirm arm-delay fails closed: clear it on every nav, then re-arm if we are landing
+        // on a clear-signing review that already has a proposal (a re-entered review). A
+        // stale-but-elapsed timestamp can never fire a confirm; ⌘↵/click stays gated by a fresh
+        // delay every time the review appears.
+        self.commit_review_at = None;
+        let on_review = match surface {
+            Surface::Send => self.send.proposal.is_some(),
+            Surface::Shield => self.shield.proposal.is_some(),
+            Surface::Swap => self.swap.proposal.is_some(),
+            _ => false,
+        };
+        if on_review {
+            self.arm_commit(cx);
+        }
         cx.notify();
     }
 
@@ -1617,33 +1851,11 @@ impl Shell {
     /// only if the hold survives [`SHIELD_HOLD`]. A per-hold epoch guards against a stale timer
     /// firing after an early release / re-press.
     pub fn shield_hold_start(&mut self, cx: &mut Context<Self>) {
-        // begin_hold guards (no-op while busy / already holding / no proposal), sets `holding`,
-        // bumps the hold epoch, and returns it for the timer to re-check.
-        let Some(epoch) = self.shield.begin_hold() else {
-            return;
-        };
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(SHIELD_HOLD).await;
-            this.update(cx, |this, cx| {
-                // Fire only if THIS hold is still valid AND the user is still on Shield — leaving
-                // via ⌘[ / palette / a surface change must never sign after the screen is gone.
-                // (The surface check stays here — it depends on the live surface, not flow state.)
-                if this.surface == Surface::Shield && this.shield.hold_still_valid(epoch) {
-                    this.shield.holding = false;
-                    this.confirm_shield(cx);
-                }
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// Release the confirm hold before it completed — reset the sweep; the epoch bump
-    /// cancels the pending timer.
-    pub fn shield_hold_cancel(&mut self, cx: &mut Context<Self>) {
-        if self.shield.cancel_hold() {
-            cx.notify();
+        // The key-cap confirm trigger (a deliberate button click or ⌘↵, never a hold). Confirm
+        // only while still on Shield AND once the review has ARMED, so a carried-over keypress
+        // can't approve (DESIGN §confirm pattern).
+        if self.surface == Surface::Shield && self.commit_armed() {
+            self.confirm_shield(cx);
         }
     }
 
@@ -1715,6 +1927,11 @@ impl Shell {
             }
             Err(e) => flow(self).error = Some(short_err(e)),
         }
+        // Arm the confirm once the review lands: ⌘↵/click can confirm only after the arm-delay,
+        // so a keypress carried over from the compose screen can't approve (DESIGN §confirm).
+        if flow(self).proposal.is_some() {
+            self.arm_commit(cx);
+        }
         cx.notify();
     }
 
@@ -1769,7 +1986,7 @@ impl Shell {
                     .recv_async()
                     .await
                     .map_err(|_| anyhow::anyhow!("network worker stopped"))?
-                    .map_err(|e| anyhow::anyhow!("couldn't resolve name — {}", short_err(e)))?,
+                    .map_err(|e| anyhow::anyhow!("couldn't resolve name: {}", short_err(e)))?,
             };
             let intent = signer::build_native_send_intent(chain_id, to, value_wei);
             // The user's foreground send from the app → App-origin (the wire requires origin).
@@ -1856,33 +2073,11 @@ impl Shell {
     /// only if the hold survives [`SHIELD_HOLD`]. A per-hold epoch guards against a stale timer
     /// firing after an early release / re-press.
     pub fn send_hold_start(&mut self, cx: &mut Context<Self>) {
-        // begin_hold guards (no-op while busy / already holding / no proposal), sets `holding`,
-        // bumps the hold epoch, and returns it for the timer to re-check.
-        let Some(epoch) = self.send.begin_hold() else {
-            return;
-        };
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(SHIELD_HOLD).await;
-            this.update(cx, |this, cx| {
-                // Fire only if THIS hold is still valid AND the user is still on Send — leaving
-                // via ⌘[ / palette / a surface change must never sign after the screen is gone.
-                // (The surface check stays here — it depends on the live surface, not flow state.)
-                if this.surface == Surface::Send && this.send.hold_still_valid(epoch) {
-                    this.send.holding = false;
-                    this.confirm_send(cx);
-                }
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// Release the confirm hold before it completed — reset the sweep; the epoch bump
-    /// cancels the pending timer.
-    pub fn send_hold_cancel(&mut self, cx: &mut Context<Self>) {
-        if self.send.cancel_hold() {
-            cx.notify();
+        // The key-cap confirm trigger (a deliberate button click or ⌘↵, never a hold). Confirm
+        // only while still on Send AND once the review has ARMED (the short arm-delay) so a
+        // keypress carried over from the previous screen can't approve (DESIGN §confirm pattern).
+        if self.surface == Surface::Send && self.commit_armed() {
+            self.confirm_send(cx);
         }
     }
 
@@ -1918,7 +2113,7 @@ impl Shell {
             self.swap_quote = None;
             self.swap_uid = None;
             self.swap.error = Some(
-                "Swap needs a supported network (Sepolia or mainnet) — switch chains first".into(),
+                "Swap needs a supported network (Sepolia or mainnet). Switch chains first.".into(),
             );
             self.open(Surface::Swap, cx);
             return;
@@ -2122,6 +2317,8 @@ impl Shell {
                             recipient: summary,
                             needs_resolve: true,
                         });
+                        // Arm the swap confirm once the priced review lands (DESIGN §confirm).
+                        this.arm_commit(cx);
                     }
                     Ok(Decision::Deny { reason }) => {
                         if is_session_ended(&reason) {
@@ -2184,7 +2381,7 @@ impl Shell {
             self.swap_buy_token,
             self.wallet_address,
         ) else {
-            self.swap.error = Some("Review the swap again — the order details are missing".into());
+            self.swap.error = Some("Review the swap again. The order details are missing.".into());
             cx.notify();
             return;
         };
@@ -2258,28 +2455,42 @@ impl Shell {
     /// Begin a confirm hold on the swap review: start the amber fill-sweep + a timer that fires
     /// `confirm_swap` only if the hold survives [`SHIELD_HOLD`] and the user is still on Swap.
     pub fn swap_hold_start(&mut self, cx: &mut Context<Self>) {
-        let Some(epoch) = self.swap.begin_hold() else {
-            return;
-        };
-        cx.notify();
+        // The key-cap confirm trigger (a deliberate button click or ⌘↵, never a hold). Confirm
+        // only while still on Swap AND once the review has ARMED (DESIGN §confirm pattern).
+        if self.surface == Surface::Swap && self.commit_armed() {
+            self.confirm_swap(cx);
+        }
+    }
+
+    /// Start the confirm arm-delay: stamp now AND schedule a single re-render at the arm boundary,
+    /// so the key-cap button visibly flips from "arming" (dimmed) to active. GPUI only re-renders
+    /// on notify, so without this wake the gate would flip silently and an early click would
+    /// no-op with no feedback.
+    fn arm_commit(&mut self, cx: &mut Context<Self>) {
+        self.commit_review_at = Some(std::time::Instant::now());
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(SHIELD_HOLD).await;
-            this.update(cx, |this, cx| {
-                if this.surface == Surface::Swap && this.swap.hold_still_valid(epoch) {
-                    this.swap.holding = false;
-                    this.confirm_swap(cx);
-                }
-            })
-            .ok();
+            cx.background_executor().timer(COMMIT_ARM_DELAY).await;
+            this.update(cx, |_, cx| cx.notify()).ok();
         })
         .detach();
     }
 
-    /// Release the swap confirm hold before it completed — reset the sweep; the epoch bump cancels
-    /// the pending timer.
-    pub fn swap_hold_cancel(&mut self, cx: &mut Context<Self>) {
-        if self.swap.cancel_hold() {
-            cx.notify();
+    /// True once a clear-signing review has been on screen at least [`COMMIT_ARM_DELAY`] — the
+    /// confirm arm gate so a carried-over keypress/click can't approve (DESIGN §confirm pattern).
+    pub(crate) fn commit_armed(&self) -> bool {
+        self.commit_review_at
+            .map(|t| t.elapsed() >= COMMIT_ARM_DELAY)
+            .unwrap_or(false)
+    }
+
+    /// The ⌘↵ confirm action (bound in the `Commit` key context). Routes to the right confirm by
+    /// the live commit surface; each path re-checks the surface + the arm gate.
+    pub fn confirm_commit(&mut self, cx: &mut Context<Self>) {
+        match self.surface {
+            Surface::Send => self.send_hold_start(cx),
+            Surface::Shield => self.shield_hold_start(cx),
+            Surface::Swap => self.swap_hold_start(cx),
+            _ => {}
         }
     }
 
@@ -2659,6 +2870,12 @@ impl Shell {
         self.open_activity(window, cx);
     }
 
+    fn on_confirm_commit(&mut self, _: &ConfirmCommit, _: &mut Window, cx: &mut Context<Self>) {
+        // ⌘↵ on a clear-signing review. Scoped to the focused `Commit` context, so it never fires
+        // on Activity (its own ⌘⏎ approve) or elsewhere. `confirm_commit` re-checks surface + arm.
+        self.confirm_commit(cx);
+    }
+
     fn on_go_back(&mut self, _: &GoBack, _: &mut Window, cx: &mut Context<Self>) {
         if self.palette_open {
             return;
@@ -2666,10 +2883,10 @@ impl Shell {
         // Back = leave any action surface and return to the selection's Home view.
         if self.surface != Surface::Home {
             self.open(Surface::Home, cx);
-            // Landing on the wallet cockpit via back (not a re-select) must still freshen the
-            // agent fence — otherwise a STOP fired from the feed, then ⌘[ back, shows a stale
-            // "ready" brake. select() does this on click; do it here for the back-path too.
-            if self.selection == Selection::Wallet {
+            // Landing on the wallet cockpit OR the agent surface via back (not a re-select) must
+            // still freshen the live policy — otherwise a STOP fired from the feed, then ⌘[ back,
+            // shows a stale "ready" brake. select() kicks for both on click; do it here too.
+            if matches!(self.selection, Selection::Wallet | Selection::Agent) {
                 self.kick_agent_policy(cx);
             }
         }
@@ -2913,6 +3130,20 @@ impl Render for Shell {
         // changed, and a no-op entirely off a macOS `--features tray` build).
         self.sync_capture_block();
 
+        // Focus the commit surface on the REVIEW step (a proposal is installed, no input to type)
+        // so the `key_context("Commit")` ⌘↵ confirm dispatches. On compose we leave focus with the
+        // amount input; idempotent (grabs focus only when not already held) so it never steals
+        // focus mid-type.
+        let on_commit_review = match self.surface {
+            Surface::Send => self.send.proposal.is_some(),
+            Surface::Shield => self.shield.proposal.is_some(),
+            Surface::Swap => self.swap.proposal.is_some(),
+            _ => false,
+        };
+        if on_commit_review && !self.commit_focus.is_focused(window) {
+            self.commit_focus.focus(window, cx);
+        }
+
         let body = if self.auth == AuthStep::Ready {
             // The unlocked app: macOS title bar above the two-pane shell grid
             // (sidebar | [breadcrumb / content / status strip]) + command palette.
@@ -2929,11 +3160,20 @@ impl Render for Shell {
                     .child(self.render_settings(window, cx))
                     .into_any_element(),
                 (_, Surface::Receive) => self.render_receive(cx).into_any_element(),
-                (_, Surface::Send) => self
-                    .render_commit(&crate::send_view::SEND_VIEW, cx)
+                // Send/Shield: short centered cards. Wrapped so the review step can hold focus for
+                // the `key_context("Commit")` ⌘↵ confirm. Focus is grabbed on the review step only
+                // (in render() below), so the compose amount input still types.
+                (_, Surface::Send) => v_flex()
+                    .size_full()
+                    .track_focus(&self.commit_focus)
+                    .key_context("Commit")
+                    .child(self.render_commit(&crate::send_view::SEND_VIEW, cx))
                     .into_any_element(),
-                (_, Surface::Shield) => self
-                    .render_commit(&crate::shield_view::SHIELD_VIEW, cx)
+                (_, Surface::Shield) => v_flex()
+                    .size_full()
+                    .track_focus(&self.commit_focus)
+                    .key_context("Commit")
+                    .child(self.render_commit(&crate::shield_view::SHIELD_VIEW, cx))
                     .into_any_element(),
                 // Activity owns its OWN scroll INSIDE the feed body (so the heading + STOP stay
                 // pinned — the panic brake must never scroll off screen); this outer just holds the
@@ -2955,6 +3195,8 @@ impl Render for Shell {
                     .id("scroll-swap")
                     .size_full()
                     .overflow_y_scrollbar()
+                    .track_focus(&self.commit_focus)
+                    .key_context("Commit")
                     .child(self.render_swap(cx))
                     .into_any_element(),
                 (Selection::Wallet, Surface::Home) => div()
@@ -2968,6 +3210,15 @@ impl Render for Shell {
                     .size_full()
                     .overflow_y_scrollbar()
                     .child(self.render_project_home(cx))
+                    .into_any_element(),
+                // The agent's own surface (DESIGN.md v2 §The agent interaction model): selected
+                // from the sidebar Agents group. Rendered entirely from policy data + the agent's
+                // activity slice.
+                (Selection::Agent, Surface::Home) => div()
+                    .id("scroll-agent")
+                    .size_full()
+                    .overflow_y_scrollbar()
+                    .child(self.render_agent_surface(cx))
                     .into_any_element(),
             };
             v_flex()
@@ -3023,6 +3274,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::on_toggle_mask))
             .on_action(cx.listener(Self::on_palette_next))
             .on_action(cx.listener(Self::on_palette_prev))
+            .on_action(cx.listener(Self::on_confirm_commit))
             .child(body)
     }
 }

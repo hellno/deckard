@@ -31,34 +31,34 @@ pub static SEND_VIEW: CommitView = CommitView {
     review_label: "Review transfer",
     cancel_button_id: "send-cancel",
     compose_hint: Some(
-        "An ENS name is resolved when you review — you'll confirm the exact address before sending.",
+        "An ENS name is resolved when you review. You'll confirm the exact address before sending.",
     ),
     compose_hint_dynamic: None,
 
     // --- review ---
     review_title: "Review transfer",
-    review_subtitle: "Confirm the amount and the destination address. Hold to send.",
+    review_subtitle: "Confirm the amount and the destination address, then send with ⌘↵.",
     // No Railgun fee / private net line for a public send.
     extra_rows: &[],
     honesty: &[
         HonestyLine {
             text: "This transfer is public on Ethereum and can't be undone.",
             emphasized: true,
+            danger: true,
         },
         HonestyLine {
-            text: "Double-check the destination address — funds sent to the wrong address are lost.",
+            text: "Double-check the destination address: funds sent to the wrong address are lost.",
             emphasized: false,
+            danger: true,
         },
     ],
     hold_id: "send-hold",
-    hold_fill_id: "send-fill",
-    hold_label_idle: "Hold to send",
-    hold_label_holding: "Keep holding…",
+    hold_label_idle: "Send",
     hold_label_busy: "Sending…",
     edit_button_id: "send-edit",
 
     // --- done ---
-    done_title: "Transfer broadcast",
+    done_title: "Transfer sent",
     done_body:
         "Your ETH is on its way. It settles after on-chain confirmation; your balance updates on the next sync.",
     copy_button_id: "send-copy-tx",
@@ -70,7 +70,6 @@ pub static SEND_VIEW: CommitView = CommitView {
     on_cancel: open_home,
     on_done: open_home,
     on_hold_start: send_hold_start,
-    on_hold_cancel: send_hold_cancel,
 };
 
 /// Re-acquire the send flow's state from the shell (the descriptor's `flow` selector).
@@ -92,7 +91,4 @@ fn open_home(shell: &mut Shell, cx: &mut Context<Shell>) {
 }
 fn send_hold_start(shell: &mut Shell, cx: &mut Context<Shell>) {
     shell.send_hold_start(cx);
-}
-fn send_hold_cancel(shell: &mut Shell, cx: &mut Context<Shell>) {
-    shell.send_hold_cancel(cx);
 }

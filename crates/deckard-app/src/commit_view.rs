@@ -1,8 +1,10 @@
 //! commit_view — the generic "compose → review → done" renderer that drives every
 //! [`CommitFlow`](crate::commit_flow) surface (Send now; Shield joins in Step 2). A single
 //! [`CommitView`] descriptor (a `&'static` table of copy, button ids, the heading glyph, and a
-//! few per-surface hooks) feeds [`Shell::render_commit`], which reproduces the hand-written
-//! surface view BYTE-FOR-BYTE — same layout, same strings, same widget ids.
+//! few per-surface hooks) feeds [`Shell::render_commit`], which renders the shared compose →
+//! review → done surface. The review step is the editorial transaction-as-hero clear-signing
+//! statement (DESIGN §Clear-signing review): action label, oversized mono amount, recipient,
+//! danger/caution lines, then quiet supporting facts — driven entirely by the descriptor.
 //!
 //! The clear-signing contract is unchanged from `shield_view`/`send_view`: plain language, exact
 //! mono figures, danger early, and confirm is a hold (never a tap) — the hand-built
@@ -14,9 +16,10 @@
 //! a variable honesty-line list, an optional conditional compose-hint hook) so Step 2 is a pure
 //! descriptor + handler swap with no renderer changes.
 
+use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, relative, Animation, AnimationExt, ClipboardItem, Context, FontWeight, Hsla,
-    InteractiveElement, IntoElement, MouseButton, ParentElement, SharedString, Styled,
+    div, px, ClipboardItem, Context, FontWeight, Hsla, InteractiveElement, IntoElement,
+    ParentElement, SharedString, StatefulInteractiveElement, Styled,
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
@@ -29,10 +32,10 @@ use deckard_core::U256;
 
 use crate::commit_flow::{CommitFlow, Proposal};
 use crate::money::money;
-use crate::shell::{Shell, SHIELD_HOLD};
+use crate::shell::Shell;
 
-/// A single label/value money row in the review card: label left (muted), value right (mono).
-/// One signature shared by every commit surface's card.
+/// A single label/value money row in the review's quiet supporting-facts list: label left
+/// (muted), value right (mono). One signature shared by every commit surface.
 fn kv_money_row(
     label: &'static str,
     wei: U256,
@@ -53,9 +56,9 @@ fn kv_money_row(
         )
 }
 
-/// A money figure derived from the proposal's gross value, rendered as one extra review-card row
-/// (e.g. Shield's "Railgun fee" and "You'll receive (private)"). `compute` turns the gross intent
-/// value into the row's wei figure.
+/// A money figure derived from the proposal's gross value, rendered as one quiet supporting-fact
+/// row below the review hero (e.g. Shield's "Railgun fee" and "You'll receive (private)").
+/// `compute` turns the gross intent value into the row's wei figure.
 pub struct MoneyRow {
     pub label: &'static str,
     pub compute: fn(gross: U256) -> U256,
@@ -65,7 +68,12 @@ pub struct MoneyRow {
 /// rest are muted (matches `send_honesty` / `shield_honesty` exactly).
 pub struct HonestyLine {
     pub text: &'static str,
+    /// Stronger weight within the calm caution (amber) register.
     pub emphasized: bool,
+    /// The loud-red DANGER register (irreversible / funds-are-lost), not amber caution. Explicit
+    /// per line so severity never depends on substring-sniffing the copy: a reword can't silently
+    /// downgrade a danger line (DESIGN §Color rule 6).
+    pub danger: bool,
 }
 
 /// The `&'static` descriptor that turns the generic renderer into a specific surface. Every field
@@ -100,15 +108,15 @@ pub struct CommitView {
     // --- review ---
     pub review_title: &'static str,
     pub review_subtitle: &'static str,
-    /// Extra money rows below "Amount" / "To" (Shield's fee + net). Empty for Send.
+    /// Quiet supporting-fact money rows, demoted between hairlines below the hero (Shield's fee +
+    /// net). Empty for Send, which has nothing to demote.
     pub extra_rows: &'static [MoneyRow],
     /// The honesty lines (2 for Send, 3 for Shield), in render order.
     pub honesty: &'static [HonestyLine],
-    /// The hold-to-confirm widget + fill-animation ids, and the idle/holding/busy labels.
+    /// The key-cap confirm button's id, its idle label (the confirm verb, e.g. "Send"), and the
+    /// busy label shown while signing (e.g. "Sending…").
     pub hold_id: &'static str,
-    pub hold_fill_id: &'static str,
     pub hold_label_idle: &'static str,
-    pub hold_label_holding: &'static str,
     pub hold_label_busy: &'static str,
     pub edit_button_id: &'static str,
 
@@ -123,30 +131,9 @@ pub struct CommitView {
     pub on_edit: fn(&mut Shell, &mut Context<Shell>),
     pub on_cancel: fn(&mut Shell, &mut Context<Shell>),
     pub on_done: fn(&mut Shell, &mut Context<Shell>),
+    /// The confirm trigger (button click or ⌘↵). Routes to `confirm_send`/`shield`/`swap` via the
+    /// surface's `*_hold_start` adapter, which re-checks the surface + the arm-delay.
     pub on_hold_start: fn(&mut Shell, &mut Context<Shell>),
-    pub on_hold_cancel: fn(&mut Shell, &mut Context<Shell>),
-}
-
-/// Middle-truncate a long address (`0x…` / `0zk…`) for a tight row (matches the per-view helper).
-fn short_mid(s: &str) -> String {
-    if s.len() >= 16 {
-        format!("{}…{}", &s[..10], &s[s.len() - 6..])
-    } else {
-        s.to_string()
-    }
-}
-
-/// A tiny field label (matches the per-view `field_label`).
-fn field_label(text: &'static str, muted: Hsla) -> impl IntoElement {
-    div().text_xs().text_color(muted).child(text)
-}
-
-/// A one-line error, in `danger` (matches the per-view `error_line`).
-fn error_line(msg: &str, cx: &mut Context<Shell>) -> impl IntoElement {
-    div()
-        .text_sm()
-        .text_color(cx.theme().danger)
-        .child(format!("⚠ {msg}"))
 }
 
 impl Shell {
@@ -181,15 +168,25 @@ impl Shell {
     ) -> impl IntoElement {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
+        let danger = theme.danger;
         let flow = (view.flow)(self);
         let busy = flow.busy;
 
         let amount_raw = flow.amount.read(cx).value().to_string();
         let recipient_raw = flow.recipient.read(cx).value().to_string();
-        let can_review = crate::signer::parse_eth_to_wei(&amount_raw)
-            .map(|w| w > U256::ZERO)
-            .unwrap_or(false)
-            && !recipient_raw.trim().is_empty();
+        // The wallet's spendable native balance gates the amount. Both Send and Shield reduce
+        // native ETH, so an amount over the balance is invalid for either (DESIGN §Required states:
+        // amount > balance disables the action with an inline error, rather than a late provider
+        // failure). The strict `>` still lets an exactly-full-balance amount through; the daemon's
+        // gas-aware check + humanized error is the backstop for the gas-leaves-nothing edge (a
+        // precise up-front reserve needs a gas estimate we don't have here). `None` balance
+        // (pre-sync) leaves the gate open — we can't claim over-balance.
+        let native_wei = self.portfolio.as_ref().map(|p| p.native_wei);
+        let parsed = crate::signer::parse_eth_to_wei(&amount_raw)
+            .ok()
+            .filter(|w| *w > U256::ZERO);
+        let over_balance = matches!((parsed, native_wei), (Some(w), Some(bal)) if w > bal);
+        let can_review = parsed.is_some() && !recipient_raw.trim().is_empty() && !over_balance;
 
         // The compose hint: a dynamic (Shield 3-way) hook takes precedence over the static line.
         // The dynamic hook reuses the `recipient_raw` the renderer already read (no second `cx`
@@ -209,17 +206,27 @@ impl Shell {
                     v_flex()
                         .w_full()
                         .gap_2()
-                        .child(field_label("Amount", muted))
-                        .child(Input::new(&flow.amount).w_full()),
+                        .child(crate::widgets::section_label("Amount", muted))
+                        .child(Input::new(&flow.amount).w_full())
+                        .when(over_balance, |c| {
+                            c.child(crate::widgets::error_line(
+                                danger,
+                                "More than your wallet holds.",
+                            ))
+                        }),
                 )
                 .child(
                     v_flex()
                         .w_full()
                         .gap_2()
-                        .child(field_label(view.recipient_label, muted))
+                        .child(crate::widgets::section_label(view.recipient_label, muted))
                         .child(Input::new(&flow.recipient).w_full()),
                 )
-                .children(flow.error.as_ref().map(|e| error_line(e, cx)))
+                .children(
+                    flow.error
+                        .as_ref()
+                        .map(|e| crate::widgets::error_line(danger, e.clone())),
+                )
                 .child(
                     h_flex()
                         .w_full()
@@ -247,8 +254,12 @@ impl Shell {
         )
     }
 
-    /// Review: the clear-signing card (amount / recipient [+ extra rows]) + the honesty lines +
-    /// a deliberate hold-to-confirm. Rendered from the proposal SNAPSHOT — never the live input.
+    /// Review: the clear-signing statement (DESIGN §Clear-signing review — transaction-as-hero).
+    /// NOT a bordered card: a tiny action label, then the AMOUNT as the oversized mono hero
+    /// (dimmed decimals), then `TO` + the recipient via `truncated_address`, then the danger /
+    /// caution lines, then the quiet supporting facts (any `extra_rows`) demoted between
+    /// hairlines, then the unchanged hold-to-confirm + Edit. Rendered from the proposal SNAPSHOT —
+    /// never the live input.
     fn render_commit_review(
         &self,
         view: &'static CommitView,
@@ -259,46 +270,89 @@ impl Shell {
         let fg = theme.foreground;
         let muted = theme.muted_foreground;
         let border = theme.border;
-        let surface = theme.secondary;
+        let danger = theme.danger;
+        let is_dark = theme.is_dark();
         let mono = theme.mono_font_family.clone();
         let flow = (view.flow)(self);
 
         let gross = proposal.intent.value;
         let recipient = proposal.recipient.clone();
 
-        // The card: Amount, To, then any extra money rows (Shield's fee + net).
-        let mut card = v_flex()
+        // The action label noun ("Sending" / "Shielding") — derived from the descriptor's own
+        // busy verb (the `&'static` `CommitView` is shared with the off-limits swap descriptor, so
+        // a new noun field can't be added; the busy label is the descriptor's authoritative verb).
+        let noun = view.hold_label_busy.trim_end_matches('…');
+
+        // The transaction-as-hero block: a tiny action label, then the amount as the oversized
+        // mono hero (integer `fg`, decimals + ticker dimmed by color via `money`, no size step).
+        let hero = v_flex()
             .w_full()
-            .p_4()
-            .rounded_lg()
-            .border_1()
-            .border_color(border)
-            .bg(surface)
-            .child(kv_money_row("Amount", gross, mono.clone(), fg, muted))
+            .gap_1()
+            .child(crate::widgets::section_label(noun, muted))
+            .child(
+                div()
+                    .text_size(px(40.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(money(
+                        gross,
+                        18,
+                        6,
+                        Some("ETH"),
+                        false,
+                        mono.clone(),
+                        fg,
+                        muted,
+                    )),
+            );
+
+        // The recipient: a tiny `To` label + the identicon + the FULL address. This is the single
+        // most security-critical string at the moment of authorization, so unlike a tight row
+        // (which uses the 6+4 `short_addr`) the confirm shows EVERY character, in `fg` (not dimmed),
+        // and wraps for a long 0zk shield address — maximal distinguishability before signing.
+        let to = v_flex()
+            .w_full()
+            .gap_2()
+            .child(crate::widgets::section_label("To", muted))
             .child(
                 h_flex()
                     .w_full()
-                    .justify_between()
-                    .items_center()
-                    .py_1p5()
-                    .child(div().text_sm().text_color(muted).child("To"))
+                    .items_start()
+                    .gap_2()
+                    .child(crate::widgets::identity_mark(
+                        recipient.trim(),
+                        px(16.0),
+                        px(4.0),
+                        crate::theme::identity_square(is_dark),
+                        fg,
+                    ))
                     .child(
                         div()
+                            .flex_1()
+                            .min_w_0()
                             .font_family(mono.clone())
                             .text_sm()
                             .text_color(fg)
-                            .child(short_mid(recipient.trim())),
+                            .child(SharedString::from(recipient.trim().to_string())),
                     ),
             );
-        for row in view.extra_rows {
-            card = card.child(kv_money_row(
-                row.label,
-                (row.compute)(gross),
-                mono.clone(),
-                fg,
-                muted,
-            ));
-        }
+
+        // The quiet supporting facts (Shield's Railgun fee + net), demoted between two hairlines.
+        // Empty for a public send, where there is nothing to demote.
+        let facts = (!view.extra_rows.is_empty()).then(|| {
+            let mut col = v_flex()
+                .w_full()
+                .child(div().w_full().h(px(1.0)).bg(border));
+            for row in view.extra_rows {
+                col = col.child(kv_money_row(
+                    row.label,
+                    (row.compute)(gross),
+                    mono.clone(),
+                    fg,
+                    muted,
+                ));
+            }
+            col.child(div().w_full().h(px(1.0)).bg(border))
+        });
 
         self.commit_shell(
             view,
@@ -306,9 +360,15 @@ impl Shell {
                 .w_full()
                 .gap_4()
                 .child(self.commit_heading(view, view.review_title, view.review_subtitle, cx))
-                .child(card)
+                .child(hero)
+                .child(to)
                 .child(self.commit_honesty(view, cx))
-                .children(flow.error.as_ref().map(|e| error_line(e, cx)))
+                .children(
+                    flow.error
+                        .as_ref()
+                        .map(|e| crate::widgets::error_line(danger, e.clone())),
+                )
+                .children(facts)
                 .child(self.hold_to_confirm(view, cx))
                 .child(
                     Button::new(view.edit_button_id)
@@ -373,7 +433,7 @@ impl Shell {
                         .font_family(mono)
                         .text_xs()
                         .text_color(muted)
-                        .child(short_mid(&tx)),
+                        .child(crate::widgets::short_addr(&tx)),
                 )
                 .child(
                     h_flex()
@@ -397,28 +457,31 @@ impl Shell {
         )
     }
 
-    /// The honesty lines in a calm neutral surface (no keyline). `emphasized` lines use the
-    /// foreground tone; the rest are muted — matching `send_honesty` / `shield_honesty`.
+    /// The honesty lines as caution affordances (DESIGN §Color rule 7): an inline
+    /// TriangleAlert icon + risk text, NO box and NO keyline. The irreversible /
+    /// funds-are-lost line takes the loud `danger` register; the softer cautions take
+    /// amber, with `emphasized` driving the text weight.
     fn commit_honesty(
         &self,
         view: &'static CommitView,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
-        let fg = theme.foreground;
+        let is_dark = theme.is_dark();
         let muted = theme.muted_foreground;
-        let surface = theme.secondary;
+        let danger = theme.danger;
+        let amber = crate::theme::amber(is_dark);
 
-        let mut col = v_flex()
-            .w_full()
-            .gap_1p5()
-            .px_3()
-            .py_2p5()
-            .rounded_lg()
-            .bg(surface);
+        let mut col = v_flex().w_full().gap_2();
         for line in view.honesty {
-            let color = if line.emphasized { fg } else { muted };
-            col = col.child(div().text_xs().text_color(color).child(line.text));
+            // Danger (loud red) vs caution (amber) is an EXPLICIT per-line flag, never sniffed from
+            // the copy, so an editorial reword can't silently downgrade a danger line.
+            let el = if line.danger {
+                crate::widgets::error_line(danger, line.text)
+            } else {
+                crate::widgets::caution_line(amber, muted, line.emphasized, line.text)
+            };
+            col = col.child(el);
         }
         col
     }
@@ -438,79 +501,71 @@ impl Shell {
         let theme = cx.theme();
         let fg = theme.foreground;
         let border = theme.border;
-        let surface = theme.secondary;
-        let amber_tint = crate::theme::amber_tint(theme.is_dark());
+        let fill = theme.muted; // bg.raise2 — the neutral primary fill
+        let base = theme.background;
+        let mono = theme.mono_font_family.clone();
+        let amber = crate::theme::amber(theme.is_dark());
+        let muted = theme.muted_foreground;
         let flow = (view.flow)(self);
-        let holding = flow.holding;
         let busy = flow.busy;
+
+        // The key-cap arms ~450ms after the review appears (the spam-guard). Dim it until then so a
+        // too-early click / ⌘↵ reads as "not ready yet" instead of a silently-dead button. The
+        // arm timer (`arm_commit`) wakes a re-render at the boundary so it visibly brightens.
+        let keycap_color = if self.commit_armed() { amber } else { muted };
 
         let label = if busy {
             view.hold_label_busy
-        } else if holding {
-            view.hold_label_holding
         } else {
             view.hold_label_idle
         };
 
-        let fill = if holding {
+        // A keyboard-first key-cap confirm (DESIGN.md v2 §The confirm pattern). A deliberate
+        // click — or ⌘↵ — confirms; this is NOT a hold (the press-and-hold gesture was an
+        // anti-pattern). The ⌘↵ chord plus a short arm-delay (gated in the confirm handler)
+        // keep it spam-proof. The confirm handler is `on_hold_start` (kept as the trigger slot).
+        let keycap = move |g: &'static str| {
             div()
-                .absolute()
-                .left_0()
-                .top_0()
-                .h_full()
-                .bg(amber_tint)
-                .with_animation(
-                    view.hold_fill_id,
-                    Animation::new(SHIELD_HOLD),
-                    |el, delta| el.w(relative(delta)),
-                )
-                .into_any_element()
-        } else {
-            div()
-                .absolute()
-                .left_0()
-                .top_0()
-                .h_full()
-                .w(relative(0.0))
-                .into_any_element()
+                .min_w(px(24.0))
+                .h(px(24.0))
+                .px_1()
+                .rounded(px(6.0))
+                .bg(base)
+                .border_1()
+                .border_color(keycap_color)
+                .flex()
+                .items_center()
+                .justify_center()
+                .font_family(mono.clone())
+                .text_xs()
+                .text_color(keycap_color)
+                .child(g)
         };
 
         div()
             .id(view.hold_id)
-            .relative()
-            .overflow_hidden()
             .w_full()
-            .h(px(44.0))
-            .rounded_md()
+            .h(px(48.0))
+            .rounded(px(10.0))
             .border_1()
             .border_color(border)
-            .bg(surface)
+            .bg(fill)
+            .flex()
+            .items_center()
+            .px_4()
             .cursor_pointer()
-            .child(fill)
             .child(
                 div()
-                    .relative()
-                    .size_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_sm()
                     .font_weight(FontWeight::SEMIBOLD)
+                    .text_sm()
                     .text_color(fg)
                     .child(label),
             )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| (view.on_hold_start)(this, cx)),
-            )
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| (view.on_hold_cancel)(this, cx)),
-            )
-            .on_mouse_up_out(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| (view.on_hold_cancel)(this, cx)),
-            )
+            .child(div().flex_1())
+            .when(!busy, |b| {
+                b.child(h_flex().gap_1().child(keycap("⌘")).child(keycap("↵")))
+            })
+            .on_click(cx.listener(|this, _, _, cx| (view.on_hold_start)(this, cx)))
     }
 
     /// The shared centered shell for every commit state (mirrors `send_shell` / `shield_shell`).

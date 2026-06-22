@@ -67,7 +67,7 @@ pub static SWAP_VIEW: CommitView = CommitView {
 
     // --- review (read by `commit_heading` on the review arm) ---
     review_title: "Review swap",
-    review_subtitle: "Confirm what you sell, the minimum you receive, and where it goes. Hold to swap.",
+    review_subtitle: "Confirm what you sell, the minimum you receive, and where it goes, then swap with ⌘↵.",
     // The bespoke review card builds its own token-denominated rows; the generic ETH money rows
     // don't apply.
     extra_rows: &[],
@@ -75,16 +75,16 @@ pub static SWAP_VIEW: CommitView = CommitView {
         HonestyLine {
             text: "This order is public on the CoW orderbook.",
             emphasized: true,
+            danger: false,
         },
         HonestyLine {
-            text: "You receive at least the minimum shown — a worse price never settles.",
+            text: "You receive at least the minimum shown. A worse price never settles.",
             emphasized: false,
+            danger: false,
         },
     ],
     hold_id: "swap-hold",
-    hold_fill_id: "swap-fill",
-    hold_label_idle: "Hold to swap",
-    hold_label_holding: "Keep holding…",
+    hold_label_idle: "Swap",
     hold_label_busy: "Swapping…",
     edit_button_id: "swap-edit",
 
@@ -101,7 +101,6 @@ pub static SWAP_VIEW: CommitView = CommitView {
     on_cancel: open_home,
     on_done: open_home,
     on_hold_start: swap_hold_start,
-    on_hold_cancel: swap_hold_cancel,
 };
 
 /// Re-acquire the swap flow's state from the shell (the descriptor's `flow` selector).
@@ -123,20 +122,6 @@ fn open_home(shell: &mut Shell, cx: &mut Context<Shell>) {
 }
 fn swap_hold_start(shell: &mut Shell, cx: &mut Context<Shell>) {
     shell.swap_hold_start(cx);
-}
-fn swap_hold_cancel(shell: &mut Shell, cx: &mut Context<Shell>) {
-    shell.swap_hold_cancel(cx);
-}
-
-/// Middle-truncate a long address (`0x…`) for a tight row. A local copy matching the per-view
-/// practice in `send_view`/`shield_view`/`commit_view` (the shared one is module-private to
-/// `commit_view`; we don't widen its visibility just for this).
-fn short_mid(s: &str) -> String {
-    if s.len() >= 16 {
-        format!("{}…{}", &s[..10], &s[s.len() - 6..])
-    } else {
-        s.to_string()
-    }
 }
 
 impl Shell {
@@ -162,6 +147,8 @@ impl Shell {
         let theme = cx.theme();
         let fg = theme.foreground;
         let muted = theme.muted_foreground;
+        let border = theme.border;
+        let mono = theme.mono_font_family.clone();
         let chain_id = self.chain_id();
         let busy = self.swap.busy;
         let quoting = self.swap_quoting;
@@ -180,7 +167,6 @@ impl Shell {
         // active one is primary, the rest ghost. Tapping sets the side (and clears any stale quote,
         // handled in the shell handler).
         let sell_picker = self.render_token_picker(
-            "You sell",
             chain_id,
             self.swap_sell_token,
             self.swap_buy_token,
@@ -188,13 +174,50 @@ impl Shell {
             cx,
         );
         let buy_picker = self.render_token_picker(
-            "You receive",
             chain_id,
             self.swap_buy_token,
             self.swap_sell_token,
             false,
             cx,
         );
+
+        // The receive-side figure: the post-slippage minimum the wallet receives, shown as the
+        // editorial large-mono hero for the "Receive at least" field. Derived from the live quote;
+        // before a quote exists it's a dimmed placeholder so the field still reads as an amount slot.
+        let receive_hero = self
+            .swap_quote
+            .as_ref()
+            .map(|q| {
+                let buy_tok = q.quote.buy_token;
+                let buy_dec = crate::swap::token_decimals(chain_id, buy_tok);
+                let min_receive = deckard_core::apply_slippage(
+                    q.quote.buy_amount,
+                    deckard_core::DEFAULT_SLIPPAGE_BPS,
+                );
+                div()
+                    .text_size(px(32.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(money(
+                        min_receive,
+                        buy_dec,
+                        6,
+                        None,
+                        false,
+                        mono.clone(),
+                        fg,
+                        muted,
+                    ))
+                    .into_any_element()
+            })
+            .unwrap_or_else(|| {
+                div()
+                    .font_family(mono.clone())
+                    .text_size(px(32.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(muted)
+                    .child("—")
+                    .into_any_element()
+            });
 
         self.commit_shell(
             &SWAP_VIEW,
@@ -207,15 +230,39 @@ impl Shell {
                     SWAP_VIEW.compose_subtitle,
                     cx,
                 ))
+                // SELL field — section label, the editable mono amount input, the sell-token chips.
                 .child(
                     v_flex()
                         .w_full()
                         .gap_2()
-                        .child(field_label("Amount to sell", muted))
-                        .child(Input::new(&self.swap.amount).w_full()),
+                        .child(crate::widgets::section_label("Sell", muted))
+                        .child(Input::new(&self.swap.amount).w_full())
+                        .child(sell_picker),
                 )
-                .child(sell_picker)
-                .child(buy_picker)
+                // A thin direction divider: a hairline on each side of a small neutral swap knob
+                // (DESIGN: hierarchy from hairlines + whitespace, not a card).
+                .child(
+                    h_flex()
+                        .w_full()
+                        .items_center()
+                        .gap_3()
+                        .child(div().flex_1().h(px(1.0)).bg(border))
+                        .child(
+                            Icon::new(IconName::Replace)
+                                .text_color(muted)
+                                .flex_shrink_0(),
+                        )
+                        .child(div().flex_1().h(px(1.0)).bg(border)),
+                )
+                // RECEIVE field — section label, the large-mono minimum-receive hero, the buy chips.
+                .child(
+                    v_flex()
+                        .w_full()
+                        .gap_2()
+                        .child(crate::widgets::section_label("Receive at least", muted))
+                        .child(receive_hero)
+                        .child(buy_picker),
+                )
                 .children(self.swap.error.as_ref().map(|e| error_line(e, cx)))
                 .child(
                     h_flex()
@@ -235,6 +282,8 @@ impl Shell {
                                 .on_click(cx.listener(|this, _, _, cx| this.open(Surface::Home, cx))),
                         ),
                 )
+                // Once a quote is in, the inline quote/route strip (rate · via CoW · slippage · fee)
+                // below a hairline — NOT a bordered card (DESIGN editorial: state facts inline).
                 .children(
                     self.swap_quote
                         .as_ref()
@@ -259,13 +308,13 @@ impl Shell {
         )
     }
 
-    /// A single token-side picker: a label + an inline row of token chips for the chain's curated
-    /// list. The active token's chip is `primary`, the rest `ghost`; the *other* side's current
-    /// token is disabled (you can't sell and buy the same token). Each chip carries the cool
-    /// `identity_square` swatch + the ticker.
+    /// A single token-side picker: an inline row of token chips for the chain's curated list. The
+    /// active token's chip is `primary`, the rest `ghost`; the *other* side's current token is
+    /// disabled (you can't sell and buy the same token). Each chip carries the cool
+    /// `identity_square` swatch + the ticker. The grouping label ("Sell" / "Receive at least") is
+    /// owned by the enclosing field in `render_swap_compose`, so the picker draws only the chips.
     fn render_token_picker(
         &self,
-        label: &'static str,
         chain_id: u64,
         active: Option<Address>,
         other: Option<Address>,
@@ -273,7 +322,6 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
-        let muted = theme.muted_foreground;
         let swatch = theme::identity_square(theme.is_dark());
 
         let mut row = h_flex().w_full().gap_2().flex_wrap();
@@ -308,17 +356,15 @@ impl Shell {
             row = row.child(chip);
         }
 
-        v_flex()
-            .w_full()
-            .gap_2()
-            .child(field_label(label, muted))
-            .child(row)
+        row
     }
 
-    /// The live quote summary card (shown once a quote is fetched): the indicative price, the
-    /// minimum you receive after slippage, and the network fee — all in mono token figures via
-    /// `swap.rs`'s decimals/symbol lookups. This is indicative only; the binding figures live on the
-    /// review card, built from the re-quote at confirm time.
+    /// The live quote/route strip (shown once a quote is fetched): the indicative rate, the route
+    /// (CoW Protocol), the max slippage, the network fee, and the order's freshness — an INLINE strip
+    /// below a hairline (DESIGN editorial: facts stated inline, never a bordered summary card). This
+    /// is indicative only; the binding figures live on the review screen, built from the re-quote at
+    /// confirm time. The sell/min-receive figures live as the field heroes above, so they're not
+    /// restated here (state each figure once).
     fn render_quote_summary(
         &self,
         quote: &deckard_core::QuoteResponse,
@@ -329,7 +375,6 @@ impl Shell {
     ) -> impl IntoElement {
         let theme = cx.theme();
         let border = theme.border;
-        let surface = theme.secondary;
         let mono = theme.mono_font_family.clone();
 
         let sell_tok = quote.quote.sell_token;
@@ -339,50 +384,64 @@ impl Shell {
         let sell_sym = crate::swap::token_symbol(chain_id, sell_tok);
         let buy_sym = crate::swap::token_symbol(chain_id, buy_tok);
 
-        // The gross sell (after-fee + fee), the buy amount, and the post-slippage minimum receive.
+        // The gross sell (after-fee + fee) and the network fee, in the sell token's atoms.
         let gross_sell = quote
             .quote
             .sell_amount
             .saturating_add(quote.quote.fee_amount);
-        let buy = quote.quote.buy_amount;
-        let min_receive = deckard_core::apply_slippage(buy, deckard_core::DEFAULT_SLIPPAGE_BPS);
         let fee = quote.quote.fee_amount;
 
-        v_flex()
+        // The indicative rate "1 SELL = N BUY": N in buy-token units per ONE sell-token unit. Scaled
+        // so `format_amount(.., buy_dec)` renders it directly — N·10^buy_dec = buy_amount·10^sell_dec
+        // / gross_sell (zero when the gross is degenerate, so a malformed quote never divides by 0).
+        let rate_label = if gross_sell.is_zero() {
+            None
+        } else {
+            // `sell_dec` is a curated token's decimals (<= 18), so 10^sell_dec fits a u128.
+            let scale = U256::from(10u128.pow(sell_dec as u32));
+            let rate_atoms = quote.quote.buy_amount.saturating_mul(scale) / gross_sell;
+            let rate = deckard_core::format_amount(rate_atoms, buy_dec, 4);
+            Some(format!("1 {sell_sym} = {rate} {buy_sym}"))
+        };
+
+        // Each fact is a small secondary-text span; mono is reserved for the figures. Wraps so the
+        // strip never overflows the pane. The fee uses `money()` (an `h_flex` that carries its own
+        // mono font + color-dimming), so it sits inline beside its label.
+        let strip = h_flex()
             .w_full()
-            .p_4()
-            .gap_1()
-            .rounded_lg()
-            .border_1()
-            .border_color(border)
-            .bg(surface)
-            .child(token_money_row(
-                "You sell",
-                gross_sell,
-                sell_dec,
-                sell_sym,
-                mono.clone(),
-                fg,
-                muted,
-            ))
-            .child(token_money_row(
-                "You receive at least",
-                min_receive,
-                buy_dec,
-                buy_sym,
-                mono.clone(),
-                fg,
-                muted,
-            ))
-            .child(token_money_row(
-                "Network fee",
+            .flex_wrap()
+            .gap_3()
+            .text_xs()
+            .text_color(muted)
+            .when_some(rate_label, |el, r| {
+                el.child(div().font_family(mono.clone()).text_color(fg).child(r))
+            })
+            .child(div().child("via CoW Protocol"))
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child("max slippage")
+                    .child(div().font_family(mono.clone()).text_color(fg).child("0.5%")),
+            )
+            .child(h_flex().gap_1().child("network fee").child(money(
                 fee,
                 sell_dec,
-                sell_sym,
+                6,
+                Some(sell_sym),
+                false,
                 mono,
                 muted,
                 muted,
-            ))
+            )))
+            .child(div().child(format!("valid until {}", short_clock(quote.quote.valid_to))));
+
+        // The hairline above the strip is the only rule — no box, no fill.
+        v_flex()
+            .w_full()
+            .pt_3()
+            .border_t_1()
+            .border_color(border)
+            .child(strip)
     }
 
     /// Review: the clear-signing card for the bound order — what you sell (gross), the minimum you
@@ -398,7 +457,7 @@ impl Shell {
         let fg = theme.foreground;
         let muted = theme.muted_foreground;
         let border = theme.border;
-        let surface = theme.secondary;
+        let mark_fill = theme::identity_square(theme.is_dark());
         let mono = theme.mono_font_family.clone();
         let chain_id = self.chain_id();
 
@@ -406,7 +465,7 @@ impl Shell {
         // proposal's `intent` carries the swap's value, but the token-denominated sell/buy figures
         // come from the quote snapshot still held on the shell — cleared only on a compose edit,
         // which `review_swap` blocks once a proposal is live.
-        let (sell_row, recv_row, valid_row) = match self.swap_quote.as_ref() {
+        let (sell_row, recv_row, rate_row, valid_row) = match self.swap_quote.as_ref() {
             Some(q) => {
                 let sell_tok = q.quote.sell_token;
                 let buy_tok = q.quote.buy_token;
@@ -419,6 +478,15 @@ impl Shell {
                     q.quote.buy_amount,
                     deckard_core::DEFAULT_SLIPPAGE_BPS,
                 );
+                // The indicative rate "1 SELL = N BUY" (same scaling as the compose strip).
+                let rate = if gross_sell.is_zero() {
+                    None
+                } else {
+                    let scale = U256::from(10u128.pow(sell_dec as u32));
+                    let rate_atoms = q.quote.buy_amount.saturating_mul(scale) / gross_sell;
+                    let r = deckard_core::format_amount(rate_atoms, buy_dec, 4);
+                    Some(format!("1 {sell_sym} = {r} {buy_sym}"))
+                };
                 (
                     Some(token_money_row(
                         "You sell",
@@ -438,41 +506,77 @@ impl Shell {
                         fg,
                         muted,
                     )),
+                    rate,
                     Some(short_clock(q.quote.valid_to)),
                 )
             }
-            None => (None, None, None),
+            None => (None, None, None, None),
         };
 
-        // The receiver is always your own wallet (a swap never sends elsewhere).
+        // The receiver is always your own wallet (a swap never sends elsewhere). Rendered with the
+        // trust-grade identicon + truncation so the destination is verifiable at the moment of sign.
         let receiver = self.wallet_address_string();
 
-        let mut card = v_flex()
-            .w_full()
-            .p_4()
-            .rounded_lg()
-            .border_1()
-            .border_color(border)
-            .bg(surface);
-        card = card.children(sell_row);
-        card = card.children(recv_row);
-        card = card
-            .child(kv_text_row(
+        // The quiet supporting facts as a flat hairline-ruled kv list — top + bottom hairline, a
+        // single rule between rows, NO bordered card (DESIGN editorial: state each fact once below a
+        // hairline). Each row is built then folded so only rows after the first carry a top hairline.
+        let mut rows: Vec<gpui::AnyElement> = Vec::new();
+        if let Some(r) = sell_row {
+            rows.push(r.into_any_element());
+        }
+        if let Some(r) = recv_row {
+            rows.push(r.into_any_element());
+        }
+        if let Some(rate) = rate_row {
+            rows.push(kv_text_row("Rate", rate, mono.clone(), fg, muted).into_any_element());
+        }
+        rows.push(
+            kv_address_row(
                 "Receiver",
-                short_mid(receiver.trim()),
+                receiver.trim(),
                 mono.clone(),
+                mark_fill,
                 fg,
                 muted,
-            ))
-            .child(kv_text_row(
+            )
+            .into_any_element(),
+        );
+        rows.push(
+            kv_text_row(
                 "Max slippage",
                 "0.5%".to_string(),
                 mono.clone(),
                 muted,
                 muted,
-            ));
+            )
+            .into_any_element(),
+        );
+        rows.push(
+            kv_text_row(
+                "Route",
+                "CoW Protocol".to_string(),
+                mono.clone(),
+                muted,
+                muted,
+            )
+            .into_any_element(),
+        );
         if let Some(valid) = valid_row {
-            card = card.child(kv_text_row("Order valid until", valid, mono, muted, muted));
+            rows.push(kv_text_row("Valid until", valid, mono, muted, muted).into_any_element());
+        }
+
+        let mut kvlist = v_flex()
+            .w_full()
+            .border_t_1()
+            .border_b_1()
+            .border_color(border);
+        for (i, row) in rows.into_iter().enumerate() {
+            kvlist = kvlist.child(
+                div()
+                    .w_full()
+                    .when(i > 0, |d| d.border_t_1().border_color(border))
+                    .child(row),
+            );
         }
 
         self.commit_shell(
@@ -487,14 +591,14 @@ impl Shell {
                     cx,
                 ))
                 // A faint reminder of the human-readable summary the proposal snapshot carries
-                // (e.g. "0.05 WETH → at least 92.1 COW"), so the card matches what was reviewed.
+                // (e.g. "0.05 WETH → at least 92.1 COW"), so the list matches what was reviewed.
                 .child(
                     div()
                         .text_sm()
                         .text_color(muted)
                         .child(proposal.recipient.clone()),
                 )
-                .child(card)
+                .child(kvlist)
                 .child(self.commit_honesty_swap(cx))
                 .children(self.swap.error.as_ref().map(|e| error_line(e, cx)))
                 .child(self.hold_to_confirm(&SWAP_VIEW, cx))
@@ -563,7 +667,7 @@ impl Shell {
                         .font_family(mono)
                         .text_xs()
                         .text_color(muted)
-                        .child(short_mid(&uid)),
+                        .child(crate::widgets::short_addr(&uid)),
                 )
                 .child(
                     h_flex()
@@ -591,26 +695,23 @@ impl Shell {
         )
     }
 
-    /// The swap honesty lines, in the same calm neutral surface as `commit_honesty`. A tiny local
-    /// copy reading [`SWAP_VIEW`]'s `honesty` slice (the shared `commit_honesty` is keyed by a
-    /// `&CommitView` too, but lives in `commit_view`; rather than route the bespoke review through
-    /// it we inline the identical treatment here for the two swap lines).
+    /// The swap honesty lines as inline caution lines (DESIGN §Color rule 7: a `TriangleAlert`
+    /// icon + risk text, no box, no keyline). A tiny local copy reading [`SWAP_VIEW`]'s `honesty`
+    /// slice; each line tints the icon amber (the caution register) with the emphasized line at
+    /// medium weight so the "this order is public" caution leads.
     fn commit_honesty_swap(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let fg = theme.foreground;
         let muted = theme.muted_foreground;
-        let surface = theme.secondary;
+        let amber = theme::amber(theme.is_dark());
 
-        let mut col = v_flex()
-            .w_full()
-            .gap_1p5()
-            .px_3()
-            .py_2p5()
-            .rounded_lg()
-            .bg(surface);
+        let mut col = v_flex().w_full().gap_2();
         for line in SWAP_VIEW.honesty {
-            let color = if line.emphasized { fg } else { muted };
-            col = col.child(div().text_xs().text_color(color).child(line.text));
+            col = col.child(crate::widgets::caution_line(
+                amber,
+                muted,
+                line.emphasized,
+                line.text,
+            ));
         }
         col
     }
@@ -647,7 +748,7 @@ fn token_money_row(
         .w_full()
         .justify_between()
         .items_center()
-        .py_1p5()
+        .py_3()
         .child(div().text_sm().text_color(muted).child(label))
         .child(
             div()
@@ -657,8 +758,8 @@ fn token_money_row(
         )
 }
 
-/// A label/value text row (mono value) — for the receiver, slippage, and validity rows that aren't
-/// money figures.
+/// A label/value text row (mono value) — for the rate, slippage, route, and validity rows that
+/// aren't money figures.
 fn kv_text_row(
     label: &'static str,
     value: String,
@@ -670,7 +771,7 @@ fn kv_text_row(
         .w_full()
         .justify_between()
         .items_center()
-        .py_1p5()
+        .py_3()
         .child(div().text_sm().text_color(muted).child(label))
         .child(
             div()
@@ -681,17 +782,34 @@ fn kv_text_row(
         )
 }
 
-/// A tiny field label (matches `commit_view::field_label`).
-fn field_label(text: &'static str, muted: Hsla) -> impl IntoElement {
-    div().text_xs().text_color(muted).child(text)
+/// The Receiver row in the review kv list: label left (muted), a trust-grade truncated address
+/// right (identicon + the canonical `short_addr` mono truncation) via the shared
+/// [`crate::widgets::truncated_address`], so the destination is verifiable at the moment of sign.
+/// (A swap's receiver is always your own wallet, hence no ENS.)
+fn kv_address_row(
+    label: &'static str,
+    addr: &str,
+    mono: SharedString,
+    mark_fill: Hsla,
+    fg: Hsla,
+    muted: Hsla,
+) -> impl IntoElement {
+    h_flex()
+        .w_full()
+        .justify_between()
+        .items_center()
+        .py_3()
+        .child(div().text_sm().text_color(muted).child(label))
+        .child(crate::widgets::truncated_address(
+            addr, None, mono, mark_fill, muted, muted, fg,
+        ))
 }
 
-/// A one-line error, in `danger` (matches `commit_view::error_line`).
+/// A one-line error, in `danger` (matches `commit_view::error_line`). Delegates to the shared
+/// `widgets::error_line` (the Lucide `TriangleAlert` icon + danger text) so every error register
+/// reads identically across surfaces.
 fn error_line(msg: &str, cx: &mut Context<Shell>) -> impl IntoElement {
-    div()
-        .text_sm()
-        .text_color(cx.theme().danger)
-        .child(format!("⚠ {msg}"))
+    crate::widgets::error_line(cx.theme().danger, msg.to_string())
 }
 
 /// Render a unix-seconds expiry as a short, human clock for the review card (e.g. `14:32 UTC`).

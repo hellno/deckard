@@ -65,18 +65,10 @@ fn origin_subject(origin: ProposalOrigin) -> &'static str {
     }
 }
 
-/// Middle-truncate a long `0x…` string for a tight row (first 10 + last 6).
-fn short_mid(s: &str) -> String {
-    if s.len() >= 16 {
-        format!("{}…{}", &s[..10], &s[s.len() - 6..])
-    } else {
-        s.to_string()
-    }
-}
-
-/// A short, EIP-55-checksummed, middle-truncated address for the row + card.
+/// A short, EIP-55-checksummed address for the row + card — the canonical
+/// first-6+last-4 truncation via [`crate::widgets::short_addr`].
 fn short_address(addr: &deckard_core::Address) -> String {
-    short_mid(&addr.to_checksum(None))
+    crate::widgets::short_addr(&addr.to_checksum(None))
 }
 
 /// A short tx hash for the trailing cluster (`0x6ea1b2…9f3c`) — proof the action broadcast.
@@ -272,6 +264,7 @@ impl Shell {
         let muted = theme.muted_foreground;
         let raise = theme.secondary;
         let danger = theme.danger;
+        let is_dark = theme.is_dark();
         let now = now_ms();
 
         let body = if self.activity_loading && self.activity.is_empty() {
@@ -282,11 +275,12 @@ impl Shell {
                 .children((0..3).map(|_| skeleton_row(raise)))
                 .into_any_element()
         } else if let Some(err) = self.activity_error.as_ref() {
-            div()
-                .text_sm()
-                .text_color(danger)
-                .child(format!("⚠ Can't reach the signer — {err}"))
-                .into_any_element()
+            crate::widgets::caution_line(
+                theme::amber(is_dark),
+                muted,
+                false,
+                format!("Can't reach the signer. {err}"),
+            )
         } else {
             let pending = activity_pending(&self.activity);
             let settled = activity_settled(&self.activity);
@@ -313,7 +307,7 @@ impl Shell {
                         div()
                             .text_sm()
                             .text_color(muted)
-                            .child("All clear — nothing needs you"),
+                            .child("All clear. Nothing needs you"),
                     );
                 }
 
@@ -389,7 +383,7 @@ impl Shell {
                         div()
                             .text_sm()
                             .text_color(muted)
-                            .child("What Atlas and you did this session — watch it, and stop it."),
+                            .child("What Atlas and you did this session. Watch it, and stop it."),
                     ),
             )
             .child(self.activity_stop_control(cx))
@@ -420,7 +414,7 @@ impl Shell {
                 .text_sm()
                 .font_weight(FontWeight::SEMIBOLD)
                 .cursor_pointer()
-                .child("Confirm STOP — revoke & lock signing · Esc to cancel")
+                .child("Confirm STOP: revoke & lock signing · Esc to cancel")
                 .on_click(cx.listener(|this, _, _, cx| this.stop_button_clicked(cx)))
         } else {
             div()
@@ -450,18 +444,26 @@ impl Shell {
         now: u64,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let theme = cx.theme();
-        let muted = theme.muted_foreground;
+        let amber = theme::amber(cx.theme().is_dark());
 
-        let mut band = v_flex().w_full().gap_1();
+        let mut band = v_flex().w_full();
         for record in rows.iter() {
             band = band.child(self.activity_row("needs-you-row", record, selected_id, now, cx));
         }
 
+        // The "Needs you" band label reads in AMBER — the human-attention signal (DESIGN §the
+        // actor model: amber = your call). `section_label` only takes the muted slate, so render
+        // the band label inline here with the same tiny/uppercase/medium treatment in amber.
         v_flex()
             .w_full()
-            .gap_1()
-            .child(section_label("Needs you", muted))
+            .gap_2()
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(amber)
+                    .child(gpui::SharedString::from("NEEDS YOU")),
+            )
             .child(band)
     }
 
@@ -478,15 +480,15 @@ impl Shell {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
 
-        let mut band = v_flex().w_full().gap_1();
+        let mut band = v_flex().w_full();
         for record in rows.iter() {
             band = band.child(self.activity_row("log-row", record, selected_id, now, cx));
         }
 
         v_flex()
             .w_full()
-            .gap_1()
-            .child(section_label(label, muted))
+            .gap_2()
+            .child(crate::widgets::section_label(label, muted))
             .child(band)
     }
 
@@ -519,6 +521,7 @@ impl Shell {
         let fg = theme.foreground;
         let muted = theme.muted_foreground;
         let lift = theme.secondary;
+        let hairline = theme.border;
         let is_dark = theme.is_dark();
         let agent = theme::agent(is_dark);
         let agent_tint = theme::agent_tint(is_dark);
@@ -552,16 +555,29 @@ impl Shell {
             .items_center()
             .gap_2p5()
             .min_w_0()
+            .flex_1()
             .child(lead)
             .child(
                 div()
+                    .flex_shrink_0()
                     .text_sm()
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(fg)
                     .child(origin_subject(record.origin).to_string()),
             )
-            .child(div().text_sm().text_color(muted).child("·"))
-            .child(div().min_w_0().text_sm().text_color(fg).child(summary));
+            .child(div().flex_shrink_0().text_sm().text_color(muted).child("·"))
+            // The verb + object is the part that grows and clamps: it gets the flex space and
+            // ellipsizes so a long summary can never push the trailing rail off the pane (the
+            // historical horizontal-overflow bug).
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .truncate()
+                    .text_sm()
+                    .text_color(fg)
+                    .child(summary),
+            );
 
         // The human only enters the chain when a human was actually needed (a card was raised).
         // An auto-allowed within-cap action has NO "→ You" — the daemon decided it hands-free.
@@ -576,15 +592,22 @@ impl Shell {
                 ActivityLifecycle::Expired => "expired",
             };
             chain = chain
-                .child(div().text_sm().text_color(muted).child("→"))
+                .child(div().flex_shrink_0().text_sm().text_color(muted).child("→"))
                 .child(
                     div()
+                        .flex_shrink_0()
                         .text_sm()
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(fg)
                         .child("You"),
                 )
-                .child(div().text_sm().text_color(muted).child(human_verb));
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_sm()
+                        .text_color(muted)
+                        .child(human_verb),
+                );
         }
 
         // The trailing side: the outcome cluster, plus — for a proposed row — a hover-revealed
@@ -608,6 +631,9 @@ impl Shell {
             );
         }
 
+        // Editorial row: hairline-separated and dense (DESIGN §Visual language — hierarchy from
+        // type + whitespace + hairlines, NOT cards). One bottom hairline per row, minimal
+        // horizontal padding; the selected proposed row lifts with a subtle fill.
         let mut row = h_flex()
             .id(gpui::SharedString::from(group.clone()))
             .group(group)
@@ -615,9 +641,10 @@ impl Shell {
             .items_center()
             .justify_between()
             .gap_3()
-            .px_3()
-            .py_2()
-            .rounded(px(6.0))
+            .px_1()
+            .py_2p5()
+            .border_b_1()
+            .border_color(hairline)
             .child(chain)
             .child(trailing);
 
@@ -629,7 +656,7 @@ impl Shell {
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _, _, cx| this.review_activity_row(id, cx)));
             if selected {
-                row = row.bg(lift);
+                row = row.bg(lift).rounded(px(6.0));
             }
         }
         row
@@ -1080,7 +1107,7 @@ fn stopped_banner(danger: gpui::Hsla, surface: gpui::Hsla) -> impl IntoElement {
             div()
                 .text_sm()
                 .text_color(danger)
-                .child("Stopped — key zeroized and in-flight work denied. Unlock to re-arm."),
+                .child("Stopped. Key zeroized and in-flight work denied. Unlock to re-arm."),
         )
 }
 
@@ -1134,17 +1161,6 @@ fn kv_mono_row(
 /// One loading skeleton row (DESIGN §Required states — never a spinner).
 fn skeleton_row(raise: gpui::Hsla) -> impl IntoElement {
     div().w_full().h(px(40.0)).rounded(px(6.0)).bg(raise)
-}
-
-/// A quiet uppercase section band label (DESIGN §Spacing → tiny uppercase section labels +
-/// whitespace). Shared by the NEEDS YOU band and each LOG day-group header so they read alike.
-fn section_label(label: &str, muted: gpui::Hsla) -> impl IntoElement {
-    div()
-        .pb_1()
-        .text_xs()
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(muted)
-        .child(label.to_uppercase())
 }
 
 /// The review card's heading block (H1 + muted subtitle).

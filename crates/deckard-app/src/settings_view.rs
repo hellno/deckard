@@ -124,13 +124,13 @@ impl Shell {
                     card()
                         .child(row(
                             "Mask balances",
-                            "Hide every balance behind fixed bullets — persists until you turn it off (⌘⇧M, or click the Total)",
+                            "Hide every balance behind fixed bullets. Persists until you turn it off (⌘⇧M, or click the Total).",
                             mask_control,
                         ))
                         .child(divider(border))
                         .child(row(
                             "Block screen capture",
-                            "While masked, remove Deckard's windows from screen recordings (macOS, tray build) — off for demos",
+                            "While masked, remove Deckard's windows from screen recordings (macOS, tray build). Off for demos.",
                             capture_control,
                         )),
                 )
@@ -139,13 +139,13 @@ impl Shell {
                     card()
                         .child(row(
                             "Custom RPC",
-                            "Bring your own Ethereum RPC — blank uses the bundled default",
+                            "Bring your own Ethereum RPC. Blank uses the bundled default.",
                             rpc_control,
                         ))
                         .child(divider(border))
                         .child(row(
                             "Watch address",
-                            "View any address or ENS read-only — blank shows your wallet",
+                            "View any address or ENS read-only. Blank shows your wallet.",
                             watch_control,
                         )),
                 )
@@ -154,13 +154,13 @@ impl Shell {
                     card()
                         .child(row(
                             "Display name",
-                            "Used to greet you on the home screen",
+                            "A label for this wallet profile.",
                             name_control,
                         ))
                         .child(divider(border))
                         .child(row(
                             "Start in menu bar",
-                            "Launch minimized (needs the `tray` feature)",
+                            "Launch minimized.",
                             launch_control,
                         )),
                 )

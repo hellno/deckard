@@ -1,13 +1,12 @@
-//! Deck — an omakase native desktop app starter on GPUI (macOS + Linux).
+//! Deckard — the native desktop app (macOS + Linux), built on GPUI.
 //!
 //! `main` wires the native shell: a window with a custom title bar, the system
-//! menu bar, global keyboard shortcuts, a refined theme, and persisted settings.
-//! The UI lives in `shell.rs` (+ `welcome.rs` / `settings_view.rs`).
-//!
-//! Fork checklist: rename the crate in `Cargo.toml`, change `APP_NAME` and the
-//! bundle identifier, swap `assets/icon.png`, then start editing the views.
+//! menu bar, global keyboard shortcuts, the bundled offline fonts, the refined
+//! theme, and persisted settings. The views live in `shell.rs` + the per-surface
+//! modules; shared leaf components live in `widgets.rs` (DESIGN.md §Enforcement).
 
 mod activity_view;
+mod agent_view;
 mod capture;
 mod commit_flow;
 mod commit_view;
@@ -32,6 +31,7 @@ mod theme;
 mod tray;
 mod wallet;
 mod welcome;
+mod widgets;
 
 use gpui::{
     px, size, App, AppContext, Bounds, KeyBinding, Menu, MenuItem, OsAction, WindowBounds,
@@ -65,7 +65,8 @@ gpui::actions!(
         TogglePalette,
         ToggleMask,
         PaletteNext,
-        PalettePrev
+        PalettePrev,
+        ConfirmCommit
     ]
 );
 
@@ -113,28 +114,35 @@ fn main() {
             gpui_component::init(cx);
 
             // 1b. Register the bundled offline fonts (no web-font CDN). The theme
-            //     sets the family names ("General Sans" / "JetBrains Mono"); GPUI
-            //     silently falls back to the system font until the files exist, so
-            //     the family-name config alone is safe to ship now.
-            //
-            // TODO(fonts): a human must drop the licensed font files into
-            //   crates/deckard-app/assets/fonts/ (see that dir's README.md), then
-            //   uncomment the block below to embed + register them. Do NOT
-            //   uncomment before the files exist — `include_bytes!` of a missing
-            //   path is a compile error.
-            //
-            // use std::borrow::Cow;
-            // cx.text_system()
-            //     .add_fonts(vec![
-            //         Cow::Borrowed(include_bytes!("../assets/fonts/GeneralSans-Regular.otf").as_slice()),
-            //         Cow::Borrowed(include_bytes!("../assets/fonts/GeneralSans-Medium.otf").as_slice()),
-            //         Cow::Borrowed(include_bytes!("../assets/fonts/GeneralSans-Semibold.otf").as_slice()),
-            //         Cow::Borrowed(include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf").as_slice()),
-            //         Cow::Borrowed(include_bytes!("../assets/fonts/JetBrainsMono-Medium.ttf").as_slice()),
-            //     ])
-            //     // reason: bundled fonts are a build-time invariant; a failure here
-            //     // is a packaging bug we want to surface loudly at startup.
-            //     .expect("bundled fonts failed to register");
+            //     sets the family names ("Schibsted Grotesk" / "JetBrains Mono");
+            //     these files are embedded at build time so the running app renders
+            //     in Deckard's real type. DESIGN.md §Enforcement: fonts are bundled,
+            //     not optional — without this the app falls back to the OS system
+            //     font and the mono-for-money + weight hierarchy is fiction. Both
+            //     families are OFL-1.1, so the raw files are safe to ship in a
+            //     public repo.
+            use std::borrow::Cow;
+            cx.text_system()
+                .add_fonts(vec![
+                    Cow::Borrowed(
+                        include_bytes!("../assets/fonts/SchibstedGrotesk-Regular.otf").as_slice(),
+                    ),
+                    Cow::Borrowed(
+                        include_bytes!("../assets/fonts/SchibstedGrotesk-Medium.otf").as_slice(),
+                    ),
+                    Cow::Borrowed(
+                        include_bytes!("../assets/fonts/SchibstedGrotesk-SemiBold.otf").as_slice(),
+                    ),
+                    Cow::Borrowed(
+                        include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf").as_slice(),
+                    ),
+                    Cow::Borrowed(
+                        include_bytes!("../assets/fonts/JetBrainsMono-Medium.ttf").as_slice(),
+                    ),
+                ])
+                // reason: bundled fonts are a build-time invariant; a failure here
+                // is a packaging bug we want to surface loudly at startup.
+                .expect("bundled fonts failed to register");
 
             // 2. Install the refined theme from the persisted preferences (loaded in `main`
             //    before the launch chain-id pre-flight).
@@ -158,6 +166,10 @@ fn main() {
                 // field. (`Root` binds `tab` in its own context, which is always live.)
                 KeyBinding::new("tab", PaletteNext, Some("CommandPalette")),
                 KeyBinding::new("shift-tab", PalettePrev, Some("CommandPalette")),
+                // ⌘↵ confirms a clear-signing review. Scoped to the `Commit` context (the
+                // focused Send/Shield/Swap review surface) so it never shadows Activity's own
+                // ⌘⏎ approve. The handler re-checks the surface + the arm-delay.
+                KeyBinding::new("secondary-enter", ConfirmCommit, Some("Commit")),
             ]);
 
             // 4. Global action handlers. View-local actions (NewItem, OpenSettings,
