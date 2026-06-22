@@ -14,143 +14,183 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+Nothing yet.
 
-- **Agent surface — `deckard-mcp` (MCP sidecar + CLI).** One key-less binary that is both a
-  CLI and an MCP stdio server for Claude Desktop, exposing the `mcp.v0.1` 6-tool profile:
-  `deckard_wallet_address`, `deckard_wallet_balance`, `deckard_policy_get`, `deckard_shield`,
-  `deckard_execute`, and `deckard_revoke_all`. It holds no key and never signs — every write
-  is an `Intent` proposed to `deckard-signerd`, which enforces policy and signs. The raw
-  `propose` and `simulate` tools specced earlier were cut from launch (see
-  `docs/build/30-mcp-shape.md`). `wallet_balance` is public-only in v0.1 (the shielded field
-  is an honest "unavailable" string, never a fake `0`).
-- **Demo recipes + env contract.** `just demo` / `just demo-fund` / `just demo-check` stand up
-  a forked Sepolia, a funded EOA, and the app against `policy.demo.json`. The app reads its
-  configuration from `DECKARD_CONFIG_DIR`, `DECKARD_SOCKET_PATH`, `DECKARD_CHAIN_ID`,
-  `DECKARD_RPC_URL`, `DECKARD_VERIFIED_READS`, and `DECKARD_DEMO_FORK_BLOCK` (documented in
-  `CONTRIBUTING.md`), and shows a **"DEMO FORK — not mainnet"** banner when running on a fork.
-- **`THREAT-MODEL.md`.** Documents the trust boundaries, the mainnet guardrail, and the one
-  override env var (kept out of every reason string and tool response).
+## [0.0.1-alpha] - 2026-06-22
 
-### Changed
-
-- **`deckard-signerd` mainnet guardrail + Resolve flow.** On chain 1, every policy auto-`Allow`
-  is downgraded to `NeedsApproval` and held `Pending`; a human resolves it through the app's
-  hold-to-confirm (`Resolve`), so a prompt-injected agent can't move real funds hands-free
-  within the caps. A daemon-side `Shield.to == RelayAdapt` pre-check landed as
-  defense-in-depth.
-
-### Fixed
-
-- **Agent-path shields now show up on refresh.** The in-app refresh re-scans the shielded
-  balance too (`refresh_portfolio` previously refetched only the public portfolio, so a
-  shield driven through `deckard-mcp` stayed invisible until the next unlock).
-- **The Atlas policy card renders the signer's live policy.** The agent home previously
-  showed hardcoded placeholder values (a weekly budget, a session-key expiry, an autonomy
-  line — none of which exist); it now fetches the daemon's policy via `PolicyGet` and
-  renders the same fence `deckard_policy_get` shows an MCP client, including spent-today,
-  the approval mode, and the STOP state.
-- **README/CONTRIBUTING quickstarts now build `deckard-mcp` before invoking it.** The
-  previous instructions called a binary that is not on `PATH` in a fresh clone.
-
-### Security
-
-- **Reason / RPC redaction.** Denial reasons and the logged RPC URL are sanitized so that
-  RPC paths, userinfo, and API keys never leak into a reason string, a tool response, or the
-  startup log. The mainnet-override env var is documented only in `THREAT-MODEL.md` and never
-  printed.
-
-## [0.0.1-alpha] - 2026-06-10
-
-First tagged alpha. This is a security-sensitive, experimental wallet: the core
-trust mechanisms are built and de-risked, but the end-to-end demo flow is not yet
-wired together. See [`STATUS.md`](STATUS.md) for the authoritative, beat-by-beat
-state of the build, and [`DESIGN.md`](DESIGN.md) for the design system.
+First tagged alpha. Deckard is a self-custodial wallet built around a key-less proposer
+and a process-isolated signer: an agent (or the app) can propose a transaction, but only
+the daemon holds the key, and on any real-value chain a human approves before it signs.
+The trust mechanisms are built and de-risked and the core flows work end to end; this is
+still experimental software. See [`STATUS.md`](STATUS.md) for the beat-by-beat state and
+[`DESIGN.md`](DESIGN.md) for the design system.
 
 Licensed under **AGPL-3.0-or-later** (see [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE)).
 Forked from the [`deck`](https://github.com/hellno/deck) GPUI starter (0BSD, which
 permits relicensing), now its own project.
 
-Workspace layout (a virtual Cargo workspace, all crates under `crates/`):
-
-- **`deckard-app`** — the GPUI application (binary `deckard`).
-- **`deckard-core`** — the headless engine: provider / verified reads, balances,
-  HD keys, keystore, and the key-less shield builder.
-- **`deckard-contract`** — the frozen wire contract (`Intent` / `Decision` /
-  `Policy` / RPC / `ReadStatus`).
-- **`deckard-signerd`** — the process-isolated signer daemon.
+Workspace (a virtual Cargo workspace, all crates under `crates/`): `deckard-app` (the GPUI
+app, binary `deckard`), `deckard-core` (the headless engine: provider / verified reads,
+balances, HD keys, keystore, and the key-less shield builder), `deckard-contract` (the
+frozen wire contract), `deckard-signerd` (the process-isolated signer daemon), `deckard-mcp`
+(the agent sidecar), `deckard-browser-bridge` (the dapp bridge), and `deckard-wallet-client`
+(the socket client).
 
 ### Added
 
-- **Encrypted BIP-39 keystore + onboarding.** Self-custodial seed-vault flow that
-  generates or imports a BIP-39 seed and stores it encrypted at rest.
-- **Live on-chain balances.** Real balances over an `alloy` provider, batched through
-  Multicall3.
-- **Helios-verified reads.** Reads are verified against a Helios light client — **no
-  third-party RPC is trusted by default** — with a `ReadStatus` badge surfaced in the
-  app.
-- **Receive.** Your address plus a QR code.
-- **Command palette.** Keyboard-first navigation across the app.
-- **Design system (`DESIGN.md`).** The amber-on-near-black visual language, including
-  the two-signal actor model (amber = human, cyan = agent), wired into onboarding,
-  portfolio, receive, palette, and settings.
-- **Process-isolated signer daemon (`deckard-signerd`).** A separate process holds the
-  key and gates every write over a Unix domain socket, with a policy gate, a
-  `propose → Decision → execute` flow, and a STOP control that zeroizes the in-memory
-  secret. The app talks to it through a socket signer client.
-- **The shield hero (auto-private via Railgun).** The auto-shield mechanism — the
-  `deckard-core` key-less shield builder plus daemon broadcast — is **wired and
-  black-box tested on an anvil fork.** (See *Known limitations* for what is not yet
-  reachable from the app or an agent.)
-- **Agentic-engineering policy.** A workspace-wide lint / CI / supply-chain policy
-  that denies `todo!`, `dbg!`, and ignored `Result`s, with a documented Definition of
-  Done (see *Notes*).
+**Wallet and money**
+
+- **Encrypted BIP-39 keystore.** Generate or import a seed; it is sealed at rest in an
+  Argon2id + XChaCha20-Poly1305 envelope and never leaves the device.
+- **Onboarding.** A four-step create flow: set a passphrase with a live strength meter, back
+  up the recovery phrase behind a hold-to-reveal grid, verify it by position, then a Ready
+  screen with your new, copyable address. A progress rail shows where you are.
+- **Live on-chain balances**, read over an `alloy` provider and batched through Multicall3,
+  with a public / shielded composition and a roughly 20-second auto-refresh on the wallet home.
+- **Helios-verified reads.** Mainnet reads are checked against an embedded Helios light client
+  instead of trusting one RPC, with a `ReadStatus` badge surfaced in the app.
+- **Send native ETH** to a `0x` address or ENS name, with a clear-signing review.
+- **Swap tokens via CoW Protocol**: a live quote, a minimum-received and slippage review, and
+  an off-chain order that settles on the CoW orderbook.
+- **Shield to a private Railgun balance** (the shield hero): move public ETH into a private
+  balance through the key-less shield builder, signed and broadcast by the daemon.
+- **Receive.** Your address plus a QR code, with one-click copy.
+
+**Agents and oversight**
+
+- **First-class agent surface.** Agents appear in the sidebar beside wallets; select one to
+  see and edit its policy (per-transaction cap, daily budget, allowed actions and assets) and
+  reach Pause, Rotate, Adjust, and Revoke.
+- **Activity feed.** A daemon-backed, day-grouped audit log of every proposed, approved,
+  denied, and executed action (who acted, the real amount, the on-chain result with tx hash,
+  and whether it was auto- or human-approved), with a top STOP that revokes all agent
+  authority and zeroizes the key.
+- **`deckard-mcp` agent sidecar.** One key-less binary that is both a CLI and an MCP stdio
+  server for Claude Desktop, exposing the `mcp.v0.1` six-tool profile (wallet address, balance,
+  policy, shield, execute, revoke-all). It holds no key; every write is an intent the daemon
+  gates and signs.
+- **Headless agent runner.** `just demo-agent` drives a hands-free watch-and-shield loop
+  against the live policy, respecting over-cap refusals and human denials.
+- **Chain capability registry.** One source of truth in `deckard-core` for per-chain RPC,
+  explorer, native asset, protocol support, and verified-reads trust tier. Launch refuses to
+  start if the RPC reports a chain id that does not match.
+
+**Dapp connectivity**
+
+- **EIP-1193 browser bridge.** A local loopback bridge exposes `eth_chainId`, `eth_accounts`,
+  and `eth_requestAccounts` to an unpacked browser extension, announces itself via EIP-6963 so
+  dapps can discover it among other injected providers, and emits basic provider events.
+
+**Interface**
+
+- **Bundled fonts and an enforced design system.** The app ships Schibsted Grotesk for the UI
+  and JetBrains Mono for money and addresses, and routes every screen through a shared
+  `widgets.rs` vocabulary so address truncation, caution lines, and status glyphs cannot drift
+  per file. The two-signal actor model (amber = human, cyan = agent) is wired throughout.
+- **Editorial layout.** An oversized monospace balance hero, whitespace-and-hairline hierarchy
+  instead of cards, and a compact agent presence row on the home that links to the agent's
+  policy.
+- **Command palette v2.** Fuzzy search across every command, arrow-key navigation, inline
+  shortcuts, and frecency ranking. Every user-facing action is reachable from `⌘K`.
+
+**Project and tooling**
+
+- **Source-only release workflow.** A `v*` tag runs the full CI gate, then publishes a GitHub
+  Release built from the version's CHANGELOG section. `scripts/release-check.sh` validates the
+  tag shape, that every crate is at the tagged version, and that the changelog section exists.
+- **Demo recipes.** `just demo` / `demo-fund` / `demo-deposit` / `demo-check` / `demo-bridge`
+  stand up a forked Sepolia, a funded wallet, and the app against `policy.demo.json`, with a
+  "DEMO FORK, not mainnet" banner when running on a fork.
+- **QA harnesses.** Playwright suites that smoke-test the browser extension and the WalletBeat
+  provider surface on bundled Chromium, deterministic and fund-free.
+- **Supply-chain gates.** A blocking `cargo-deny` advisories gate, a bans / licenses / sources
+  gate, and a daily off-PR re-scan that files tracking issues on new advisories.
+- **Contributor surface.** `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`,
+  `THREAT-MODEL.md`, `docs/RELEASING.md`, and GitHub issue and PR templates.
+- **Agentic-engineering policy.** A workspace-wide lint / CI policy that denies `todo!`,
+  `dbg!`, and ignored `Result`s, with a documented Definition of Done.
+
+### Changed
+
+- **The confirm gesture is a `⌘↵` key-cap, not hold-to-confirm.** A short arm-delay keeps a
+  keypress carried over from the previous screen from approving a money move.
+- **Clear-signing review is transaction-as-hero.** The amount dominates in monospace, the
+  recipient and network are prominent, fees and routes are quiet, and irreversibility reads in
+  red.
+- **The agent guardrail defaults to deny on every real-value chain.** On mainnet, every L2
+  mainnet, and any unknown chain id, an auto-`Allow` is downgraded to a human approval.
+  Sepolia and local anvil stay hands-free by design; adding a new real chain can never silently
+  turn the brake off.
+- **Daemon error reasons are redacted at the boundary.** RPC URLs are scrubbed to
+  `scheme://host` so API keys never reach an agent transcript, and the Railgun viewing key is
+  held in `Zeroizing` with a redacting `Debug`.
+- **`cargo-deny` yanks warn instead of block**, so a yanked transitive dependency does not gate
+  unrelated PRs; real advisories still block immediately.
+
+### Fixed
+
+- **Agent-path shields show up on refresh.** The refresh button resyncs the shielded balance
+  too, so a shield driven through `deckard-mcp` is visible immediately instead of at the next
+  unlock.
+- **The Atlas policy card renders the daemon's live policy** (cap, daily budget, spent today,
+  allowlist, approval mode, STOP state) instead of hardcoded placeholders.
+- **Swap confirms in one hold.** It waits for the relayer approval to mine, then submits,
+  instead of asking you to approve and then hold a second time.
+- **Repeating the same swap amount works.** The replay guard treats an idempotent approval
+  differently from a send or shield, which stay strictly double-spend guarded.
 
 ### Security
 
-- **Process isolation.** The signing key lives only inside `deckard-signerd`, a
-  separate process reached over a Unix domain socket; the GUI never holds it.
-- **Verified reads by default.** Chain reads are checked against a Helios light client
-  rather than trusting any single third-party RPC.
-- **Keystore at rest.** The seed is sealed in an Argon2id + XChaCha20-Poly1305
-  envelope.
-- **Secrets in `Zeroizing`.** Seeds, keys, and passphrases are held in zeroizing
-  buffers and are never logged or `Debug`-printed.
+- **Process isolation.** The signing key lives only inside `deckard-signerd`, reached over a
+  `0600` Unix domain socket; the GUI never holds it. STOP zeroizes the in-memory secret.
+- **Capability-gated approval.** The daemon honors a human `Resolve` only on a private socket
+  pair inherited from the app, so a same-uid process can propose intents but cannot self-approve.
+- **Hardened daemon launch.** The daemon is spawned with a cleared environment (no
+  `LD_PRELOAD` / `DYLD_INSERT_LIBRARIES` / inherited `$PATH`) and, in release builds, only after
+  verifying the one canonical daemon binary beside the app. This closes loader-injection and
+  binary-substitution paths to the key.
+- **Durable daily spend cap.** The cap is written before signing (reserve-before-sign), survives
+  a restart, rolls over forward-only on the UTC day, and is not reset by a daemon crash-loop.
+- **Keystore fails closed on CSPRNG failure.** Every secure random fill returns an error rather
+  than panicking if the OS CSPRNG is unavailable, so onboarding degrades gracefully instead of
+  crashing mid-backup.
+- **Verified reads by default** on mainnet (Helios), never trusting a single third-party RPC.
+- **Keystore at rest** in an Argon2id + XChaCha20-Poly1305 envelope; **secrets stay in
+  `Zeroizing`** and are never logged or `Debug`-printed.
+- **Frozen Deny-reason vocabulary.** Refusals route through roughly thirty documented `const`
+  tags, with a build-time scan that rejects raw literals, so an agent can recover against a
+  stable, typo-free vocabulary.
 - **`#![forbid(unsafe_code)]` in `deckard-core`** (the trust core); the app crate sets
   `unsafe_code = "deny"`.
 
 ### Notes
 
-- **Definition of Done** (all must hold for a change to be considered done):
-  1. `cargo fmt --all --check` is clean.
-  2. `just check` is green — clippy `-D warnings` on **both** the default and
-     `--features tray` configurations.
-  3. `cargo test --workspace` is green.
-  4. No new or changed dependencies in `Cargo.toml` / `Cargo.lock` unless explicitly
-     approved.
-- **Commands:** `just run` (build signerd + run the app), `just core` (the fast engine
-  inner loop), `just check` (lint both configs), `cargo test --workspace`, and
-  `just bundle` (build a macOS `.app`). The toolchain is pinned in
+- **Definition of Done** (all must hold): `cargo fmt --all --check` is clean; `just check` is
+  green (clippy `-D warnings` on both the default and `--features tray` configs);
+  `cargo test --workspace` is green; no new or changed dependencies without explicit approval.
+- **Commands:** `just run` (build signerd + run the app), `just core` (the fast engine loop),
+  `just check` (lint both configs), `cargo test --workspace`, `just demo` (forked-Sepolia demo),
+  `just bundle` (a macOS `.app`), and `just release-check <tag>`. The toolchain is pinned in
   `rust-toolchain.toml`.
 
 ### Known limitations
 
-This is an **alpha**. It is **not** production-ready and **not** safe for real funds —
-use testnet or throwaway keys only, and never a real mainnet key. No third-party
-security audit has been done.
+This is an **alpha**: not production-ready and **not safe for real funds**. Use testnet or
+throwaway keys only, never a real mainnet key. No third-party security audit has been done.
 
-- **Send UI is gated** — marked "next release"; not available in this build.
-- **Swap is a TODO** — the button is disabled.
-- **No agent / MCP surface** — `deckard-mcp` is **not built**; only the wire contract
-  and the daemon socket exist for it to build on.
-- **Receive-watcher auto-detect is a TODO** — inbound funds are not auto-detected and
-  the shield is **not** yet triggerable from the app or an agent. The shield hero is
-  reachable only from the test/manual path, not on-screen.
-- **Some tests are `#[ignore]`** — the network-dependent suites (notably
-  `signerd/shield_e2e`) need a local `anvil` plus an archive RPC and are not run by
-  default `cargo test`; the default-on `anvil_e2e` silently skips if `anvil` is
-  missing, and some unit tests exercise mocked transports / a fake recording daemon
-  rather than a live chain. See the test caveats in [`STATUS.md`](STATUS.md).
+- **Source-only.** No prebuilt binary is shipped; build from source. The manual macOS `.app`
+  path is unsigned and testnet-only (see [`docs/RELEASING.md`](docs/RELEASING.md)). Signed,
+  notarized builds are tracked separately.
+- **Verified reads are mainnet-only.** Other chains read from a trusted RPC and never wear the
+  verified badge; the guardrail treats them, and unknown chains, as real-value by default.
+- **The browser bridge is a scaffold.** It answers `chainId` / `accounts` / `requestAccounts`
+  for discovery; it does not yet sign or send a transaction over the bridge.
+- **Touch ID unlock is not available yet** (it depends on a signed build).
+- **Inbound funds are not auto-detected in the app.** The headless agent runner watches for
+  deposits, but the app has no on-screen receive-watcher.
+- **Network-dependent tests are `#[ignore]`.** The `shield_e2e` and swap suites need a local
+  `anvil` plus an archive RPC and are not run by default `cargo test`; see the test caveats in
+  [`STATUS.md`](STATUS.md).
 
 [Unreleased]: https://github.com/hellno/deckard/compare/v0.0.1-alpha...HEAD
 [0.0.1-alpha]: https://github.com/hellno/deckard/releases/tag/v0.0.1-alpha
