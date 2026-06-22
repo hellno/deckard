@@ -23,7 +23,7 @@ use deckard_contract::{
     deny_reasons, evaluate, evaluate_order, ActivityLifecycle, ActivityRecord, ApprovalStatus,
     BalanceReport, BreachedLimit, Decision, ExecuteResult, Intent, IntentKind, PendingPayloadView,
     PendingRecord, Policy, ProposalOrigin, ReadStatus, RequestId, SignOrderResult, SignerRequest,
-    SignerResponse, SwapOrder, UnlockOutcome,
+    SignerResponse, StatusView, SwapOrder, UnlockOutcome,
 };
 // Only the `shield`-gated view-grant handler constructs this; an unconditional import would
 // warn in the no-default-features build (e.g. deckard-mcp's dependency edge).
@@ -337,6 +337,9 @@ impl Daemon {
                 SignerResponse::Execute(self.execute(request_id).await)
             }
             SignerRequest::Status { request_id } => SignerResponse::Status(self.status(request_id)),
+            SignerRequest::StatusView { request_id } => {
+                SignerResponse::StatusView(self.status_view(request_id))
+            }
             SignerRequest::PolicyGet => {
                 self.rollover();
                 SignerResponse::Policy(self.policy.clone())
@@ -1236,6 +1239,55 @@ impl Daemon {
             Some(req) => req.status.clone(),
             None => ApprovalStatus::Denied {
                 reason: deny_reasons::UNKNOWN_REQUEST.into(),
+            },
+        }
+    }
+
+    /// Rich per-request status for the agent poll loop (the `deckard_status` MCP tool). Mirrors
+    /// [`status`](Self::status) — expires stale rows FIRST — but assembles the full
+    /// [`StatusView`] (status + `remaining_ms` + `tx_hash` + lifecycle) from the live record.
+    /// Additive (#31): [`status`](Self::status) / `ApprovalStatus` / `SignerRequest::Status` are
+    /// untouched. An unknown id reports the terminal `Denied{unknown_request}` / `Expired` shape.
+    fn status_view(&mut self, request_id: RequestId) -> StatusView {
+        self.expire_stale();
+        match self.requests.get(&request_id) {
+            Some(req) => {
+                // remaining_ms is the live approval TTL: only a still-open Pending/Allowed card
+                // carries it (`checked_duration_since` can't underflow — a past `expires_at` → 0,
+                // and the `.min(u64::MAX)` clamp makes the `as u64` cast lossless). An EXECUTED
+                // request is terminal even though its `status` stays `Allowed` (execute sets
+                // `broadcast`, not the status), so it reports 0 — matching the StatusView contract
+                // ("0 when terminal") and the agent's lifecycle/tx_hash view. (This is the one
+                // divergence from `pending_list`, which never holds executed records.)
+                let now = Instant::now();
+                let remaining_ms = if req.broadcast.is_some() {
+                    0
+                } else {
+                    match req.status {
+                        ApprovalStatus::Pending | ApprovalStatus::Allowed => req
+                            .expires_at
+                            .checked_duration_since(now)
+                            .map(|d| d.as_millis().min(u128::from(u64::MAX)) as u64)
+                            .unwrap_or(0),
+                        ApprovalStatus::Denied { .. } | ApprovalStatus::Expired => 0,
+                    }
+                };
+                StatusView {
+                    request_id,
+                    status: req.status.clone(),
+                    remaining_ms,
+                    tx_hash: req.broadcast,
+                    lifecycle: activity_lifecycle(req),
+                }
+            }
+            None => StatusView {
+                request_id,
+                status: ApprovalStatus::Denied {
+                    reason: deny_reasons::UNKNOWN_REQUEST.into(),
+                },
+                remaining_ms: 0,
+                tx_hash: None,
+                lifecycle: ActivityLifecycle::Expired,
             },
         }
     }

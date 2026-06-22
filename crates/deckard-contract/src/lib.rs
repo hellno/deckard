@@ -41,7 +41,7 @@ pub use read_status::ReadStatus;
 pub use rpc::{
     ActivityLifecycle, ActivityRecord, ApprovalStatus, BalanceReport, BreachedLimit, ExecuteResult,
     PendingPayloadView, PendingRecord, ProposalOrigin, RailgunViewGrant, SignOrderResult,
-    SignerRequest, SignerResponse, UnlockOutcome,
+    SignerRequest, SignerResponse, StatusView, UnlockOutcome,
 };
 pub use shield_status::ShieldStatus;
 pub use signer::Signer;
@@ -198,6 +198,9 @@ mod roundtrip_tests {
         roundtrip(&SignerRequest::Status {
             request_id: B256::repeat_byte(0x03),
         });
+        roundtrip(&SignerRequest::StatusView {
+            request_id: B256::repeat_byte(0x03),
+        });
         roundtrip(&SignerRequest::RevokeAll);
         roundtrip(&SignerRequest::PolicyGet);
         roundtrip(&SignerRequest::Address);
@@ -256,6 +259,32 @@ mod roundtrip_tests {
             tx_hash: B256::repeat_byte(0xAB),
         }));
         roundtrip(&SignerResponse::Status(ApprovalStatus::Pending));
+        // The additive StatusView (#31): a live Pending poll (tx not yet broadcast) and the
+        // terminal unknown-request shape the daemon hands back for an id it doesn't hold.
+        roundtrip(&SignerResponse::StatusView(StatusView {
+            request_id: B256::repeat_byte(0x03),
+            status: ApprovalStatus::Pending,
+            remaining_ms: 119_000,
+            tx_hash: None,
+            lifecycle: ActivityLifecycle::Proposed,
+        }));
+        roundtrip(&SignerResponse::StatusView(StatusView {
+            request_id: B256::repeat_byte(0x09),
+            status: ApprovalStatus::Denied {
+                reason: "unknown_request".into(),
+            },
+            remaining_ms: 0,
+            tx_hash: None,
+            lifecycle: ActivityLifecycle::Expired,
+        }));
+        // An executed agent request: tx hash present, terminal so remaining_ms is 0.
+        roundtrip(&SignerResponse::StatusView(StatusView {
+            request_id: B256::repeat_byte(0x0a),
+            status: ApprovalStatus::Allowed,
+            remaining_ms: 0,
+            tx_hash: Some(B256::repeat_byte(0x6e)),
+            lifecycle: ActivityLifecycle::Executed,
+        }));
         roundtrip(&SignerResponse::Ack);
         roundtrip(&SignerResponse::Policy(sample_policy()));
         roundtrip(&SignerResponse::Address(Address::repeat_byte(0x11)));

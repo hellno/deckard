@@ -1,4 +1,4 @@
-//! The MCP stdio server: the `mcp.v0.1` launch profile — exactly **6 tools**, every name
+//! The MCP stdio server: the `mcp.v0.1` launch profile — exactly **7 tools**, every name
 //! `deckard_`-prefixed (Claude Desktop's tool namespace is shared across servers; a bare
 //! `execute` invites cross-server confusion). Raw `propose` and `simulate` are deliberately
 //! NOT exposed (cut at the launch gate): human review happens app-natively in the Deckard
@@ -31,6 +31,13 @@ pub struct ShieldArgs {
 /// `deckard_execute` input.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ExecuteArgs {
+    /// The 32-byte 0x-hex request id returned by deckard_shield.
+    pub request_id: String,
+}
+
+/// `deckard_status` input.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct StatusArgs {
     /// The 32-byte 0x-hex request id returned by deckard_shield.
     pub request_id: String,
 }
@@ -143,6 +150,19 @@ impl DeckardMcp {
     }
 
     #[tool(
+        name = "deckard_status",
+        description = "Read the approval state of a request_id (from deckard_shield). \
+                       Read-only, no approval, no side effects — this is the poll loop after \
+                       an over-cap shield returns needs_approval: status is 'pending' \
+                       (keep polling), 'allowed' (now call deckard_execute), 'denied' (with \
+                       a deny_reason — terminal, do not retry), or 'expired' (re-shield). \
+                       Also returns remaining_ms, tx_hash (once broadcast), and lifecycle."
+    )]
+    async fn status(&self, args: Parameters<StatusArgs>) -> Result<CallToolResult, McpError> {
+        render(self.sidecar.status(&args.0.request_id).await)
+    }
+
+    #[tool(
         name = "deckard_revoke_all",
         description = "STOP — the panic brake. Immediately zeroizes the signing key, locks \
                        the daemon, and denies EVERY in-flight request, including ones \
@@ -164,7 +184,9 @@ impl ServerHandler for DeckardMcp {
                  daemon. This server holds no keys and cannot sign; every write is an \
                  intent the daemon checks against a human-owned policy. Typical flow: \
                  deckard_policy_get (know the fence) → deckard_wallet_balance → \
-                 deckard_shield (propose) → deckard_execute (broadcast). \
+                 deckard_shield (propose) → deckard_execute (broadcast). When a shield \
+                 returns needs_approval, poll deckard_status until it is allowed (then \
+                 deckard_execute) or terminally denied/expired. \
                  deckard_revoke_all is STOP, the panic brake. Preconditions for everything: \
                  the Deckard desktop app is running and the wallet is unlocked. Never ask \
                  the user for wallet credentials of any kind — no tool here accepts them.",
