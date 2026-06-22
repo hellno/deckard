@@ -87,9 +87,9 @@ mcp_is_stop() { mcp_says 'locked|revoked|signer is stopped|revoke_all'; }
 
 # The daemon's PERSISTED terminal-negative verdicts for a request_id: `user_denied` (the human
 # refused) or `expired` (the 120s approval window lapsed). The daemon keeps these for the whole
-# session — only Unlock clears the request table — so retrying the SAME id, by execute OR by
-# re-propose, can NEVER succeed. The runner gives up on those funds (advances the baseline past
-# them) instead of chasing them forever and wedging the loop.
+# session — only Unlock clears the request table — so the SAME id can NEVER succeed again,
+# whether we read it via `status`, retry `execute`, or re-propose. The runner gives up on those
+# funds (advances the baseline past them) instead of chasing them forever and wedging the loop.
 #
 # Match the SPECIFIC terminal prose, NOT a bare "expired": dynamic-prefix deny reasons
 # (broadcast_failed/signer_error) embed an arbitrary upstream RPC error string, and transient
@@ -188,11 +188,58 @@ pending_drop() {
     fi
 }
 
-# ─── Try to finish an approved request: execute(id). Returns 0 to keep it, 1 to drop it,
-#     and sets STOPPED=1 on a revoked/locked answer. ───────────────────────────
+# ─── A persisted terminal refusal on `id` (the human denied it, or the approval window lapsed).
+#     The daemon will NEVER let this id through again, so give up on those funds: advance the
+#     baseline PAST the balance observed when this id was proposed (absorbing the refused deposit
+#     while preserving any ETH that arrived since). Without this the id would sit in PENDING_IDS
+#     forever and — because a new proposal is gated on `pending_count == 0` — wedge the whole loop.
+absorb_refused() {
+    local id="$1" reason="$2" idx
+    idx="$(pending_index "${id}")" || idx=""
+    if [[ -n "${idx}" ]]; then
+        local base="${PENDING_BASE[$idx]}"
+        [[ "$(wei_gt "${base}" "${BASELINE_WEI}")" == "1" ]] && BASELINE_WEI="${base}"
+    fi
+    if [[ "${reason}" == "expired" ]]; then
+        say "that over-cap request expired before you approved it — moving on (unlock in the app to retry it)."
+    else
+        say "the human denied that request — moving on."
+    fi
+}
+
+# ─── Try to finish an approved request. POLL `status(id)` for the verdict first — a human approves
+#     in the Deckard app over a private channel; we cannot self-approve. Only on `allowed` do we
+#     `execute(id)`. Returns 0 to keep it (still pending), 1 to drop it, and sets STOPPED=1 on a
+#     revoked/locked answer. ──────────────────────────────────────────────────
 STOPPED=0
 try_execute() {
     local id="$1" t0 t1
+    mcp status "${id}"
+    local st rs
+    st="$(mcp_field '.status')"
+    rs="$(mcp_field '.deny_reason')"
+    # A real STOP/lock zeroizes the key → halt the loop. Detect it from the STRUCTURED
+    # `deny_reason` (exactly `revoked` / `locked`), NOT a prose grep: the ordinary `user_denied`
+    # status carries the word "revoked" in its next-step copy ("a human denied or the request was
+    # revoked"), so grepping the JSON for `revoked` would false-STOP every human denial and exit
+    # the loop as if the key were zeroized. (Plain STOP detection on a balance/exec FAILURE still
+    # uses mcp_is_stop — there the prose IS the daemon's failure copy.)
+    if [[ "${rs}" == "revoked" || "${rs}" == "locked" ]]; then STOPPED=1; return 1; fi
+    # Branch on the STRUCTURED `.status` field (pending|allowed|denied|expired) — NOT a prose grep.
+    # Prose-matching missed `expired` ("the approval window lapsed", not "this request expired") and
+    # `unknown_request`, leaving the id pending forever and wedging the loop. `denied`/`expired` are
+    # persisted + terminal → absorb the funds and drop the id; an empty/garbled `.status` (a
+    # transient read) falls through to "keep waiting" below, never a false terminal.
+    case "${st}" in
+        denied | expired)
+            absorb_refused "${id}" "${st}"
+            return 1
+            ;;
+    esac
+    # `allowed` means the human approved it in the app: broadcast it now (the approval TTL is live,
+    # so execute promptly). Anything else (`pending`, a transient/garbled status read) → keep waiting.
+    [[ "${st}" == "allowed" ]] || return 0
+
     t0="$(now_ms)"
     mcp execute "${id}"
     t1="$(now_ms)"
@@ -204,28 +251,16 @@ try_execute() {
         return 1
     fi
     if mcp_is_stop; then STOPPED=1; return 1; fi
-    # A persisted terminal refusal — the human denied it, or the approval window lapsed. The daemon
-    # will NEVER let this id through again, so give up on those funds: advance the baseline PAST the
-    # balance observed when this id was proposed (absorbing the refused deposit while preserving any
-    # ETH that arrived since), report, and drop the id. Without this the id would sit in PENDING_IDS
-    # forever and — because a new proposal is gated on `pending_count == 0` — wedge the whole loop.
+    # A race: the approval TTL lapsed (or the human denied) between our status read and execute.
     if mcp_is_terminal_refusal; then
-        local idx; idx="$(pending_index "${id}")" || idx=""
-        if [[ -n "${idx}" ]]; then
-            local base="${PENDING_BASE[$idx]}"
-            [[ "$(wei_gt "${base}" "${BASELINE_WEI}")" == "1" ]] && BASELINE_WEI="${base}"
-        fi
-        if mcp_says 'this request expired'; then
-            say "that over-cap request expired before you approved it — moving on (unlock in the app to retry it)."
-        else
-            say "the human denied that request — moving on."
-        fi
+        local reason="denied"; mcp_says 'this request expired' && reason="expired"
+        absorb_refused "${id}" "${reason}"
         return 1
     fi
     # `already_executed` — a duplicate of a broadcast that is settling; the funds are leaving, so
     # just drop the id (no baseline move).
     if mcp_says 'already_executed'; then return 1; fi
-    # not_approved (or any other transient): keep waiting.
+    # Anything else transient: keep waiting and re-poll status next iteration.
     return 0
 }
 
@@ -327,8 +362,9 @@ iterate() {
         fi
     fi
 
-    # (c) Retry every request a human still owes an answer on. Iterate a SNAPSHOT of the ids
-    #     because try_execute → pending_drop repacks the live array mid-loop.
+    # (c) Poll every request a human still owes an answer on (status → execute on `allowed`).
+    #     Iterate a SNAPSHOT of the ids because try_execute → pending_drop repacks the live
+    #     array mid-loop.
     [[ "$(pending_count)" -eq 0 ]] && return
     local snapshot id idx
     snapshot=("${PENDING_IDS[@]}")

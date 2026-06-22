@@ -57,7 +57,30 @@ config format. There is nothing Claude-specific about it:
 - **env (demo mode only):** `DECKARD_SOCKET_PATH`, `DECKARD_CONFIG_DIR`, `DECKARD_CHAIN_ID`,
   `DECKARD_RPC_URL` — exactly as printed by `install --demo`; no secrets.
 
-## The 6 tools
+### Headless smoke (`claude -p`)
+
+To check the whole path without Claude Desktop — register the demo sidecar, then run one
+non-interactive prompt — point Claude Code's CLI at the demo world (`~/.deckard/demo`):
+
+```sh
+# 1. Register the demo sidecar. This PRINTS the exact `claude mcp add deckard …` line with the
+#    correct ABSOLUTE binary path and the key-less demo env block (no secrets) — paste + run it.
+#    (Run the binary you built: a packaged install is `deckard-mcp`; a source build is
+#    `./target/debug/deckard-mcp`.)
+deckard-mcp install --client claude-code --demo
+
+# 2. Run one headless prompt against ONLY the deckard tools.
+claude -p "Read the Deckard policy, then shield 0.02 ETH staying inside the caps. Report the tx_hash." \
+  --mcp-config ~/.claude.json --strict-mcp-config \
+  --allowedTools "mcp__deckard__deckard_policy_get,mcp__deckard__deckard_wallet_balance,mcp__deckard__deckard_shield,mcp__deckard__deckard_status,mcp__deckard__deckard_execute"
+```
+
+`--strict-mcp-config` makes the run use only the servers in `--mcp-config` (ignoring any other
+registered servers), and the narrow `--allowedTools` allowlist keeps the agent on the `deckard_`
+tools — so the smoke is reproducible and can't reach for anything else. Preconditions are the
+same as the quick prompt: `just demo` running, a wallet unlocked, `just demo-fund` done.
+
+## The 7 tools
 
 This is the complete `mcp.v0.1` surface. There is deliberately no raw "propose" and no
 "approve" tool — you cannot submit an arbitrary transaction or approve your own request.
@@ -68,6 +91,7 @@ This is the complete `mcp.v0.1` surface. There is deliberately no raw "propose" 
 | `deckard_wallet_balance` | Read the **public** balance (`public_wei`, `public_eth`) plus a `read_status` trust label. | none |
 | `deckard_policy_get` | Read the policy fence (fields below). **Call this first.** | none |
 | `deckard_shield` | **Propose** shielding `amount_eth` (a decimal ETH **string**, e.g. `"0.02"`) to the wallet's own private address. Signs nothing. | creates a pending request |
+| `deckard_status` | Read the approval state of a `request_id` (`pending` / `allowed` / `denied` / `expired`) plus `remaining_ms` (approval TTL left) and `tx_hash` once executed. Read-only; no approval, no side effects. | none |
 | `deckard_execute` | Sign + broadcast a previously allowed `request_id`. Policy is re-checked at sign time. | broadcasts a transaction |
 | `deckard_revoke_all` | **STOP — the panic brake.** Zeroizes the signing key, locks the daemon, denies every in-flight request. | irreversible for the session |
 
@@ -78,8 +102,10 @@ Semantics that matter:
   balance as 0.
 - **Shield returns a decision, not a transaction.** `"decision": "allow"` comes with a
   `request_id` → call `deckard_execute` with it. `"decision": "needs_approval"` means a human
-  must approve in the Deckard app; this alpha has no approval card yet, so the practical fix is
-  a smaller amount under the per-tx cap (or the human edits `policy.json`).
+  must approve the request in the Deckard app — the **Activity feed** (⌘⇧A), where they
+  hold-to-confirm. Then poll `deckard_status(request_id)` until it reads `allowed` and call
+  `deckard_execute`. (See "Polling for approval" below.) A smaller amount under the per-tx cap
+  auto-allows with no human in the loop.
 - **Execute is the one call you must never retry blind.** If it times out or the connection
   drops, the broadcast status is UNKNOWN — a retry could double-spend. Check the Deckard app
   first. An identical re-shield in the same session is refused as `already_executed`; vary the
@@ -87,12 +113,36 @@ Semantics that matter:
 - **STOP is always available** and needs no approval. Use `deckard_revoke_all` immediately if
   anything looks wrong; only a human unlocking the wallet re-arms signing.
 
-The happy path, in order:
+The happy path (within cap), in order:
 
 ```
 deckard_policy_get  →  deckard_wallet_balance  →  deckard_shield("0.02")  →  deckard_execute(request_id)
    know the fence        know the funds            decision: allow            status: broadcast + tx_hash
 ```
+
+### Polling for approval (over cap / `needs_approval`)
+
+When `deckard_shield` returns `"decision": "needs_approval"`, the amount is over a cap (or you
+are on a real-value chain, where every write needs a human). You cannot approve it — there is no
+`resolve` tool, by design. A human approves it in the Deckard app's Activity feed (⌘⇧A), over a
+private channel the sidecar never touches. Your job is to wait, then finish it:
+
+```
+deckard_shield("0.2")  →  loop: deckard_status(request_id)  →  allowed  →  deckard_execute(request_id)
+   needs_approval            pending … pending …                            broadcast + tx_hash
+```
+
+- Poll `deckard_status(request_id)` (every ~750ms is plenty). It returns `pending` until the
+  human acts, then `allowed`, `denied{reason}`, or `expired`.
+- **`allowed` is not permanent.** The approval carries a TTL — `remaining_ms` counts it down.
+  Execute promptly while `remaining_ms` > 0; if it reaches `0` the approval lapses to `expired`
+  and the `request_id` is dead for the session.
+- **`denied` and `expired` are terminal.** Stop polling that `request_id`; only a fresh unlock
+  reopens a session. Report it and, if asked, propose something new.
+- **Deterministic-id caveat:** the `request_id` is derived from the intent, so shielding the
+  **same amount** twice in one session yields the **same** id, and the second is refused
+  `already_executed`. To run the flow again, vary the amount (this one-shot-per-amount limit is
+  tracked in [issue #22](https://github.com/hellno/deckard/issues/22)).
 
 ## The policy fields you will see
 
@@ -124,7 +174,7 @@ error is to retry — for two of these (marked **do NOT retry**) that instinct i
 | `already_executed` | This exact request already broadcast (ids are deterministic per intent). | **Do NOT retry.** Vary the amount to demo again, or a human re-unlocks for a fresh session. |
 | `broadcast_timeout` | The RPC didn't answer in time — the transaction MAY be on-chain. | **Do NOT retry** (double-spend risk). Check the Deckard app / `just demo-check` and act only once status is known. |
 | `broadcast_failed: …` | The RPC refused the transaction; nothing was consumed. | Check the chain/RPC is up (`just demo-check`), then re-run from `deckard_shield`. |
-| `not_approved` | The request needs a human approval that hasn't happened. | Lower the amount under the per-tx cap, or a human edits `policy.json` (no approval card in this alpha). |
+| `not_approved` | The request needs a human approval that hasn't happened yet. | Wait for the human to approve it in the Deckard app's Activity feed (⌘⇧A), polling `deckard_status(request_id)` until `allowed`, then `deckard_execute`; or lower the amount under the per-tx cap so it auto-allows. |
 | `user_denied` | A human said no. | Respect it; propose something different only if asked. |
 | `resolve_not_authorized` | A `Resolve` (approval) was sent on the public proposer socket, which can't approve — only the Deckard app, over its private channel, can. | Don't try to self-approve. A human approves in the Deckard app (hold-to-confirm); the sidecar never gets a `resolve` tool. |
 | `chain_mismatch` | Sidecar and daemon disagree on the chain (e.g. demo sidecar → real daemon). | Re-run `deckard-mcp install --demo` and make sure `just demo` is what's running. |
