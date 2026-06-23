@@ -1252,13 +1252,10 @@ impl Daemon {
         self.expire_stale();
         match self.requests.get(&request_id) {
             Some(req) => {
-                // remaining_ms is the live approval TTL: only a still-open Pending/Allowed card
-                // carries it (`checked_duration_since` can't underflow — a past `expires_at` → 0,
-                // and the `.min(u64::MAX)` clamp makes the `as u64` cast lossless). An EXECUTED
-                // request is terminal even though its `status` stays `Allowed` (execute sets
-                // `broadcast`, not the status), so it reports 0 — matching the StatusView contract
-                // ("0 when terminal") and the agent's lifecycle/tx_hash view. (This is the one
-                // divergence from `pending_list`, which never holds executed records.)
+                // Only a still-open Pending/Allowed card carries a live TTL. An EXECUTED request
+                // is terminal even though its `status` stays `Allowed` (execute sets `broadcast`,
+                // not the status), so it reports 0 — the one divergence from `pending_list`,
+                // which never holds executed records.
                 let now = Instant::now();
                 let remaining_ms = if req.broadcast.is_some() {
                     0

@@ -209,7 +209,6 @@ fn claude_mcp_add_command(entry: &Value) -> anyhow::Result<String> {
     parts.push("--".to_string());
     // The absolute binary path may contain a space (e.g. a build dir under "Application Support").
     parts.push(shell_quote(command));
-    // The MCP server flag (mirrors server_entry's args = ["--mcp"]).
     parts.push("--mcp".to_string());
     Ok(parts.join(" "))
 }
