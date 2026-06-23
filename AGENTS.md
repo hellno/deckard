@@ -19,6 +19,14 @@ Treat key material with care.
 - `crates/deckard-mcp` — MCP/agent interface over shared wallet capabilities.
 - `crates/deckard-browser-bridge` — EIP-1193 dapp/browser interface over shared wallet capabilities.
 
+## Planning artifacts
+GitHub issues are the backlog and product/task tracker. Execution plans are repo-local working
+artifacts for non-trivial implementation, debugging, security, CI, or UI work.
+
+- Before non-trivial work, read `PLANS.md` and create or update a plan in `execplans/`.
+- Keep plan status notes current as reality changes; do not let plans become stale parallel docs.
+- Move durable decisions into `docs/` or `docs/adr/`; leave the plan as the task log and checklist.
+
 ## Commands
 - Iterate fast: `just core` — clippy + test the GPUI-free engine (`deckard-core`) without building the
   gpui app (the heavy verified-reads/shield deps compile once, then it's fast). Use while working on the
