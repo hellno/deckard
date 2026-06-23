@@ -22,6 +22,7 @@
 //! way: a bare number literal above `u64::MAX` — routine for wei (> ~18.4 ETH) — is parsed
 //! as a float and rejected on decode. CBOR has no such limit.
 
+pub mod clear_signing;
 pub mod decision;
 pub mod deny_reasons;
 pub mod intent;
@@ -33,6 +34,11 @@ pub mod shield_status;
 pub mod signer;
 pub mod swap_order;
 
+pub use clear_signing::{
+    clear_signing_fallback, normalize_contract_call_descriptor, ClearSigningError,
+    ClearSigningFallback, ClearSigningField, ClearSigningFieldFormat, ClearSigningReview,
+    Erc7730Descriptor,
+};
 pub use decision::{Decision, RequestId};
 pub use intent::{Intent, IntentKind};
 pub use mock::MockSigner;
