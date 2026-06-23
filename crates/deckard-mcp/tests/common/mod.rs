@@ -22,8 +22,8 @@ use tokio::process::{Child, ChildStdin, Command};
 
 use deckard_contract::{
     evaluate, ActivityLifecycle, ApprovalMode, ApprovalStatus, Decision, ExecuteResult, Intent,
-    Policy, RailgunViewGrant, ReadStatus, RequestId, SignOrderResult, SignerRequest,
-    SignerResponse, StatusView, UnlockOutcome,
+    Policy, RailgunViewGrant, ReadStatus, RequestId, SignMessageResult, SignOrderResult,
+    SignerRequest, SignerResponse, StatusView, UnlockOutcome,
 };
 use deckard_signerd::{frame, request_id_for};
 
@@ -253,6 +253,16 @@ impl MockState {
             SignerRequest::SignOrder { .. } => SignerResponse::SignOrder(SignOrderResult::Denied {
                 reason: "swap_unsupported_in_mock".into(),
             }),
+            // Message-signing is intentionally outside the current MCP acceptance mock: the
+            // browser bridge will own dapp-origin message requests. Stay exhaustive and fail closed.
+            SignerRequest::ProposeMessage { .. } => SignerResponse::Decision(Decision::Deny {
+                reason: "message_signing_unsupported_in_mock".into(),
+            }),
+            SignerRequest::SignMessage { .. } => {
+                SignerResponse::SignMessage(SignMessageResult::Denied {
+                    reason: "message_signing_unsupported_in_mock".into(),
+                })
+            }
             SignerRequest::CancelOrder { .. } => SignerResponse::Execute(ExecuteResult::Denied {
                 reason: "swap_unsupported_in_mock".into(),
             }),

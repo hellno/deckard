@@ -191,7 +191,12 @@ error is to retry — for two of these (marked **do NOT retry**) that instinct i
 | `receiver_zero` | The swap order receiver is the zero address. | Re-run the swap flow; a recurring case is a client bug. |
 | `zero_amount` | The swap order's sell amount is zero. | Re-quote with a non-zero sell amount. |
 | `valid_to_too_far` | The swap order's `valid_to` is more than 24h out. | Re-quote with a `valid_to` inside 24 hours. |
+| `chainid_mismatch` | A typed-data message names a different domain chain than the active wallet chain. | Refuse; ask the dapp/user to switch to the right chain and re-create the signing request. |
+| `eth_sign_refused` | Raw hash signing (`eth_sign`) was requested; it is too ambiguous to clear-sign safely. | Do not retry with `eth_sign`; use `personal_sign` or reviewed EIP-712 typed data instead. |
+| `delegation_refused` | An EIP-7702 wallet-delegation authorization was requested, but Deckard has no reviewed allowlist flow yet. | Refuse for now; wait for an explicit delegation-review flow. |
 | `not_an_order` | The `request_id` points at a transaction where an order was expected (or vice versa). | Use the id returned by the matching propose call. |
+| `not_a_message` | The `request_id` points at a non-message payload where message signing was expected. | Use the id returned by the matching message-signing propose call. |
+| `not_a_transaction` | The `request_id` points at a non-transaction payload where transaction execution was expected. | Use the id returned by the matching transaction propose call. |
 | `already_signed` | The swap order was already signed. | Don't re-sign; cancel via the swap-cancel flow if you need to abort. |
 | `approve_no_matching_order` | An `approve` arrived with no stored order matching its token + amount. | Propose the swap order first; the approve must match it exactly. |
 | `approve_with_value` | A swap `approve` carried ETH value (would move ETH invisibly). | Re-issue a value-0 approve (the swap flow does this). |

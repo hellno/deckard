@@ -26,6 +26,7 @@ pub mod clear_signing;
 pub mod decision;
 pub mod deny_reasons;
 pub mod intent;
+pub mod message_signing;
 pub mod mock;
 pub mod policy;
 pub mod read_status;
@@ -41,13 +42,14 @@ pub use clear_signing::{
 };
 pub use decision::{Decision, RequestId};
 pub use intent::{Intent, IntentKind};
+pub use message_signing::{MessageSigningRisk, SignMessage, SignMessageKind, TypedDataReview};
 pub use mock::MockSigner;
-pub use policy::{evaluate, evaluate_order, ApprovalMode, Policy};
+pub use policy::{evaluate, evaluate_message, evaluate_order, ApprovalMode, Policy};
 pub use read_status::ReadStatus;
 pub use rpc::{
     ActivityLifecycle, ActivityRecord, ApprovalStatus, BalanceReport, BreachedLimit, ExecuteResult,
-    PendingPayloadView, PendingRecord, ProposalOrigin, RailgunViewGrant, SignOrderResult,
-    SignerRequest, SignerResponse, StatusView, UnlockOutcome,
+    PendingPayloadView, PendingRecord, ProposalOrigin, RailgunViewGrant, SignMessageResult,
+    SignOrderResult, SignerRequest, SignerResponse, StatusView, UnlockOutcome,
 };
 pub use shield_status::ShieldStatus;
 pub use signer::Signer;
@@ -123,6 +125,22 @@ mod roundtrip_tests {
             receiver: Address::repeat_byte(0x11),
             valid_to: 1_700_003_600,
             app_data: B256::repeat_byte(0xCD),
+        }
+    }
+
+    fn sample_message() -> SignMessage {
+        SignMessage {
+            chain_id: 11155111,
+            origin: "https://example.test".into(),
+            kind: SignMessageKind::TypedDataV4(TypedDataReview {
+                domain_name: Some("Permit2".into()),
+                domain_version: Some("1".into()),
+                domain_chain_id: Some(11155111),
+                verifying_contract: Some(Address::repeat_byte(0x22)),
+                primary_type: "PermitSingle".into(),
+                digest: B256::repeat_byte(0x42),
+                risks: vec![MessageSigningRisk::PermitLike],
+            }),
         }
     }
 
@@ -224,6 +242,13 @@ mod roundtrip_tests {
             order: sample_swap_order(),
             origin: ProposalOrigin::Agent,
         });
+        roundtrip(&SignerRequest::ProposeMessage {
+            message: sample_message(),
+            origin: ProposalOrigin::Agent,
+        });
+        roundtrip(&SignerRequest::SignMessage {
+            request_id: B256::repeat_byte(0x09),
+        });
         roundtrip(&SignerRequest::SignOrder {
             request_id: B256::repeat_byte(0x06),
         });
@@ -305,6 +330,12 @@ mod roundtrip_tests {
         roundtrip(&SignerResponse::SignOrder(SignOrderResult::Denied {
             reason: "not_approved".into(),
         }));
+        roundtrip(&SignerResponse::SignMessage(SignMessageResult::Signed {
+            signature: Bytes::from(vec![0xEF_u8; 65]),
+        }));
+        roundtrip(&SignerResponse::SignMessage(SignMessageResult::Denied {
+            reason: "not_approved".into(),
+        }));
         roundtrip(&SignerResponse::Pending(vec![
             PendingRecord {
                 request_id: B256::repeat_byte(0x01),
@@ -319,6 +350,13 @@ mod roundtrip_tests {
                 payload: PendingPayloadView::Tx(sample_intent(IntentKind::Send)),
                 remaining_ms: 0,
                 origin: ProposalOrigin::App,
+            },
+            PendingRecord {
+                request_id: B256::repeat_byte(0x03),
+                status: ApprovalStatus::Pending,
+                payload: PendingPayloadView::Message(sample_message()),
+                remaining_ms: 60_000,
+                origin: ProposalOrigin::Agent,
             },
         ]));
     }
@@ -426,9 +464,17 @@ mod roundtrip_tests {
         roundtrip(&SignOrderResult::Denied {
             reason: "revoked".into(),
         });
+        roundtrip(&SignMessageResult::Signed {
+            signature: Bytes::from(vec![0xEF_u8; 65]),
+        });
+        roundtrip(&SignMessageResult::Denied {
+            reason: "revoked".into(),
+        });
+        roundtrip(&sample_message());
 
         roundtrip(&PendingPayloadView::Tx(sample_intent(IntentKind::Send)));
         roundtrip(&PendingPayloadView::Order(sample_swap_order()));
+        roundtrip(&PendingPayloadView::Message(sample_message()));
         roundtrip(&PendingPayloadView::Approve {
             token: Address::repeat_byte(0xA1),
             spender: Address::repeat_byte(0xC9),

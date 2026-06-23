@@ -48,7 +48,7 @@ use gpui_component::{
 
 use deckard_contract::{
     ActivityLifecycle, ActivityRecord, BreachedLimit, Intent, IntentKind, PendingPayloadView,
-    ProposalOrigin, RequestId,
+    ProposalOrigin, RequestId, SignMessage, SignMessageKind,
 };
 
 use crate::money::money;
@@ -145,6 +145,33 @@ fn payload_summary(payload: &PendingPayloadView, mask: bool) -> String {
                 short_address(token)
             )
         }
+        PendingPayloadView::Message(message) => message_summary(message),
+    }
+}
+
+/// One-line summary for off-chain signatures. Plain language first; details live in the review.
+fn message_summary(message: &SignMessage) -> String {
+    match &message.kind {
+        SignMessageKind::PersonalSign { .. } => format!("sign message from {}", message.origin),
+        SignMessageKind::TypedDataV4(review) => {
+            format!("sign typed data: {}", review.primary_type)
+        }
+        SignMessageKind::EthSign { .. } => "refuse raw hash signature".to_string(),
+        SignMessageKind::Authorization7702 { .. } => "refuse wallet delegation".to_string(),
+    }
+}
+
+fn message_preview(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => {
+            let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            if collapsed.chars().count() > 80 {
+                format!("{}…", collapsed.chars().take(80).collect::<String>())
+            } else {
+                collapsed
+            }
+        }
+        Err(_) => format!("{} bytes (not UTF-8)", bytes.len()),
     }
 }
 
@@ -984,6 +1011,116 @@ impl Shell {
                     kv_mono_row("Spender", &short_address(spender), mono.clone(), fg, muted)
                         .into_any_element(),
                 );
+            }
+            PendingPayloadView::Message(message) => {
+                rows.push(
+                    kv_mono_row("Origin", &message.origin, mono.clone(), fg, muted)
+                        .into_any_element(),
+                );
+                match &message.kind {
+                    SignMessageKind::PersonalSign { message } => {
+                        rows.push(
+                            kv_mono_row("Type", "personal_sign", mono.clone(), fg, muted)
+                                .into_any_element(),
+                        );
+                        rows.push(
+                            kv_mono_row(
+                                "Message",
+                                &message_preview(message),
+                                mono.clone(),
+                                fg,
+                                muted,
+                            )
+                            .into_any_element(),
+                        );
+                    }
+                    SignMessageKind::TypedDataV4(review) => {
+                        rows.push(
+                            kv_mono_row("Type", "eth_signTypedData_v4", mono.clone(), fg, muted)
+                                .into_any_element(),
+                        );
+                        rows.push(
+                            kv_mono_row(
+                                "Primary type",
+                                &review.primary_type,
+                                mono.clone(),
+                                fg,
+                                muted,
+                            )
+                            .into_any_element(),
+                        );
+                        if let Some(name) = review.domain_name.as_ref() {
+                            rows.push(
+                                kv_mono_row("Domain", name, mono.clone(), fg, muted)
+                                    .into_any_element(),
+                            );
+                        }
+                        if let Some(chain_id) = review.domain_chain_id {
+                            rows.push(
+                                kv_mono_row(
+                                    "Domain chain",
+                                    &chain_id.to_string(),
+                                    mono.clone(),
+                                    fg,
+                                    muted,
+                                )
+                                .into_any_element(),
+                            );
+                        }
+                        if let Some(contract) = review.verifying_contract.as_ref() {
+                            rows.push(
+                                kv_mono_row(
+                                    "Contract",
+                                    &short_address(contract),
+                                    mono.clone(),
+                                    fg,
+                                    muted,
+                                )
+                                .into_any_element(),
+                            );
+                        }
+                        rows.push(
+                            kv_mono_row(
+                                "Digest",
+                                &format!("{:#x}", review.digest),
+                                mono.clone(),
+                                fg,
+                                muted,
+                            )
+                            .into_any_element(),
+                        );
+                    }
+                    SignMessageKind::EthSign { digest } => {
+                        rows.push(
+                            kv_mono_row("Type", "eth_sign", mono.clone(), fg, muted)
+                                .into_any_element(),
+                        );
+                        rows.push(
+                            kv_mono_row("Digest", &format!("{digest:#x}"), mono.clone(), fg, muted)
+                                .into_any_element(),
+                        );
+                    }
+                    SignMessageKind::Authorization7702 { delegate, nonce } => {
+                        rows.push(
+                            kv_mono_row("Type", "EIP-7702 authorization", mono.clone(), fg, muted)
+                                .into_any_element(),
+                        );
+                        rows.push(
+                            kv_mono_row(
+                                "Delegate",
+                                &short_address(delegate),
+                                mono.clone(),
+                                fg,
+                                muted,
+                            )
+                            .into_any_element(),
+                        );
+                        rows.push(
+                            kv_mono_row("Nonce", &nonce.to_string(), mono.clone(), fg, muted)
+                                .into_any_element(),
+                        );
+                    }
+                }
             }
         }
 

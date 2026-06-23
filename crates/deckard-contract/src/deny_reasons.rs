@@ -54,6 +54,12 @@ pub const ZERO_AMOUNT: &str = "zero_amount";
 pub const OFF_SWAP_LIST: &str = "off_swap_list";
 /// Swap order `valid_to` is more than 24h in the future.
 pub const VALID_TO_TOO_FAR: &str = "valid_to_too_far";
+/// Typed-data domain chain id does not match the active signer chain.
+pub const CHAINID_MISMATCH: &str = "chainid_mismatch";
+/// Raw `eth_sign` hash signing is refused; use reviewed typed/personal signing instead.
+pub const ETH_SIGN_REFUSED: &str = "eth_sign_refused";
+/// EIP-7702 delegation authorization is refused until a reviewed allowlist path exists.
+pub const DELEGATION_REFUSED: &str = "delegation_refused";
 
 // ─────────────────────── Daemon process-level ───────────────────────
 // Process-state pre-checks the pure policy can't express (`deckard-signerd`); they run
@@ -119,6 +125,10 @@ pub const APPROVE_NO_MATCHING_ORDER: &str = "approve_no_matching_order";
 pub const ALREADY_SIGNED: &str = "already_signed";
 /// The request id refers to a Tx payload where an Order was required (or vice versa).
 pub const NOT_AN_ORDER: &str = "not_an_order";
+/// Request id exists, but it is not a message-signing payload.
+pub const NOT_A_MESSAGE: &str = "not_a_message";
+/// Request id exists, but it is not an executable/broadcastable transaction payload.
+pub const NOT_A_TRANSACTION: &str = "not_a_transaction";
 /// The `MockSigner` used by the MCP test harness does not implement swaps. **Test surface
 /// only** — never minted by a real daemon, so it is intentionally absent from the agent docs
 /// table.

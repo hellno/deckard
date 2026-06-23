@@ -20,10 +20,11 @@ use tokio::sync::Mutex as AsyncMutex;
 use zeroize::Zeroizing;
 
 use deckard_contract::{
-    deny_reasons, evaluate, evaluate_order, ActivityLifecycle, ActivityRecord, ApprovalStatus,
-    BalanceReport, BreachedLimit, Decision, ExecuteResult, Intent, IntentKind, PendingPayloadView,
-    PendingRecord, Policy, ProposalOrigin, ReadStatus, RequestId, SignOrderResult, SignerRequest,
-    SignerResponse, StatusView, SwapOrder, UnlockOutcome,
+    deny_reasons, evaluate, evaluate_message, evaluate_order, ActivityLifecycle, ActivityRecord,
+    ApprovalStatus, BalanceReport, BreachedLimit, Decision, ExecuteResult, Intent, IntentKind,
+    PendingPayloadView, PendingRecord, Policy, ProposalOrigin, ReadStatus, RequestId, SignMessage,
+    SignMessageKind, SignMessageResult, SignOrderResult, SignerRequest, SignerResponse, StatusView,
+    SwapOrder, UnlockOutcome,
 };
 // Only the `shield`-gated view-grant handler constructs this; an unconditional import would
 // warn in the no-default-features build (e.g. deckard-mcp's dependency edge).
@@ -33,7 +34,7 @@ use deckard_core::{UnlockedVault, Vault};
 
 use crate::config::Config;
 use crate::policy_store::{self, current_utc_day};
-use crate::request_id::{request_id_for, request_id_for_order};
+use crate::request_id::{request_id_for, request_id_for_message, request_id_for_order};
 use crate::signing;
 use crate::spend_store::SpendStore;
 
@@ -99,6 +100,7 @@ enum VaultState {
 enum PendingPayload {
     Tx(Intent),
     Order(SwapOrder),
+    Message(SignMessage),
 }
 
 /// One tracked proposal. `status` is the wire-visible approval state; `broadcast` is `Some`
@@ -360,8 +362,14 @@ impl Daemon {
             SignerRequest::ProposeOrder { order, origin } => {
                 SignerResponse::Decision(self.propose_order(&order, origin))
             }
+            SignerRequest::ProposeMessage { message, origin } => {
+                SignerResponse::Decision(self.propose_message(&message, origin))
+            }
             SignerRequest::SignOrder { request_id } => {
                 SignerResponse::SignOrder(self.sign_order(request_id).await)
+            }
+            SignerRequest::SignMessage { request_id } => {
+                SignerResponse::SignMessage(self.sign_message(request_id).await)
             }
             SignerRequest::CancelOrder { request_id } => {
                 SignerResponse::Execute(self.cancel_order(request_id).await)
@@ -738,7 +746,7 @@ impl Daemon {
                     && order.sell_token == intent.to
                     && order.sell_amount == amount
             }
-            PendingPayload::Tx(_) => false,
+            PendingPayload::Tx(_) | PendingPayload::Message(_) => false,
         });
         if !has_matching_order {
             return Some(Decision::Deny {
@@ -836,6 +844,70 @@ impl Daemon {
         }
     }
 
+    /// Propose an off-chain message signature. Message requests NEVER auto-allow in v1:
+    /// a valid request is stored `Pending` and must be resolved by the human control channel
+    /// before `sign_message` releases a signature.
+    fn propose_message(&mut self, message: &SignMessage, origin: ProposalOrigin) -> Decision {
+        self.rollover();
+        self.expire_stale();
+
+        if message.chain_id != self.cfg.chain_id {
+            return Decision::Deny {
+                reason: deny_reasons::CHAIN_MISMATCH.into(),
+            };
+        }
+        let wallet = match &self.state {
+            VaultState::Unlocked { address, .. } => *address,
+            VaultState::Locked => {
+                return Decision::Deny {
+                    reason: deny_reasons::LOCKED.into(),
+                }
+            }
+        };
+
+        let id = request_id_for_message(message);
+        if let Some(existing) = self.requests.get(&id) {
+            return match &existing.status {
+                _ if existing.signature.is_some() => Decision::Deny {
+                    reason: deny_reasons::ALREADY_SIGNED.into(),
+                },
+                ApprovalStatus::Pending => Decision::NeedsApproval { request_id: id },
+                ApprovalStatus::Allowed => Decision::Allow,
+                ApprovalStatus::Denied { reason } => Decision::Deny {
+                    reason: reason.clone(),
+                },
+                ApprovalStatus::Expired => Decision::Deny {
+                    reason: deny_reasons::EXPIRED.into(),
+                },
+            };
+        }
+
+        match evaluate_message(message, &self.policy, wallet) {
+            deny @ Decision::Deny { .. } => deny,
+            Decision::NeedsApproval { .. } | Decision::Allow => {
+                let seq = self.next_seq();
+                self.requests.insert(
+                    id,
+                    PendingReq {
+                        payload: PendingPayload::Message(message.clone()),
+                        status: ApprovalStatus::Pending,
+                        expires_at: Instant::now() + self.approval_ttl,
+                        broadcast: None,
+                        signature: None,
+                        approved: false,
+                        origin,
+                        created_ms: now_ms(),
+                        seq,
+                        breached: BreachedLimit::None,
+                        cancelled: false,
+                        auto_allowed: false,
+                    },
+                );
+                Decision::NeedsApproval { request_id: id }
+            }
+        }
+    }
+
     /// Sign a stored, approved swap order's EIP-712 digest → a 65-byte signature. NO HTTP, NO
     /// broadcast (the app/MCP posts the signed order to the CoW orderbook). Re-checks `revoked`
     /// at sign time (TOCTOU) so an order approved before a STOP is still refused. An order
@@ -866,7 +938,7 @@ impl Daemon {
             };
             let order = match &req.payload {
                 PendingPayload::Order(order) => order,
-                PendingPayload::Tx(_) => {
+                PendingPayload::Tx(_) | PendingPayload::Message(_) => {
                     return SignOrderResult::Denied {
                         reason: deny_reasons::NOT_AN_ORDER.into(),
                     }
@@ -931,6 +1003,103 @@ impl Daemon {
         SignOrderResult::Signed { signature }
     }
 
+    /// Sign a stored, approved off-chain message. No network and no broadcast. Re-checks
+    /// `revoked` at sign time so STOP wins even after approval.
+    async fn sign_message(&mut self, request_id: RequestId) -> SignMessageResult {
+        self.rollover();
+        self.expire_stale();
+
+        let (message, scalar) = {
+            let vault = match &self.state {
+                VaultState::Locked => {
+                    return SignMessageResult::Denied {
+                        reason: deny_reasons::REVOKED.into(),
+                    }
+                }
+                VaultState::Unlocked { vault, .. } => vault,
+            };
+            let req = match self.requests.get(&request_id) {
+                None => {
+                    return SignMessageResult::Denied {
+                        reason: deny_reasons::UNKNOWN_REQUEST.into(),
+                    }
+                }
+                Some(req) => req,
+            };
+            let message = match &req.payload {
+                PendingPayload::Message(message) => message,
+                PendingPayload::Tx(_) | PendingPayload::Order(_) => {
+                    return SignMessageResult::Denied {
+                        reason: deny_reasons::NOT_A_MESSAGE.into(),
+                    }
+                }
+            };
+            if req.signature.is_some() {
+                return SignMessageResult::Denied {
+                    reason: deny_reasons::ALREADY_SIGNED.into(),
+                };
+            }
+            match &req.status {
+                ApprovalStatus::Allowed => {}
+                ApprovalStatus::Pending => {
+                    return SignMessageResult::Denied {
+                        reason: deny_reasons::NOT_APPROVED.into(),
+                    }
+                }
+                ApprovalStatus::Denied { reason } => {
+                    return SignMessageResult::Denied {
+                        reason: reason.clone(),
+                    }
+                }
+                ApprovalStatus::Expired => {
+                    return SignMessageResult::Denied {
+                        reason: deny_reasons::EXPIRED.into(),
+                    }
+                }
+            }
+            if self.policy.revoked {
+                return SignMessageResult::Denied {
+                    reason: deny_reasons::REVOKED.into(),
+                };
+            }
+            let signer = match vault.account_signer(0) {
+                Ok(s) => s,
+                Err(e) => {
+                    return SignMessageResult::Denied {
+                        reason: deny_reasons::signer_error(one_line(&e)),
+                    }
+                }
+            };
+            (message.clone(), Zeroizing::new(signer.to_bytes().0))
+        };
+
+        let sig = match &message.kind {
+            SignMessageKind::PersonalSign { message } => {
+                signing::sign_personal_message(scalar.as_slice(), message)
+            }
+            SignMessageKind::TypedDataV4(review) => {
+                signing::sign_message_digest(scalar.as_slice(), review.digest)
+            }
+            SignMessageKind::EthSign { .. } => Err(anyhow::anyhow!(deny_reasons::ETH_SIGN_REFUSED)),
+            SignMessageKind::Authorization7702 { .. } => {
+                Err(anyhow::anyhow!(deny_reasons::DELEGATION_REFUSED))
+            }
+        };
+        let sig = match sig {
+            Ok(sig) => sig,
+            Err(e) => {
+                return SignMessageResult::Denied {
+                    reason: deny_reasons::sign_failed(one_line(&e)),
+                }
+            }
+        };
+        let signature = Bytes::from(sig.to_vec());
+        if let Some(req) = self.requests.get_mut(&request_id) {
+            req.signature = Some(signature.clone());
+        }
+        SignMessageResult::Signed { signature }
+    }
+
     /// Broadcast an `invalidateOrder` cancel for a stored swap order (an on-chain cancellation
     /// at the GPv2 settlement contract). Requires an unlocked wallet (the owner must sign the
     /// cancel). Used both by an explicit `CancelOrder` and by the STOP pass (see [`stop`]).
@@ -974,7 +1143,7 @@ impl Daemon {
             let order = match self.requests.get(&request_id) {
                 Some(req) => match &req.payload {
                     PendingPayload::Order(order) => order,
-                    PendingPayload::Tx(_) => {
+                    PendingPayload::Tx(_) | PendingPayload::Message(_) => {
                         return ExecuteResult::Denied {
                             reason: deny_reasons::NOT_AN_ORDER.into(),
                         }
@@ -1118,9 +1287,9 @@ impl Daemon {
             // this table can't reach `execute` through any normal flow, but guard defensively.
             let intent = match &req.payload {
                 PendingPayload::Tx(intent) => intent,
-                PendingPayload::Order(_) => {
+                PendingPayload::Order(_) | PendingPayload::Message(_) => {
                     return ExecuteResult::Denied {
-                        reason: deny_reasons::NOT_AN_ORDER.into(),
+                        reason: deny_reasons::NOT_A_TRANSACTION.into(),
                     }
                 }
             };
@@ -1533,7 +1702,7 @@ fn select_orders_to_cancel(requests: &HashMap<RequestId, PendingReq>, now: u64) 
         .filter_map(|(id, req)| {
             let order = match &req.payload {
                 PendingPayload::Order(o) => o,
-                PendingPayload::Tx(_) => return None,
+                PendingPayload::Tx(_) | PendingPayload::Message(_) => return None,
             };
             let signed = req.signature.is_some();
             let not_cancelled = req.broadcast.is_none();
@@ -1549,6 +1718,7 @@ fn select_orders_to_cancel(requests: &HashMap<RequestId, PendingReq>, now: u64) 
 fn payload_view(payload: &PendingPayload) -> PendingPayloadView {
     match payload {
         PendingPayload::Order(order) => PendingPayloadView::Order(order.clone()),
+        PendingPayload::Message(message) => PendingPayloadView::Message(message.clone()),
         PendingPayload::Tx(intent) => match deckard_core::decode_approve(&intent.calldata) {
             Some((spender, amount)) => PendingPayloadView::Approve {
                 token: intent.to,

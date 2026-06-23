@@ -96,11 +96,36 @@ pub async fn broadcast_intent(
 /// The byte layout is built with `split_at_mut`/`copy_from_slice` (no index expressions, to
 /// match the trust-core lint posture even though this crate isn't under that deny list).
 pub fn sign_order_digest(scalar: &[u8], digest: B256) -> anyhow::Result<[u8; 65]> {
+    sign_hash_legacy_v(scalar, digest)
+}
+
+/// Sign an EIP-191 `personal_sign` message. The message bytes are hashed with the standard
+/// `"Ethereum Signed Message"` prefix by alloy before signing.
+pub fn sign_personal_message(scalar: &[u8], message: &[u8]) -> anyhow::Result<[u8; 65]> {
+    let signer = PrivateKeySigner::from_slice(scalar)
+        .map_err(|e| anyhow::anyhow!("reconstruct signer: {e}"))?;
+    let sig = signer
+        .sign_message_sync(message)
+        .map_err(|e| anyhow::anyhow!("sign personal message: {e}"))?;
+    signature_bytes_legacy_v(&sig)
+}
+
+/// Sign an already-computed EIP-712 digest. The caller is responsible for producing the digest
+/// from reviewed typed data; this function does no JSON parsing and no network I/O.
+pub fn sign_message_digest(scalar: &[u8], digest: B256) -> anyhow::Result<[u8; 65]> {
+    sign_hash_legacy_v(scalar, digest)
+}
+
+fn sign_hash_legacy_v(scalar: &[u8], digest: B256) -> anyhow::Result<[u8; 65]> {
     let signer = PrivateKeySigner::from_slice(scalar)
         .map_err(|e| anyhow::anyhow!("reconstruct signer: {e}"))?;
     let sig = signer
         .sign_hash_sync(&digest)
         .map_err(|e| anyhow::anyhow!("sign digest: {e}"))?;
+    signature_bytes_legacy_v(&sig)
+}
+
+fn signature_bytes_legacy_v(sig: &alloy_primitives::Signature) -> anyhow::Result<[u8; 65]> {
     let mut out = [0u8; 65];
     let (r, rest) = out.split_at_mut(32);
     let (s, v) = rest.split_at_mut(32);

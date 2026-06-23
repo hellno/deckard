@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::decision::{Decision, RequestId};
 use crate::intent::Intent;
+use crate::message_signing::SignMessage;
 use crate::policy::Policy;
 use crate::read_status::ReadStatus;
 use crate::swap_order::SwapOrder;
@@ -74,8 +75,15 @@ pub enum SignerRequest {
         order: SwapOrder,
         origin: ProposalOrigin,
     },
+    /// Propose an off-chain message signature (policy check only, NO signing) → [`Decision`].
+    ProposeMessage {
+        message: SignMessage,
+        origin: ProposalOrigin,
+    },
     /// Sign a stored, approved order's EIP-712 digest → [`SignOrderResult`]. No HTTP.
     SignOrder { request_id: RequestId },
+    /// Sign a stored, approved message → [`SignMessageResult`]. No HTTP, no broadcast.
+    SignMessage { request_id: RequestId },
     /// Broadcast an `invalidateOrder` cancel for a stored order → [`ExecuteResult`].
     CancelOrder { request_id: RequestId },
     /// List all in-flight pending records WITH payloads (the GUI approval inbox) → [`SignerResponse::Pending`].
@@ -107,6 +115,8 @@ pub enum SignerResponse {
     RailgunView(RailgunViewGrant),
     /// Reply to `SignOrder`.
     SignOrder(SignOrderResult),
+    /// Reply to `SignMessage`.
+    SignMessage(SignMessageResult),
     /// Reply to `PendingList`: every in-flight record with its full payload.
     Pending(Vec<PendingRecord>),
     /// Reply to `ActivityFeed`: the activity ledger, newest-first.
@@ -185,6 +195,13 @@ pub enum SignOrderResult {
     Denied { reason: String },
 }
 
+/// Result of `sign_message`. `signature` is a 65-byte ECDSA signature.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum SignMessageResult {
+    Signed { signature: Bytes },
+    Denied { reason: String },
+}
+
 /// One pending record for the GUI inbox (child #25 renders these). Carries the full payload.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PendingRecord {
@@ -221,6 +238,7 @@ pub struct StatusView {
 pub enum PendingPayloadView {
     Tx(Intent),
     Order(SwapOrder),
+    Message(SignMessage),
     Approve {
         token: Address,
         spender: Address,

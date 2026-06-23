@@ -72,6 +72,9 @@ const FROZEN: &[&str] = &[
     r::ZERO_AMOUNT,
     r::OFF_SWAP_LIST,
     r::VALID_TO_TOO_FAR,
+    r::CHAINID_MISMATCH,
+    r::ETH_SIGN_REFUSED,
+    r::DELEGATION_REFUSED,
     // daemon process-level
     r::LOCKED,
     r::CHAIN_MISMATCH,
@@ -96,6 +99,8 @@ const FROZEN: &[&str] = &[
     r::APPROVE_NO_MATCHING_ORDER,
     r::ALREADY_SIGNED,
     r::NOT_AN_ORDER,
+    r::NOT_A_MESSAGE,
+    r::NOT_A_TRANSACTION,
     r::SWAP_UNSUPPORTED_IN_MOCK,
     // dynamic prefixes
     r::RAILGUN_KEYS,
@@ -430,7 +435,7 @@ fn frozen_set_matches_module_exports() {
 fn frozen_set_is_exactly_documented() {
     assert_eq!(
         FROZEN.len(),
-        36,
+        41,
         "added/removed a Deny tag? update FROZEN, deny_reasons.rs, and the docs table"
     );
 

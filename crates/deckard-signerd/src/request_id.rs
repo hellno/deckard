@@ -15,7 +15,7 @@
 
 use alloy_primitives::keccak256;
 
-use deckard_contract::{Intent, IntentKind, RequestId, SwapOrder};
+use deckard_contract::{Intent, IntentKind, RequestId, SignMessage, SignMessageKind, SwapOrder};
 
 /// Deterministic request id for an intent. Fixed-width fields first, variable `calldata`
 /// last, so no field boundary is ambiguous.
@@ -64,6 +64,36 @@ pub fn request_id_for_order(order: &SwapOrder) -> RequestId {
     keccak256(&buf)
 }
 
+/// Deterministic request id for an off-chain message-signing request. The `0x03`
+/// discriminator is disjoint from transaction (`chain_id` prefix) and order (`0x02`) ids.
+pub fn request_id_for_message(message: &SignMessage) -> RequestId {
+    let mut buf = Vec::with_capacity(128);
+    buf.push(0x03);
+    buf.extend_from_slice(&message.chain_id.to_be_bytes());
+    buf.extend_from_slice(message.origin.as_bytes());
+    buf.push(0x00);
+    match &message.kind {
+        SignMessageKind::PersonalSign { message } => {
+            buf.push(0x01);
+            buf.extend_from_slice(message);
+        }
+        SignMessageKind::TypedDataV4(review) => {
+            buf.push(0x02);
+            buf.extend_from_slice(review.digest.as_slice());
+        }
+        SignMessageKind::EthSign { digest } => {
+            buf.push(0x03);
+            buf.extend_from_slice(digest.as_slice());
+        }
+        SignMessageKind::Authorization7702 { delegate, nonce } => {
+            buf.push(0x04);
+            buf.extend_from_slice(delegate.as_slice());
+            buf.extend_from_slice(&nonce.to_be_bytes());
+        }
+    }
+    keccak256(&buf)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,6 +121,16 @@ mod tests {
             value: U256::from(value),
             calldata: Bytes::new(),
             kind: IntentKind::Send,
+        }
+    }
+
+    fn personal_message(text: &str) -> SignMessage {
+        SignMessage {
+            chain_id: 31337,
+            origin: "https://example.test".into(),
+            kind: SignMessageKind::PersonalSign {
+                message: Bytes::from(text.as_bytes().to_vec()),
+            },
         }
     }
 
@@ -176,6 +216,20 @@ mod tests {
             request_id_for_order(&order(100)),
             request_id_for(&send(100)),
             "order vs intent must be disjoint"
+        );
+    }
+
+    #[test]
+    fn message_id_deterministic_and_disjoint() {
+        let id = request_id_for_message(&personal_message("hello"));
+        assert_eq!(id, request_id_for_message(&personal_message("hello")));
+        assert_ne!(id, RequestId::ZERO);
+        assert_ne!(id, request_id_for(&send(100)), "message vs intent");
+        assert_ne!(id, request_id_for_order(&order(100)), "message vs order");
+        assert_ne!(
+            id,
+            request_id_for_message(&personal_message("goodbye")),
+            "message bytes"
         );
     }
 }
