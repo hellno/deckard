@@ -13,12 +13,14 @@ use zeroize::Zeroize;
 
 use deckard_contract::{
     ActivityRecord, ApprovalStatus, Decision, ExecuteResult, Intent, PendingRecord, ProposalOrigin,
-    RailgunViewGrant, RequestId, SignOrderResult, SignerRequest, SignerResponse, SwapOrder,
-    UnlockOutcome,
+    RailgunViewGrant, RequestId, SignMessage, SignMessageResult, SignOrderResult, SignerRequest,
+    SignerResponse, SwapOrder, UnlockOutcome,
 };
 
 use crate::frame;
-use crate::request_id::{request_id_for, request_id_for_order};
+use crate::request_id::{
+    request_id_for, request_id_for_message as request_id_for_sign_message, request_id_for_order,
+};
 
 /// How long to keep retrying `connect` before giving up — covers the brief window where the
 /// app has spawned the daemon but it hasn't bound the socket yet.
@@ -209,6 +211,70 @@ impl SignerClient {
     /// derived locally (the daemon assigns the very same id).
     pub fn request_id_for_intent(intent: &Intent) -> RequestId {
         request_id_for(intent)
+    }
+
+    // --- message signing helpers -------------------------------------------------------
+
+    /// Propose an off-chain message signature → a `Decision`. Message signatures never
+    /// auto-allow in v1; a safe request is held for human approval.
+    pub async fn propose_message(
+        &self,
+        message: &SignMessage,
+        origin: ProposalOrigin,
+    ) -> anyhow::Result<Decision> {
+        match self
+            .request(&SignerRequest::ProposeMessage {
+                message: message.clone(),
+                origin,
+            })
+            .await?
+        {
+            SignerResponse::Decision(d) => Ok(d),
+            other => Err(unexpected("ProposeMessage", other)),
+        }
+    }
+
+    /// Blocking [`propose_message`](Self::propose_message).
+    pub fn propose_message_blocking(
+        &self,
+        message: &SignMessage,
+        origin: ProposalOrigin,
+    ) -> anyhow::Result<Decision> {
+        match self.request_blocking(&SignerRequest::ProposeMessage {
+            message: message.clone(),
+            origin,
+        })? {
+            SignerResponse::Decision(d) => Ok(d),
+            other => Err(unexpected("ProposeMessage", other)),
+        }
+    }
+
+    /// Sign a stored, human-approved message → its 65-byte ECDSA signature.
+    pub async fn sign_message(&self, request_id: RequestId) -> anyhow::Result<SignMessageResult> {
+        match self
+            .request(&SignerRequest::SignMessage { request_id })
+            .await?
+        {
+            SignerResponse::SignMessage(r) => Ok(r),
+            other => Err(unexpected("SignMessage", other)),
+        }
+    }
+
+    /// Blocking [`sign_message`](Self::sign_message).
+    pub fn sign_message_blocking(
+        &self,
+        request_id: RequestId,
+    ) -> anyhow::Result<SignMessageResult> {
+        match self.request_blocking(&SignerRequest::SignMessage { request_id })? {
+            SignerResponse::SignMessage(r) => Ok(r),
+            other => Err(unexpected("SignMessage", other)),
+        }
+    }
+
+    /// The deterministic request id for a message — lets clients correlate a proposal with
+    /// pending/activity rows without re-reading the whole inbox.
+    pub fn request_id_for_message(message: &SignMessage) -> RequestId {
+        request_id_for_sign_message(message)
     }
 
     // --- swap order helpers (the agent proposes/signs/cancels CoW orders) ------------------

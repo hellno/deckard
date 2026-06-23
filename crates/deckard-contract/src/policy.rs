@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::decision::{Decision, RequestId};
 use crate::deny_reasons;
 use crate::intent::{Intent, IntentKind};
+use crate::message_signing::{SignMessage, SignMessageKind};
 use crate::swap_order::SwapOrder;
 
 /// The agent-readable policy. All caps are in wei.
@@ -152,6 +153,42 @@ pub fn evaluate_order(order: &SwapOrder, policy: &Policy, wallet: Address, now: 
     }
     Decision::NeedsApproval {
         request_id: RequestId::ZERO,
+    }
+}
+
+/// The message-signing decision function — pure, like [`evaluate`] and [`evaluate_order`].
+/// Messages never auto-allow in v1: any safe request is held for human approval. The `wallet`
+/// argument is present so the parity signature has the daemon-bound account available as the
+/// policy grows; it is intentionally unused by the first pass.
+pub fn evaluate_message(message: &SignMessage, policy: &Policy, _wallet: Address) -> Decision {
+    if policy.revoked {
+        return Decision::Deny {
+            reason: deny_reasons::REVOKED.into(),
+        };
+    }
+    match &message.kind {
+        SignMessageKind::PersonalSign { .. } => Decision::NeedsApproval {
+            request_id: RequestId::ZERO,
+        },
+        SignMessageKind::TypedDataV4(review) => {
+            if review
+                .domain_chain_id
+                .is_some_and(|chain_id| chain_id != message.chain_id)
+            {
+                return Decision::Deny {
+                    reason: deny_reasons::CHAINID_MISMATCH.into(),
+                };
+            }
+            Decision::NeedsApproval {
+                request_id: RequestId::ZERO,
+            }
+        }
+        SignMessageKind::EthSign { .. } => Decision::Deny {
+            reason: deny_reasons::ETH_SIGN_REFUSED.into(),
+        },
+        SignMessageKind::Authorization7702 { .. } => Decision::Deny {
+            reason: deny_reasons::DELEGATION_REFUSED.into(),
+        },
     }
 }
 
@@ -369,6 +406,113 @@ mod evaluate_order_tests {
             evaluate_order(&base_order(), &base_policy(), wallet(), NOW),
             Decision::NeedsApproval {
                 request_id: RequestId::ZERO
+            }
+        );
+    }
+}
+
+#[cfg(test)]
+mod message_signing_tests {
+    use super::*;
+    use crate::{MessageSigningRisk, SignMessage, SignMessageKind, TypedDataReview};
+    use alloy_primitives::B256;
+
+    const CHAIN_ID: u64 = 11155111;
+
+    fn wallet() -> Address {
+        Address::repeat_byte(0x11)
+    }
+
+    fn base_policy() -> Policy {
+        Policy {
+            per_tx_cap_wei: U256::from(50u64),
+            daily_cap_wei: U256::from(1000u64),
+            spent_today_wei: U256::ZERO,
+            allow_to: vec![],
+            auto_shield_min_wei: U256::from(10u64),
+            require_approval: ApprovalMode::Never,
+            revoked: false,
+            allow_swap_tokens: vec![],
+        }
+    }
+
+    fn personal_message() -> SignMessage {
+        SignMessage {
+            chain_id: CHAIN_ID,
+            origin: "https://example.test".into(),
+            kind: SignMessageKind::PersonalSign {
+                message: b"Sign in to Deckard".as_slice().into(),
+            },
+        }
+    }
+
+    fn typed_message(chain_id: u64) -> SignMessage {
+        SignMessage {
+            chain_id: CHAIN_ID,
+            origin: "https://example.test".into(),
+            kind: SignMessageKind::TypedDataV4(TypedDataReview {
+                domain_name: Some("Permit2".into()),
+                domain_version: Some("1".into()),
+                domain_chain_id: Some(chain_id),
+                verifying_contract: Some(Address::repeat_byte(0x22)),
+                primary_type: "PermitSingle".into(),
+                digest: B256::repeat_byte(0x42),
+                risks: vec![MessageSigningRisk::PermitLike],
+            }),
+        }
+    }
+
+    #[test]
+    fn personal_sign_always_needs_approval() {
+        assert_eq!(
+            evaluate_message(&personal_message(), &base_policy(), wallet()),
+            Decision::NeedsApproval {
+                request_id: RequestId::ZERO
+            }
+        );
+    }
+
+    #[test]
+    fn typed_data_chainid_mismatch_denies() {
+        assert_eq!(
+            evaluate_message(&typed_message(1), &base_policy(), wallet()),
+            Decision::Deny {
+                reason: deny_reasons::CHAINID_MISMATCH.into()
+            }
+        );
+    }
+
+    #[test]
+    fn eth_sign_is_refused() {
+        let message = SignMessage {
+            chain_id: CHAIN_ID,
+            origin: "https://example.test".into(),
+            kind: SignMessageKind::EthSign {
+                digest: B256::repeat_byte(0x33),
+            },
+        };
+        assert_eq!(
+            evaluate_message(&message, &base_policy(), wallet()),
+            Decision::Deny {
+                reason: deny_reasons::ETH_SIGN_REFUSED.into()
+            }
+        );
+    }
+
+    #[test]
+    fn eip7702_delegation_refused() {
+        let message = SignMessage {
+            chain_id: CHAIN_ID,
+            origin: "https://example.test".into(),
+            kind: SignMessageKind::Authorization7702 {
+                delegate: Address::repeat_byte(0x44),
+                nonce: 7,
+            },
+        };
+        assert_eq!(
+            evaluate_message(&message, &base_policy(), wallet()),
+            Decision::Deny {
+                reason: deny_reasons::DELEGATION_REFUSED.into()
             }
         );
     }
