@@ -29,23 +29,16 @@ all-features = true
 # strict (not assume "a security yank always carries a RUSTSEC advisory") because a security-motivated
 # yank can PRECEDE its advisory. Add to `ignore` ONLY with a written justification. (#82)
 #
-# Every entry below is a TRANSITIVE advisory with NO in-tree fix; removing them is tracked in #40.
+# Every entry below is a TRANSITIVE advisory with NO in-tree fix; removing them is tracked in #40/#51.
 # Re-evaluate the whole list on each `just bump-gpui` / Helios / alloy bump — drop any that resolve.
 yanked = "deny"
 ignore = [
-    # ── rustls-webpki 0.101 — TLS path-validation advisories, reachable only through the Helios
-    #    light client's jsonrpsee 0.19 → rustls 0.21 stack. rustls 0.21 caps webpki at 0.101, so
-    #    there is no in-tree upgrade; the fix is bumping Helios → newer jsonrpsee/rustls (#40).
-    #    Mitigating: custody never rests on TLS — Helios proof-checks every read against the sync
-    #    committee, signing is local, and a signed tx is self-authenticating.
-    { id = "RUSTSEC-2026-0098", reason = "rustls-webpki URI name-constraint bypass; transitive via Helios/jsonrpsee, no in-tree fix; tracked in #40" },
-    { id = "RUSTSEC-2026-0099", reason = "rustls-webpki wildcard-cert name-constraint bypass; transitive via Helios/jsonrpsee, no in-tree fix; tracked in #40" },
-    { id = "RUSTSEC-2026-0104", reason = "rustls-webpki CRL-parsing panic; we do not use CRLs (not reachable); transitive via Helios/jsonrpsee; tracked in #40" },
     # ── hickory DNS — DoS advisories, reachable only on hostile DNS responses during RPC name
-    #    resolution. CPU-exhaustion (liveness), not a custody risk. Transitive via reqwest; the fix
-    #    rides the same Helios/reqwest modernization (#40).
-    { id = "RUSTSEC-2026-0118", reason = "hickory NSEC3 unbounded-loop DoS; transitive via reqwest resolver; liveness-only; tracked in #40" },
-    { id = "RUSTSEC-2026-0119", reason = "hickory O(n^2) name-compression CPU-exhaustion DoS; transitive via reqwest resolver; liveness-only; tracked in #40" },
+    #    resolution. CPU-exhaustion (liveness), not a custody risk. Transitive via Helios'
+    #    reqwest resolver; the remaining fix needs upstream Helios to gate or update
+    #    `reqwest/hickory-dns` (#51).
+    { id = "RUSTSEC-2026-0118", reason = "hickory NSEC3 unbounded-loop DoS; transitive via Helios reqwest resolver; liveness-only; tracked in #51" },
+    { id = "RUSTSEC-2026-0119", reason = "hickory O(n^2) name-compression CPU-exhaustion DoS; transitive via Helios reqwest resolver; liveness-only; tracked in #51" },
     # ── Unmaintained crates. All transitive with no maintained drop-in in the pinned tree; the
     #    proc-macro / build-time ones never ship in the runtime binary → zero runtime attack surface.
     { id = "RUSTSEC-2024-0370", reason = "proc-macro-error unmaintained; build-time only (GTK tray stack), no runtime surface" },
