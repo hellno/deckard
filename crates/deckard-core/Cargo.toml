@@ -57,12 +57,13 @@ reqwest = { version = "0.12", default-features = false, features = ["json"], opt
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 
-# Embedded Helios light client (verified localhost JSON-RPC server). Git-only, tag
-# "0.11.1" (crates.io is stale at 0.1.0); the umbrella `helios` crate pulls a yanked
-# core2, so depend on `helios-ethereum` directly. Heavy (revm/bls12_381) — gated
-# behind `verified-reads`. The `ethereum_hashing` patch it needs is at the workspace
-# root (a git-dep can't carry its own `[patch]`).
-helios-ethereum = { git = "https://github.com/a16z/helios", tag = "0.11.1", optional = true }
+# Embedded Helios light client (verified localhost JSON-RPC server). Git-only,
+# pinned past 0.11.1 because a16z/helios#804 disables unused jsonrpsee client
+# transports that otherwise leak into downstream security reports. The umbrella
+# `helios` crate pulls a yanked core2, so depend on `helios-ethereum` directly.
+# Heavy (revm/bls12_381) — gated behind `verified-reads`. The `ethereum_hashing`
+# patch it needs is at the workspace root (a git-dep can't carry its own `[patch]`).
+helios-ethereum = { git = "https://github.com/a16z/helios", rev = "43a8c9f3cdda41a6f383c4db41d9a83f102638b1", optional = true }
 
 # Kohaku's pure-Rust Railgun client — the heavy ZK crate. Gated behind `shield` (DEFAULT
 # ON). We use ONLY the key-less `ShieldBuilder` (no sync, no proving, no key), but the crate
