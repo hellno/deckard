@@ -32,6 +32,11 @@ before you're done. (For UI work you must build the app: `just check`.)
 4. No new or changed dependencies (`Cargo.toml` / `Cargo.lock`) unless explicitly approved
    (the git GPUI stack is bumped only via `just bump-gpui` — never hand-edit those pins)
 
+macOS test note: if signer-daemon integration tests fail before the daemon binds with
+`path must be shorter than SUN_LEN`, rerun with a shorter temp root:
+`TMPDIR=/tmp cargo test --workspace`. The default `/var/folders/...` path can make Unix socket paths
+too long.
+
 ## Branch hygiene — required before edits
 
 Before changing files, always establish the current branch and its source-of-truth status:

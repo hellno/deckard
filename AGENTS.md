@@ -34,6 +34,10 @@ artifacts for non-trivial implementation, debugging, security, CI, or UI work.
 - Lint: `just check` — clippy `-D warnings` on the whole workspace + the app's `--features tray` config.
 - Format: `just fmt` (`cargo fmt`); CI gates `cargo fmt --all --check`.
 - Test: `cargo test --workspace`.
+  - macOS note: if signer-daemon integration tests fail before the daemon binds with
+    `path must be shorter than SUN_LEN`, rerun with a shorter temp root:
+    `TMPDIR=/tmp cargo test --workspace`. The default `/var/folders/...` path can make Unix socket
+    paths too long.
 - Bump the git GPUI stack: `just bump-gpui` (the ONLY way to change those pins).
 
 ## Branch hygiene — required before edits
