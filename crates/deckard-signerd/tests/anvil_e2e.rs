@@ -94,7 +94,12 @@ async fn over_cap_approve_then_execute_broadcasts() {
 
     let value: u128 = PER_TX_CAP + 10_000_000_000_000_000; // 0.06 ETH > cap
     let intent = send(recipient, value);
-    let id = match client.propose(&intent, ProposalOrigin::App).await.unwrap() {
+    // Agent origin: this seam test asserts the agent-origin over-cap → approve → execute path.
+    let id = match client
+        .propose(&intent, ProposalOrigin::Agent)
+        .await
+        .unwrap()
+    {
         Decision::NeedsApproval { request_id } => request_id,
         other => panic!("expected NeedsApproval, got {other:?}"),
     };

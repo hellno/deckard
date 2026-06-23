@@ -52,6 +52,8 @@ pub enum SignerRequest {
     Execute { request_id: RequestId },
     /// Poll for the native-card result → [`ApprovalStatus`].
     Status { request_id: RequestId },
+    /// Rich per-request status for the agent poll loop (`deckard_status`). Read-only, no signing.
+    StatusView { request_id: RequestId },
     /// STOP: zeroize the key, lock the daemon, drop in-flight approvals → `Ack`.
     RevokeAll,
     /// Read-only snapshot for the agent → [`Policy`].
@@ -94,6 +96,8 @@ pub enum SignerResponse {
     Decision(Decision),
     Execute(ExecuteResult),
     Status(ApprovalStatus),
+    /// Reply to `StatusView`.
+    StatusView(StatusView),
     /// Reply to `Lock`, `Resolve`, and `RevokeAll`.
     Ack,
     Policy(Policy),
@@ -192,6 +196,24 @@ pub struct PendingRecord {
     pub remaining_ms: u64,
     /// Who proposed this — drives the agent band + Activity two-actor chain.
     pub origin: ProposalOrigin,
+}
+
+/// Rich per-request status for the agent's poll loop (the `deckard_status` MCP tool).
+/// Assembled by the daemon from the request's pending record. Additive — leaves
+/// [`ApprovalStatus`] and `SignerRequest::Status` untouched (#31 additive-evolution rule),
+/// so the existing app/daemon status path is unchanged.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StatusView {
+    pub request_id: RequestId,
+    /// Approval state — `Denied { reason }` carries the deny tag the agent needs to recover
+    /// (user_denied / revoked / unknown_request / expired / ...). NEVER collapse the reason.
+    pub status: ApprovalStatus,
+    /// Millis until the approval TTL elapses (Pending/Allowed); `0` when terminal or past TTL.
+    pub remaining_ms: u64,
+    /// `Some` once the request was signed + broadcast.
+    pub tx_hash: Option<B256>,
+    /// Lifecycle position. For an unknown request id: `Expired`.
+    pub lifecycle: ActivityLifecycle,
 }
 
 /// The wire view of a pending record's payload.

@@ -1,13 +1,21 @@
 //! The mcp.v0.1 acceptance suite — spec `docs/build/30-mcp-shape.md` T1–T4 + T6–T9, as
-//! amended by the launch plan: T1 asserts exactly the **6** launch tools (raw `propose` and
-//! `simulate` cut); T3/T4 run through an over-cap `shield`; T5 (simulate) dropped; T9 is a
+//! amended by the launch plan: T1 asserts exactly the **7** launch tools (raw `propose` and
+//! `simulate` cut; `deckard_status` added for the agent poll loop); T3/T4 run through an
+//! over-cap `shield`; T5 (simulate) dropped; T9 is a
 //! structural allowlist walk over the FULL transcript plus a seeded canary; T7 also covers
 //! secret-bearing env. Mock daemon (shared `evaluate`, deterministic tx hash), real
 //! `deckard-mcp --mcp` child over real stdio JSON-RPC, hard timeouts on every read.
 
 mod common;
 
+use alloy_primitives::B256;
 use common::*;
+
+/// Parse the 0x-hex request id a `shield`/`status` response carries back into the wire type,
+/// so a test can drive the shared mock state (approve/deny) the way the app would.
+fn request_id_from_hex(hex: &str) -> B256 {
+    hex.parse().expect("request_id is 0x-hex")
+}
 
 /// One fully-wired session: temp dirs, mock daemon, spawned MCP child.
 async fn session(
@@ -27,10 +35,10 @@ async fn session(
     (dir, state, child)
 }
 
-/// T1 — `list_tools` is exactly the 6-tool launch profile, every description non-empty and
+/// T1 — `list_tools` is exactly the 7-tool launch profile, every description non-empty and
 /// keyword-bearing (the descriptions ARE the agent's documentation).
 #[tokio::test]
-async fn t1_list_tools_is_the_six_tool_launch_profile() {
+async fn t1_list_tools_is_the_seven_tool_launch_profile() {
     let (_dir, _state, mut child) = session(&[]).await;
     let tools = child.list_tools().await;
 
@@ -46,10 +54,11 @@ async fn t1_list_tools_is_the_six_tool_launch_profile() {
             "deckard_policy_get",
             "deckard_revoke_all",
             "deckard_shield",
+            "deckard_status",
             "deckard_wallet_address",
             "deckard_wallet_balance",
         ],
-        "the launch surface is FINAL at these 6 deckard_-prefixed tools"
+        "the launch surface is FINAL at these 7 deckard_-prefixed tools"
     );
 
     // Keyword-bearing descriptions: units, preconditions, sequencing, safety notes.
@@ -72,6 +81,10 @@ async fn t1_list_tools_is_the_six_tool_launch_profile() {
         (
             "deckard_execute",
             &["tx_hash", "do NOT retry", "already_executed"],
+        ),
+        (
+            "deckard_status",
+            &["pending", "allowed", "deny_reason", "deckard_execute"],
         ),
         ("deckard_revoke_all", &["STOP", "unlock", "Irreversible"]),
     ];
@@ -452,4 +465,260 @@ async fn t9_seeded_canary_is_caught_by_the_scanner() {
     );
 
     child.shutdown().await;
+}
+
+/// deckard_status drives the agent's full approval loop: an over-cap shield is
+/// needs_approval → status reports `pending` (no tx yet) → a human approves (driven on the
+/// shared mock state) → status reports `allowed` → deckard_execute broadcasts → status
+/// reports `executed` with the tx hash.
+#[tokio::test]
+async fn deckard_status_drives_the_pending_to_allowed_to_execute_loop() {
+    let (_dir, state, mut child) = session(&[]).await;
+
+    // 0.2 ETH > the 0.05 per-tx cap → needs_approval.
+    let (err, text, _) = child
+        .call_tool("deckard_shield", serde_json::json!({ "amount_eth": "0.2" }))
+        .await;
+    assert!(!err, "over-cap shield is a decision, not an error: {text}");
+    let shield: serde_json::Value = serde_json::from_str(&text).expect("shield JSON");
+    assert_eq!(shield["decision"], "needs_approval");
+    let request_id = shield["request_id"]
+        .as_str()
+        .expect("request_id")
+        .to_string();
+
+    // Poll #1: pending — no tx hash, the lifecycle is still proposed, with a poll hint.
+    let (err, text, _) = child
+        .call_tool(
+            "deckard_status",
+            serde_json::json!({ "request_id": &request_id }),
+        )
+        .await;
+    assert!(!err, "status is read-only and must succeed: {text}");
+    let v: serde_json::Value = serde_json::from_str(&text).expect("status JSON");
+    assert_eq!(v["status"], "pending");
+    assert_eq!(v["request_id"], request_id);
+    assert!(v["tx_hash"].is_null(), "no tx before execute");
+    assert_eq!(v["lifecycle"], "proposed");
+    assert!(v["deny_reason"].is_null(), "pending carries no deny reason");
+    assert!(
+        v["remaining_ms"].as_u64().expect("remaining_ms") > 0,
+        "a live pending card has time left"
+    );
+
+    // The human approves in the app (the sidecar can't self-approve) — drive the shared mock.
+    state
+        .lock()
+        .expect("state lock")
+        .resolve(request_id_from_hex(&request_id), true);
+
+    // Poll #2: allowed — the next-step now points at deckard_execute.
+    let (err, text, _) = child
+        .call_tool(
+            "deckard_status",
+            serde_json::json!({ "request_id": &request_id }),
+        )
+        .await;
+    assert!(!err, "status after approval must succeed: {text}");
+    let v: serde_json::Value = serde_json::from_str(&text).expect("status JSON");
+    assert_eq!(v["status"], "allowed");
+    assert!(v["next"]
+        .as_str()
+        .expect("next")
+        .contains("deckard_execute"));
+
+    // Now execute broadcasts.
+    let (err, text, _) = child
+        .call_tool(
+            "deckard_execute",
+            serde_json::json!({ "request_id": &request_id }),
+        )
+        .await;
+    assert!(
+        !err,
+        "execute on an approved request must broadcast: {text}"
+    );
+    let v: serde_json::Value = serde_json::from_str(&text).expect("execute JSON");
+    assert_eq!(v["status"], "broadcast");
+
+    // Poll #3: executed — the tx hash is now surfaced, lifecycle is executed.
+    let (err, text, _) = child
+        .call_tool(
+            "deckard_status",
+            serde_json::json!({ "request_id": &request_id }),
+        )
+        .await;
+    assert!(!err, "status after execute must succeed: {text}");
+    let v: serde_json::Value = serde_json::from_str(&text).expect("status JSON");
+    assert_eq!(v["tx_hash"], format!("{:#x}", mock_tx_hash()));
+    assert_eq!(v["lifecycle"], "executed");
+
+    // The whole loop stayed secret-free.
+    let findings = scan_transcript(&child.transcript, &[]);
+    assert!(findings.is_empty(), "status loop not clean: {findings:?}");
+
+    child.shutdown().await;
+}
+
+/// The deny branch: an over-cap shield that a human DENIES surfaces through deckard_status as
+/// `denied` with the deny reason preserved (never collapsed) and a terminal next-step.
+#[tokio::test]
+async fn deckard_status_surfaces_a_human_denial_with_its_reason() {
+    let (_dir, state, mut child) = session(&[]).await;
+
+    let (_, text, _) = child
+        .call_tool("deckard_shield", serde_json::json!({ "amount_eth": "0.2" }))
+        .await;
+    let shield: serde_json::Value = serde_json::from_str(&text).expect("shield JSON");
+    let request_id = shield["request_id"]
+        .as_str()
+        .expect("request_id")
+        .to_string();
+
+    // The human denies in the app.
+    state
+        .lock()
+        .expect("state lock")
+        .resolve(request_id_from_hex(&request_id), false);
+
+    let (err, text, _) = child
+        .call_tool(
+            "deckard_status",
+            serde_json::json!({ "request_id": &request_id }),
+        )
+        .await;
+    assert!(
+        !err,
+        "a denial is a read result, not a transport error: {text}"
+    );
+    let v: serde_json::Value = serde_json::from_str(&text).expect("status JSON");
+    assert_eq!(v["status"], "denied");
+    assert_eq!(
+        v["deny_reason"], "user_denied",
+        "the deny reason MUST be preserved, never collapsed"
+    );
+    assert_eq!(v["lifecycle"], "decided_rejected");
+    assert!(v["tx_hash"].is_null(), "a denied request never broadcasts");
+    assert!(
+        v["next"].as_str().expect("next").contains("do not retry"),
+        "a terminal denial must say not to retry: {text}"
+    );
+
+    child.shutdown().await;
+}
+
+/// The expiry branch: an over-cap shield whose approval window lapses (no human approves in time)
+/// surfaces through deckard_status as `expired`, terminal, with `remaining_ms` 0 and no tx_hash.
+/// This is the branch whose absence let the runner wedge — its status string must be distinct and
+/// machine-checkable, not buried in prose.
+#[tokio::test]
+async fn deckard_status_reports_expiry_as_terminal() {
+    let (_dir, state, mut child) = session(&[]).await;
+
+    let (_, text, _) = child
+        .call_tool("deckard_shield", serde_json::json!({ "amount_eth": "0.2" }))
+        .await;
+    let shield: serde_json::Value = serde_json::from_str(&text).expect("shield JSON");
+    let request_id = shield["request_id"]
+        .as_str()
+        .expect("request_id")
+        .to_string();
+
+    // The approval window lapses before anyone approves.
+    state
+        .lock()
+        .expect("state lock")
+        .expire(request_id_from_hex(&request_id));
+
+    let (err, text, _) = child
+        .call_tool(
+            "deckard_status",
+            serde_json::json!({ "request_id": &request_id }),
+        )
+        .await;
+    assert!(
+        !err,
+        "an expiry is a read result, not a transport error: {text}"
+    );
+    let v: serde_json::Value = serde_json::from_str(&text).expect("status JSON");
+    assert_eq!(
+        v["status"], "expired",
+        "expiry MUST surface as the distinct `expired` status the runner branches on (not prose)"
+    );
+    assert_eq!(v["lifecycle"], "expired");
+    assert_eq!(v["remaining_ms"], 0, "a lapsed window has no TTL left");
+    assert!(
+        v["tx_hash"].is_null(),
+        "an expired request never broadcasts"
+    );
+    assert!(
+        v["deny_reason"].is_null(),
+        "expiry is not a denial — no deny reason"
+    );
+
+    child.shutdown().await;
+}
+
+/// `install --client claude-code --demo` prints a ready-to-paste `claude mcp add` command
+/// WITH the demo env (or it would register the wrong daemon) and the `.mcp.json` snippet,
+/// and writes nothing.
+#[tokio::test]
+async fn install_claude_code_demo_prints_mcp_add_with_env() {
+    let out = tokio::time::timeout(
+        IO_TIMEOUT,
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_deckard-mcp"))
+            .args(["install", "--client", "claude-code", "--demo"])
+            .env_clear()
+            .env("HOME", "/home/agent")
+            .output(),
+    )
+    .await
+    .expect("HARD TIMEOUT: install must be instant")
+    .expect("run deckard-mcp install");
+    assert!(out.status.success(), "install claude-code must succeed");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    // The one-liner registration.
+    assert!(
+        stdout.contains("claude mcp add deckard"),
+        "missing the claude mcp add command: {stdout}"
+    );
+    // The CRITICAL demo env — without it the wrong daemon is registered.
+    assert!(
+        stdout.contains("-e DECKARD_SOCKET_PATH="),
+        "the demo socket env must ride along: {stdout}"
+    );
+    assert!(
+        stdout.contains("-e DECKARD_CHAIN_ID=11155111"),
+        "the demo chain id env must ride along: {stdout}"
+    );
+    // The .mcp.json snippet (the same entry shape) is also offered.
+    assert!(
+        stdout.contains("\"mcpServers\"") && stdout.contains("\"deckard\""),
+        "the .mcp.json snippet must be printed too: {stdout}"
+    );
+}
+
+/// `install --client claude-code` (no --demo) prints a plain `claude mcp add` with no env
+/// flags, and still writes nothing.
+#[tokio::test]
+async fn install_claude_code_plain_has_no_env_flags() {
+    let out = tokio::time::timeout(
+        IO_TIMEOUT,
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_deckard-mcp"))
+            .args(["install", "--client", "claude-code"])
+            .env_clear()
+            .env("HOME", "/home/agent")
+            .output(),
+    )
+    .await
+    .expect("HARD TIMEOUT: install must be instant")
+    .expect("run deckard-mcp install");
+    assert!(out.status.success(), "install claude-code must succeed");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("claude mcp add deckard"), "{stdout}");
+    assert!(
+        !stdout.contains("-e DECKARD_"),
+        "a plain (non-demo) registration carries no env flags: {stdout}"
+    );
 }

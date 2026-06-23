@@ -2,8 +2,8 @@
 //!
 //! Deckard's **key-less agent surface**: one binary that is both a CLI and (with `--mcp`)
 //! an MCP stdio server — the `mcp.v0.1` launch profile of `docs/build/30-mcp-shape.md`
-//! (amended at launch: exactly 6 `deckard_`-prefixed tools; raw `propose` and `simulate`
-//! cut).
+//! (amended at launch: 6 `deckard_`-prefixed tools, raw `propose` and `simulate` cut; later
+//! grown to 7 with the read-only `deckard_status` approval-poll tool).
 //!
 //! ## Security model
 //! - **No key material, ever.** This process holds no seed, no spending key, no passphrase;

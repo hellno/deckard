@@ -2,20 +2,32 @@
 //! the MCP stdio server (`--mcp`) or the CLI command tree — both thin shells over the same
 //! key-less [`deckard_mcp::Sidecar`], so nothing is reachable only via Claude.
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use deckard_mcp::{install, secrets, server, Sidecar};
+
+/// Which MCP client the `install` command targets.
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+enum InstallClient {
+    /// Claude Desktop: print/merge `claude_desktop_config.json` (the historical default).
+    #[default]
+    ClaudeDesktop,
+    /// Claude Code: print a ready-to-paste `claude mcp add` command + a `.mcp.json` snippet
+    /// (never writes a file).
+    ClaudeCode,
+}
 
 #[derive(Parser)]
 #[command(
     name = "deckard-mcp",
     version,
-    about = "Deckard's key-less agent surface: CLI + MCP stdio server (mcp.v0.1, 6 tools). \
+    about = "Deckard's key-less agent surface: CLI + MCP stdio server (mcp.v0.1, 7 tools). \
              Holds no keys — every write is proposed to the local deckard-signerd, which \
              enforces policy and signs.",
     after_help = "Env: DECKARD_SOCKET_PATH (daemon socket), DECKARD_CHAIN_ID (default 1), \
                   DECKARD_CONFIG_DIR (sharpens 'locked' vs 'no wallet' errors). \
-                  `install --demo` prints the demo block for Claude Desktop. \
-                  Secrets are never accepted on this command line."
+                  `install --demo` prints the demo registration; `--client claude-code` \
+                  prints a `claude mcp add` command + a .mcp.json snippet (the default \
+                  client is Claude Desktop). Secrets are never accepted on this command line."
 )]
 struct Cli {
     /// Run as an MCP stdio server (the Claude Desktop registration target).
@@ -47,18 +59,29 @@ enum Command {
         /// The 0x-hex request id returned by `shield`.
         request_id: String,
     },
+    /// Poll the approval state of a request id (read-only): pending / allowed / denied /
+    /// expired, plus the deny reason, remaining ms, tx hash, and lifecycle.
+    Status {
+        /// The 0x-hex request id returned by `shield`.
+        request_id: String,
+    },
     /// STOP — the panic brake: zeroize the key, lock the daemon, deny everything
     /// in flight. Re-arm by unlocking in the Deckard app.
     Stop,
-    /// Print (or, with --write + confirmation, write) the Claude Desktop registration.
+    /// Print (or, with --write + confirmation, write) the MCP registration for a client.
     Install {
         /// Emit the demo env block (isolated config dir + socket, Sepolia fork chain id,
         /// local anvil RPC) instead of targeting the everyday daemon.
         #[arg(long)]
         demo: bool,
         /// Merge the entry into claude_desktop_config.json (asks for confirmation).
+        /// Only applies to the claude-desktop client; claude-code only ever prints.
         #[arg(long)]
         write: bool,
+        /// Which MCP client to target: claude-desktop (default, print/merge its JSON config)
+        /// or claude-code (print a `claude mcp add` command + a `.mcp.json` snippet).
+        #[arg(long, value_enum, default_value_t = InstallClient::default())]
+        client: InstallClient,
     },
 }
 
@@ -96,10 +119,20 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     };
 
     // Install needs no daemon; everything else talks through the sidecar.
-    if let Command::Install { demo, write } = command {
-        let stdin = std::io::stdin();
-        let mut lock = stdin.lock();
-        return install::run(demo, write, &mut lock);
+    if let Command::Install {
+        demo,
+        write,
+        client,
+    } = command
+    {
+        return match client {
+            InstallClient::ClaudeDesktop => {
+                let stdin = std::io::stdin();
+                let mut lock = stdin.lock();
+                install::run(demo, write, &mut lock)
+            }
+            InstallClient::ClaudeCode => install::run_claude_code(demo),
+        };
     }
 
     let sidecar = Sidecar::from_env()?;
@@ -109,6 +142,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Policy => sidecar.policy_get().await,
         Command::Shield { amount_eth } => sidecar.shield(amount_eth).await,
         Command::Execute { request_id } => sidecar.execute(request_id).await,
+        Command::Status { request_id } => sidecar.status(request_id).await,
         Command::Stop => sidecar.revoke_all().await,
         Command::Install { .. } => unreachable!("handled above"),
     };

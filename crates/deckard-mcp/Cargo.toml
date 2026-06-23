@@ -3,7 +3,7 @@ name = "deckard-mcp"
 version = "0.0.1-alpha"
 edition = "2021"
 license = "AGPL-3.0-or-later"
-description = "Deckard's key-less agent surface: one binary that is both a CLI and an MCP stdio server (mcp.v0.1 — 6 tools). It holds no key material; every write is an Intent proposed to the process-isolated deckard-signerd, which enforces policy and signs."
+description = "Deckard's key-less agent surface: one binary that is both a CLI and an MCP stdio server (mcp.v0.1 — 7 tools). It holds no key material; every write is an Intent proposed to the process-isolated deckard-signerd, which enforces policy and signs."
 
 # lib + bin like signerd: the lib holds the tool/CLI logic (unit-testable, reused by the
 # acceptance tests); the bin is the entry point Claude Desktop registers.

@@ -1,5 +1,5 @@
 //! The key-less MCP/agent sidecar: shared wallet-client access to the daemon socket,
-//! the expected chain, and the six agent operations. **No key material ever enters
+//! the expected chain, and the seven agent operations. **No key material ever enters
 //! this process** — writes are `Intent`s proposed to `deckard-signerd`, which enforces
 //! policy and signs. The one secret this sidecar transiently handles is the Railgun
 //! *viewing* key (it rides alongside the wallet's own 0zk address in `RailgunViewGrant`);
@@ -12,8 +12,8 @@ use serde_json::json;
 use zeroize::Zeroizing;
 
 use deckard_contract::{
-    ApprovalMode, Decision, ExecuteResult, Policy, ProposalOrigin, ReadStatus, SignerRequest,
-    SignerResponse,
+    ActivityLifecycle, ApprovalMode, ApprovalStatus, Decision, ExecuteResult, Policy,
+    ProposalOrigin, ReadStatus, SignerRequest, SignerResponse, StatusView,
 };
 use deckard_wallet_client::{failure, unexpected, Failure, SignerClient, WalletClient};
 
@@ -216,13 +216,7 @@ impl Sidecar {
 
     /// `deckard_execute` / `deckard-mcp execute <request_id>`.
     pub async fn execute(&self, request_id_hex: &str) -> OpResult {
-        let request_id: B256 = request_id_hex.trim().parse().map_err(|_| {
-            Failure::new(
-                format!("could not parse request_id {request_id_hex:?}"),
-                "a request_id is the 32-byte 0x-hex string returned by deckard_shield",
-                "pass the request_id exactly as returned",
-            )
-        })?;
+        let request_id = parse_request_id(request_id_hex)?;
         self.ensure_chain().await?;
         // A transport error HERE is ambiguous (the broadcast may have happened) — map it
         // to the do-NOT-retry catalog entry, not the generic socket error.
@@ -246,6 +240,25 @@ impl Sidecar {
         }
     }
 
+    /// `deckard_status` / `deckard-mcp status <request_id>`. Read-only poll of an approval's
+    /// outcome — the loop an agent runs after an over-cap `shield` returns `needs_approval`:
+    /// poll until `Allowed` (then `deckard_execute`) or a terminal `Denied`/`Expired`. Signs
+    /// nothing, approves nothing, and never drops the deny reason.
+    pub async fn status(&self, request_id_hex: &str) -> OpResult {
+        let request_id = parse_request_id(request_id_hex)?;
+        self.ensure_chain().await?;
+        match self
+            .request(&SignerRequest::StatusView { request_id })
+            .await?
+        {
+            SignerResponse::StatusView(view) => Ok(status_view_json(&view)),
+            SignerResponse::Decision(Decision::Deny { reason }) => {
+                Err(failure::from_deny_reason(&reason, self.config_dir()))
+            }
+            other => Err(unexpected("StatusView", &other)),
+        }
+    }
+
     /// `deckard_revoke_all` / `deckard-mcp stop` — STOP, the panic brake.
     pub async fn revoke_all(&self) -> OpResult {
         match self.request(&SignerRequest::RevokeAll).await? {
@@ -257,6 +270,71 @@ impl Sidecar {
                            in the Deckard app to re-arm",
             })),
             other => Err(unexpected("RevokeAll", &other)),
+        }
+    }
+}
+
+/// Parse a 32-byte 0x-hex request id, mapping a bad/short value to the same clear
+/// client-side error for every caller (`execute`, `status`).
+fn parse_request_id(request_id_hex: &str) -> Result<B256, Failure> {
+    request_id_hex.trim().parse().map_err(|_| {
+        Failure::new(
+            format!("could not parse request_id {request_id_hex:?}"),
+            "a request_id is the 32-byte 0x-hex string returned by deckard_shield",
+            "pass the request_id exactly as returned",
+        )
+    })
+}
+
+/// Render a [`StatusView`] for the agent's poll loop. The approval state is a string AND,
+/// when `Denied`, the deny reason is preserved (never collapsed); plus `remaining_ms`, the
+/// broadcast `tx_hash` (0x-hex string or null), and the `lifecycle` as a string.
+fn status_view_json(view: &StatusView) -> serde_json::Value {
+    let (status, deny_reason) = match &view.status {
+        ApprovalStatus::Pending => ("pending", None),
+        ApprovalStatus::Allowed => ("allowed", None),
+        ApprovalStatus::Denied { reason } => ("denied", Some(reason.as_str())),
+        ApprovalStatus::Expired => ("expired", None),
+    };
+    json!({
+        "request_id": format!("{:#x}", view.request_id),
+        "status": status,
+        "deny_reason": deny_reason,
+        "remaining_ms": view.remaining_ms,
+        "tx_hash": view.tx_hash.map(|h| format!("{h:#x}")),
+        "lifecycle": activity_lifecycle_label(&view.lifecycle),
+        "next": status_next_step(&view.status),
+    })
+}
+
+/// The lifecycle position as a stable string the agent can branch on.
+fn activity_lifecycle_label(lifecycle: &ActivityLifecycle) -> &'static str {
+    match lifecycle {
+        ActivityLifecycle::Proposed => "proposed",
+        ActivityLifecycle::Decided { approved: true } => "decided_approved",
+        ActivityLifecycle::Decided { approved: false } => "decided_rejected",
+        ActivityLifecycle::Expired => "expired",
+        ActivityLifecycle::Executed => "executed",
+    }
+}
+
+/// The actionable next step for each poll outcome (mirrors the catalog's recovery copy).
+fn status_next_step(status: &ApprovalStatus) -> &'static str {
+    match status {
+        ApprovalStatus::Pending => {
+            "waiting on a human in the Deckard app's Approvals queue (⌘⇧A) — poll \
+             deckard_status again, or lower the amount under the policy per-tx cap"
+        }
+        ApprovalStatus::Allowed => {
+            "approved — call deckard_execute with this request_id to sign + broadcast"
+        }
+        ApprovalStatus::Denied { .. } => {
+            "terminal: a human denied or the request was revoked — do not retry this \
+             request_id; propose a different action only if the human asks"
+        }
+        ApprovalStatus::Expired => {
+            "the approval window lapsed — re-run the flow from deckard_shield for a fresh \
+             request_id"
         }
     }
 }

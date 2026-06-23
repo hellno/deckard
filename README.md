@@ -142,10 +142,10 @@ cargo build -p deckard-mcp               # one-time: builds ./target/debug/decka
 - The **shield** hero (auto-private via [Railgun](https://railgun.org/)) — **wired and black-box
   tested on an anvil fork.**
 - The **agent surface** (`deckard-mcp`): a key-less CLI **and** MCP stdio sidecar — the
-  `mcp.v0.1` **6-tool** profile (`deckard_wallet_address`, `deckard_wallet_balance`,
-  `deckard_policy_get`, `deckard_shield`, `deckard_execute`, `deckard_revoke_all`). Deliberately
-  **no raw `propose` and no `resolve`**, so an injected agent can't submit an arbitrary intent or
-  approve its own request.
+  `mcp.v0.1` **7-tool** profile (`deckard_wallet_address`, `deckard_wallet_balance`,
+  `deckard_policy_get`, `deckard_shield`, `deckard_status`, `deckard_execute`,
+  `deckard_revoke_all`). Deliberately **no raw `propose` and no `resolve`**, so an injected agent
+  can't submit an arbitrary intent or approve its own request.
 - The **demo loop** (`just demo` / `demo-fund` / `demo-check`) on a local Sepolia fork — see
   "Start here" above.
 
@@ -229,8 +229,8 @@ UI work.
 
 ## Where to read more
 
-- [`docs/build/31-agent-quickstart.md`](docs/build/31-agent-quickstart.md) — the canonical agent-facing quickstart: install one-liner, the 6 tools, policy fields, every deny reason with its fix, demo constants.
-- [`docs/build/30-mcp-shape.md`](docs/build/30-mcp-shape.md) — the MCP / daemon-socket wire contract and the `mcp.v0.1` 6-tool profile.
+- [`docs/build/31-agent-quickstart.md`](docs/build/31-agent-quickstart.md) — the canonical agent-facing quickstart: install one-liner, the 7 tools, policy fields, every deny reason with its fix, demo constants.
+- [`docs/build/30-mcp-shape.md`](docs/build/30-mcp-shape.md) — the MCP / daemon-socket wire contract and the `mcp.v0.1` 7-tool profile.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md#demo--local-chain-dev-loop) — the demo / local-chain dev loop in full, with the `DECKARD_*` env-var table.
 - [`THREAT-MODEL.md`](THREAT-MODEL.md) — what the agent surface defends against, what it does not, and the residual risks.
 - [`SECURITY.md`](SECURITY.md) — the at-rest keystore model, honest caveats, and how to report a vulnerability privately.

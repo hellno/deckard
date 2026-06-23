@@ -21,9 +21,9 @@ use tokio::net::UnixListener;
 use tokio::process::{Child, ChildStdin, Command};
 
 use deckard_contract::{
-    evaluate, ApprovalMode, ApprovalStatus, Decision, ExecuteResult, Intent, Policy,
-    RailgunViewGrant, ReadStatus, RequestId, SignOrderResult, SignerRequest, SignerResponse,
-    UnlockOutcome,
+    evaluate, ActivityLifecycle, ApprovalMode, ApprovalStatus, Decision, ExecuteResult, Intent,
+    Policy, RailgunViewGrant, ReadStatus, RequestId, SignOrderResult, SignerRequest,
+    SignerResponse, StatusView, UnlockOutcome,
 };
 use deckard_signerd::{frame, request_id_for};
 
@@ -184,6 +184,37 @@ impl MockState {
                     },
                 })
             }
+            SignerRequest::StatusView { request_id } => {
+                SignerResponse::StatusView(match self.requests.get(&request_id) {
+                    Some(r) => StatusView {
+                        request_id,
+                        status: r.status.clone(),
+                        // A snapshot: a live Pending/Allowed card has time left; terminal
+                        // states report 0 (mirrors the daemon's contract).
+                        remaining_ms: match r.status {
+                            ApprovalStatus::Pending | ApprovalStatus::Allowed => 60_000,
+                            _ => 0,
+                        },
+                        tx_hash: if r.broadcast {
+                            Some(mock_tx_hash())
+                        } else {
+                            None
+                        },
+                        lifecycle: lifecycle_for(r),
+                    },
+                    // An unknown request id is Expired in the lifecycle and carries the
+                    // unknown_request deny tag (matches the daemon's `StatusView` contract).
+                    None => StatusView {
+                        request_id,
+                        status: ApprovalStatus::Denied {
+                            reason: "unknown_request".into(),
+                        },
+                        remaining_ms: 0,
+                        tx_hash: None,
+                        lifecycle: ActivityLifecycle::Expired,
+                    },
+                })
+            }
             SignerRequest::PolicyGet => SignerResponse::Policy(self.policy.clone()),
             SignerRequest::Address => {
                 if self.locked {
@@ -330,6 +361,49 @@ impl MockState {
         ExecuteResult::Broadcast {
             tx_hash: mock_tx_hash(),
         }
+    }
+
+    /// Test-only: flip a pending record's status the way a human approval/denial does in the
+    /// app (the MCP sidecar can't self-approve, so the acceptance loop drives this directly
+    /// on the shared state). Mirrors the `Resolve` arm but reusable from tests.
+    pub fn resolve(&mut self, request_id: RequestId, approved: bool) {
+        if let Some(r) = self.requests.get_mut(&request_id) {
+            if r.status == ApprovalStatus::Pending {
+                if approved {
+                    r.status = ApprovalStatus::Allowed;
+                    r.approved = true;
+                } else {
+                    r.status = ApprovalStatus::Denied {
+                        reason: "user_denied".into(),
+                    };
+                }
+            }
+        }
+    }
+
+    /// Force a pending card to lapse its approval window — the mock stand-in for the daemon's
+    /// TTL expiry, so a test can drive the Expired branch deterministically (no human approves
+    /// in time).
+    pub fn expire(&mut self, request_id: RequestId) {
+        if let Some(r) = self.requests.get_mut(&request_id) {
+            if r.status == ApprovalStatus::Pending {
+                r.status = ApprovalStatus::Expired;
+            }
+        }
+    }
+}
+
+/// Map a mock request record to its lifecycle position — the same split the daemon's
+/// `StatusView` uses (Executed once broadcast, then by approval status).
+fn lifecycle_for(req: &MockReq) -> ActivityLifecycle {
+    if req.broadcast {
+        return ActivityLifecycle::Executed;
+    }
+    match &req.status {
+        ApprovalStatus::Pending => ActivityLifecycle::Proposed,
+        ApprovalStatus::Allowed => ActivityLifecycle::Decided { approved: true },
+        ApprovalStatus::Denied { .. } => ActivityLifecycle::Decided { approved: false },
+        ApprovalStatus::Expired => ActivityLifecycle::Expired,
     }
 }
 
