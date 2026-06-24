@@ -107,6 +107,16 @@ pub fn decode_approve(calldata: &[u8]) -> Option<(Address, U256)> {
     ))
 }
 
+/// Build exact `transfer(address,uint256)` calldata for an ERC-20 token send.
+pub fn build_erc20_transfer_calldata(recipient: Address, amount: U256) -> Bytes {
+    let mut data = vec![0xa9, 0x05, 0x9c, 0xbb];
+    let mut recipient_word = [0u8; 32];
+    recipient_word[12..].copy_from_slice(recipient.as_slice());
+    data.extend_from_slice(&recipient_word);
+    data.extend_from_slice(&amount.to_be_bytes::<32>());
+    Bytes::from(data)
+}
+
 /// Calldata for `invalidateOrder(bytes orderUid)` to the settlement contract (cancellation).
 pub fn build_invalidate_order_calldata(uid: &[u8; 56]) -> Bytes {
     invalidateOrderCall {
@@ -252,6 +262,18 @@ string kind,bool partiallyFillable,string sellTokenBalance,string buyTokenBalanc
         let mut calldata = vec![0xde, 0xad, 0xbe, 0xef];
         calldata.extend_from_slice(&[0u8; 64]);
         assert!(decode_approve(&calldata).is_none());
+    }
+
+    #[test]
+    fn build_erc20_transfer_calldata_encodes_selector_recipient_and_amount() {
+        let recipient = Address::repeat_byte(0x22);
+        let amount = U256::from(1_000_000u64);
+        let calldata = build_erc20_transfer_calldata(recipient, amount);
+
+        assert_eq!(&calldata[..4], &[0xa9, 0x05, 0x9c, 0xbb]);
+        assert_eq!(&calldata[4..16], &[0u8; 12]);
+        assert_eq!(&calldata[16..36], recipient.as_slice());
+        assert_eq!(&calldata[36..68], amount.to_be_bytes::<32>());
     }
 
     #[test]

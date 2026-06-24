@@ -151,15 +151,13 @@ async fn propose_decision_matrix() {
         }
     );
 
-    // ERC-20 send (token = Some) is a fast-follow.
+    // ERC-20 sends (token = Some) are admitted as reviewed browser transactions.
     let mut erc20 = send(to, 1_000);
     erc20.token = Some(Address::repeat_byte(0xEE));
-    assert_eq!(
+    assert!(matches!(
         client.propose(&erc20, ProposalOrigin::App).await.unwrap(),
-        Decision::Deny {
-            reason: "erc20_unsupported_v1".into()
-        }
-    );
+        Decision::NeedsApproval { .. }
+    ));
 }
 
 #[tokio::test]

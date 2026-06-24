@@ -31,6 +31,8 @@ const DEV_ACCOUNT_ENV: &str = "DECKARD_BRIDGE_DEV_ACCOUNT";
 const DEFAULT_DEV_ACCOUNT: &str = "0xdec0ded000000000000000000000000000001193";
 const MESSAGE_APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
 const MESSAGE_APPROVAL_POLL: Duration = Duration::from_millis(250);
+const ERC20_TRANSFER_SELECTOR: [u8; 4] = [0xa9, 0x05, 0x9c, 0xbb];
+const ERC20_APPROVE_SELECTOR: [u8; 4] = [0x09, 0x5e, 0xa7, 0xb3];
 
 /// Per-origin dapp session remembered by the bridge process.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -501,15 +503,9 @@ fn parse_send_transaction_params(
         .map(|value| param_string(value, "eth_sendTransaction data"))
         .transpose()?
         .unwrap_or("0x");
-    let calldata = if data == "0x" || data.is_empty() {
-        Bytes::new()
-    } else {
-        return Err(BridgeError {
-            code: 4200,
-            message: "Deckard does not yet support eth_sendTransaction with contract calldata"
-                .into(),
-        });
-    };
+    if data != "0x" && !data.is_empty() {
+        return parse_classified_calldata(chain_id, to, value, data).map(|intent| (from, intent));
+    }
     Ok((
         from,
         Intent {
@@ -517,10 +513,69 @@ fn parse_send_transaction_params(
             to,
             token: None,
             value,
-            calldata,
+            calldata: Bytes::new(),
             kind: IntentKind::Send,
         },
     ))
+}
+
+fn parse_classified_calldata(
+    chain_id: u64,
+    token: Address,
+    native_value: U256,
+    data: &str,
+) -> Result<Intent, BridgeError> {
+    if native_value != U256::ZERO {
+        return Err(BridgeError {
+            code: 4200,
+            message: "Deckard refuses ERC-20 eth_sendTransaction calldata with native value".into(),
+        });
+    }
+    let calldata = message_bytes(data)?;
+    let bytes = calldata.as_ref();
+    if bytes.len() < 4 {
+        return Err(invalid_params("ERC-20 calldata is too short"));
+    }
+    if bytes.len() != 4 + 32 + 32 {
+        return Err(invalid_params("ERC-20 calldata must be exactly 68 bytes"));
+    }
+    let selector = [bytes[0], bytes[1], bytes[2], bytes[3]];
+    match selector {
+        ERC20_TRANSFER_SELECTOR => {
+            let recipient = abi_address_word(&bytes[4..36])?;
+            let amount = U256::from_be_slice(&bytes[36..68]);
+            Ok(Intent {
+                chain_id,
+                to: recipient,
+                token: Some(token),
+                value: amount,
+                calldata: Bytes::new(),
+                kind: IntentKind::Send,
+            })
+        }
+        ERC20_APPROVE_SELECTOR => Ok(Intent {
+            chain_id,
+            to: token,
+            token: None,
+            value: U256::ZERO,
+            calldata,
+            kind: IntentKind::ContractCall,
+        }),
+        _ => Err(BridgeError {
+            code: 4200,
+            message: "Deckard refuses unsupported transaction calldata selector".into(),
+        }),
+    }
+}
+
+fn abi_address_word(word: &[u8]) -> Result<Address, BridgeError> {
+    if word.len() != 32 {
+        return Err(invalid_params("ABI address word must be 32 bytes"));
+    }
+    if word[..12].iter().any(|byte| *byte != 0) {
+        return Err(invalid_params("ERC-20 calldata address is not ABI encoded"));
+    }
+    Ok(Address::from_slice(&word[12..32]))
 }
 
 fn params_array(params: Value, method: &str) -> Result<Vec<Value>, BridgeError> {
@@ -962,7 +1017,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_transaction_rejects_contract_calldata_until_clear_signing_exists() {
+    async fn send_transaction_rejects_unknown_contract_selector() {
         let bridge = bridge();
         let _ = bridge
             .handle_request(
@@ -980,13 +1035,127 @@ mod tests {
                 BridgeRequest {
                     id: json!(23),
                     method: "eth_sendTransaction".into(),
-                    params: json!([{ "from": DEFAULT_DEV_ACCOUNT, "to": "0x0000000000000000000000000000000000000001", "data": "0xa9059cbb" }]),
+                    params: json!([{ "from": DEFAULT_DEV_ACCOUNT, "to": "0x0000000000000000000000000000000000000001", "data": "0xdeadbeef00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001" }]),
                 },
             )
             .await;
-        let error = response.error.expect("contract-call refusal");
+        let error = response.error.expect("unknown selector refusal");
         assert_eq!(error.code, 4200);
-        assert!(error.message.contains("contract calldata"));
+        assert!(error.message.contains("unsupported transaction calldata"));
+    }
+
+    #[tokio::test]
+    async fn send_transaction_erc20_transfer_returns_dev_hash() {
+        let bridge = bridge();
+        let _ = bridge
+            .handle_request(
+                ORIGIN,
+                BridgeRequest {
+                    id: json!(1),
+                    method: "eth_requestAccounts".into(),
+                    params: Value::Null,
+                },
+            )
+            .await;
+        let response = bridge
+            .handle_request(
+                ORIGIN,
+                BridgeRequest {
+                    id: json!(24),
+                    method: "eth_sendTransaction".into(),
+                    params: json!([{ "from": DEFAULT_DEV_ACCOUNT, "to": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", "data": "0xa9059cbb00000000000000000000000087870bca3f3fd6335c3f4ce8392d69350b4fa4e200000000000000000000000000000000000000000000000000000000000f4240" }]),
+                },
+            )
+            .await;
+        assert!(response.error.is_none(), "{response:?}");
+        let tx_hash = response.result.unwrap().as_str().unwrap().to_string();
+        assert!(tx_hash.starts_with("0x"));
+        assert_eq!(tx_hash.len(), 66);
+    }
+
+    #[tokio::test]
+    async fn send_transaction_erc20_approve_returns_dev_hash() {
+        let bridge = bridge();
+        let _ = bridge
+            .handle_request(
+                ORIGIN,
+                BridgeRequest {
+                    id: json!(1),
+                    method: "eth_requestAccounts".into(),
+                    params: Value::Null,
+                },
+            )
+            .await;
+        let response = bridge
+            .handle_request(
+                ORIGIN,
+                BridgeRequest {
+                    id: json!(25),
+                    method: "eth_sendTransaction".into(),
+                    params: json!([{ "from": DEFAULT_DEV_ACCOUNT, "to": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", "data": "0x095ea7b300000000000000000000000087870bca3f3fd6335c3f4ce8392d69350b4fa4e200000000000000000000000000000000000000000000000000000000000f4240" }]),
+                },
+            )
+            .await;
+        assert!(response.error.is_none(), "{response:?}");
+        let tx_hash = response.result.unwrap().as_str().unwrap().to_string();
+        assert!(tx_hash.starts_with("0x"));
+        assert_eq!(tx_hash.len(), 66);
+    }
+
+    #[tokio::test]
+    async fn send_transaction_erc20_calldata_rejects_native_value() {
+        let bridge = bridge();
+        let _ = bridge
+            .handle_request(
+                ORIGIN,
+                BridgeRequest {
+                    id: json!(1),
+                    method: "eth_requestAccounts".into(),
+                    params: Value::Null,
+                },
+            )
+            .await;
+        let response = bridge
+            .handle_request(
+                ORIGIN,
+                BridgeRequest {
+                    id: json!(26),
+                    method: "eth_sendTransaction".into(),
+                    params: json!([{ "from": DEFAULT_DEV_ACCOUNT, "to": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", "value": "0x1", "data": "0x095ea7b300000000000000000000000087870bca3f3fd6335c3f4ce8392d69350b4fa4e200000000000000000000000000000000000000000000000000000000000f4240" }]),
+                },
+            )
+            .await;
+        let error = response.error.expect("native value refusal");
+        assert_eq!(error.code, 4200);
+        assert!(error.message.contains("native value"));
+    }
+
+    #[tokio::test]
+    async fn send_transaction_erc20_calldata_rejects_malformed_length() {
+        let bridge = bridge();
+        let _ = bridge
+            .handle_request(
+                ORIGIN,
+                BridgeRequest {
+                    id: json!(1),
+                    method: "eth_requestAccounts".into(),
+                    params: Value::Null,
+                },
+            )
+            .await;
+        let response = bridge
+            .handle_request(
+                ORIGIN,
+                BridgeRequest {
+                    id: json!(27),
+                    method: "eth_sendTransaction".into(),
+                    params: json!([{ "from": DEFAULT_DEV_ACCOUNT, "to": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", "data": "0xa9059cbb00000000000000000000000087870bca3f3fd6335c3f4ce8392d69350b4fa4e2" }]),
+                },
+            )
+            .await;
+        let error = response.error.expect("malformed calldata refusal");
+        assert_eq!(error.code, -32602);
+        assert!(error.message.contains("ERC-20 calldata"));
     }
 
     #[tokio::test]

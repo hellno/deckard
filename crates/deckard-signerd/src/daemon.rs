@@ -536,6 +536,17 @@ impl Daemon {
         // the normal Send caps path below (the broadcast carries `intent.calldata` as-is).
         if intent.kind == IntentKind::ContractCall && intent.token.is_none() {
             if let Some((spender, amount)) = deckard_core::decode_approve(&intent.calldata) {
+                if matches!(origin, ProposalOrigin::App) {
+                    if intent.value != U256::ZERO {
+                        return Decision::Deny {
+                            reason: deny_reasons::APPROVE_WITH_VALUE.into(),
+                        };
+                    }
+                    // Browser/dapp approvals are clear-signable as an exact approve tuple and
+                    // must always raise a human card. Agent-origin swap approvals keep the
+                    // stricter shaped-approve gate below.
+                    return self.finish_propose(intent, true, origin);
+                }
                 if let Some(deny) = self.shaped_approve_admission(intent, spender, amount) {
                     return deny;
                 }
@@ -556,13 +567,14 @@ impl Daemon {
                 reason: deny_reasons::UNSUPPORTED_V1.into(),
             };
         }
-        // v1 spine is native ETH only; an ERC-20 (`token = Some`) Send is a fast-follow.
-        // A native shield is `token: None` (the value rides as msg.value via RelayAdapt
-        // wrapBase), so it passes this guard.
-        if intent.token.is_some() {
-            return Decision::Deny {
-                reason: deny_reasons::ERC20_UNSUPPORTED_V1.into(),
-            };
+        if intent.kind == IntentKind::Send && intent.token.is_some() {
+            if !intent.calldata.is_empty() {
+                return Decision::Deny {
+                    reason: deny_reasons::UNDECODABLE.into(),
+                };
+            }
+            // ERC-20 value is token atoms, not wei; do not compare it to ETH caps or auto-allow.
+            return self.finish_propose(intent, true, origin);
         }
         // A Shield must target the chain's RelayAdapt contract. The contract crate's policy
         // gate deliberately can't express this (it is chain-blind); without the pre-check a
@@ -1240,7 +1252,7 @@ impl Daemon {
 
         // Phase 1 (lock held): TOCTOU re-check + eligibility, then extract tx params and the
         // raw scalar (transiently, into `Zeroizing`). Borrows end before the await.
-        let (to, value, calldata, scalar) = {
+        let (to, value, calldata, reserve_value, scalar) = {
             let vault = match &self.state {
                 // STOP landed first — refuse even a previously-approved request.
                 VaultState::Locked => {
@@ -1312,11 +1324,21 @@ impl Daemon {
             };
             // Only the version-stable raw scalar crosses into our alloy stack; zeroized on drop.
             let scalar = Zeroizing::new(signer.to_bytes().0);
-            // Calldata is empty for a native Send (→ broadcast is byte-identical to before) and
-            // carries the RelayAdapt call for a Shield (or the shaped approve). The empty-vs-
-            // non-empty input IS the native/contract-call discriminator, so no IntentKind branch
-            // is needed here.
-            (intent.to, intent.value, intent.calldata.clone(), scalar)
+            let (to, value, calldata, reserve_value) = match (&intent.kind, intent.token) {
+                (IntentKind::Send, Some(token)) => (
+                    token,
+                    U256::ZERO,
+                    deckard_core::build_erc20_transfer_calldata(intent.to, intent.value),
+                    U256::ZERO,
+                ),
+                _ => (
+                    intent.to,
+                    intent.value,
+                    intent.calldata.clone(),
+                    intent.value,
+                ),
+            };
+            (to, value, calldata, reserve_value, scalar)
         };
 
         // Reserve the spend DURABLY before releasing the signature (issue #108): a crash between
@@ -1330,7 +1352,6 @@ impl Daemon {
         // TODO(#108 follow-up): if the STOP latency bites on a slow/contended disk, move these two
         // fsyncs off the reactor via `tokio::task::spawn_blocking` instead of widening the brake's
         // critical section. Deliberately NOT an issue yet — revisit only if measured latency hurts.
-        let reserve_value = value;
         if !reserve_value.is_zero() {
             if let Err(e) = self.spend.reserve(reserve_value) {
                 eprintln!("signerd: ⚠ spend reserve failed ({e}); refusing to sign (fail-closed)");
