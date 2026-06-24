@@ -6,6 +6,10 @@ const SUPPORTED_METHODS = new Set([
   'eth_signTypedData_v4',
   'eth_sign',
   'eth_sendTransaction',
+  'wallet_getCapabilities',
+  'wallet_sendCalls',
+  'wallet_getCallsStatus',
+  'wallet_showCallsStatus',
 ]);
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
