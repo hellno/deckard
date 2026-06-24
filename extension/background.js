@@ -2,6 +2,9 @@ const SUPPORTED_METHODS = new Set([
   'eth_chainId',
   'eth_accounts',
   'eth_requestAccounts',
+  'personal_sign',
+  'eth_signTypedData_v4',
+  'eth_sign',
 ]);
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {

@@ -367,6 +367,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-sol-type-parser",
  "alloy-sol-types",
+ "derive_more 2.1.1",
  "itoa",
  "serde",
  "serde_json",
@@ -4000,8 +4001,11 @@ dependencies = [
 name = "deckard-browser-bridge"
 version = "0.0.1-alpha"
 dependencies = [
+ "alloy-dyn-abi",
+ "alloy-primitives",
  "anyhow",
  "clap",
+ "deckard-contract",
  "deckard-wallet-client",
  "serde",
  "serde_json",
