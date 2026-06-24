@@ -545,11 +545,22 @@ bump-gpui:
     @echo "→ Bumped. Run the app to smoke-test, then commit Cargo.lock (+ rust-toolchain.toml if changed)."
 
 # Build a distributable Deckard.app (needs: cargo install cargo-bundle).
-# Runs from crates/deckard-app so cargo-bundle resolves the relative icon path
-# (it uses the CWD, not the manifest). Output → workspace target/release/bundle/osx/Deckard.app
+# Two parts, because cargo-bundle only ships THIS crate's own `deckard` binary:
+#   1. Build the signer daemon in release so it exists as target/release/deckard-signerd.
+#   2. `cargo bundle` (run from crates/deckard-app so cargo-bundle resolves the relative icon
+#      path — it uses the CWD, not the manifest). Output → workspace target/release/bundle/osx.
+#   3. Copy the daemon into Contents/MacOS/ next to `deckard`. The RELEASE resolver
+#      (deckard-signerd::supervise::resolve_binary, finding C1) launches the daemon ONLY as a
+#      provenance-verified SIBLING of the app binary — no $PATH / env fallback — so without this
+#      copy the bundled app can't spawn the signer, never binds the socket, and Unlock fails with
+#      "connect …/signerd.sock: No such file or directory" (issue #134). `install -m 0755` keeps
+#      it a regular, owner-only-writable file so verify_bundled_binary accepts it, and is re-run-safe.
 bundle:
+    cargo build -p deckard-signerd --release
     cd crates/deckard-app && cargo bundle --release
-    @echo "→ target/release/bundle/osx/Deckard.app"
+    install -m 0755 target/release/deckard-signerd \
+        target/release/bundle/osx/Deckard.app/Contents/MacOS/deckard-signerd
+    @echo "→ target/release/bundle/osx/Deckard.app (app + bundled signer daemon)"
 
 # Open the bundled app.
 open: bundle

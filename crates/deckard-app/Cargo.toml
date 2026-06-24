@@ -91,6 +91,12 @@ objc2-foundation = { version = "0.3", optional = true }
 # converter rejects the 1024px icon.png ("No matching IconType"), but copies a
 # ready .icns straight through. To rebrand: edit assets/icon.svg, run `just icon`
 # (regenerates icon.png + icon.icns), then `just bundle`.
+#
+# NOTE: cargo-bundle ships ONLY this crate's own `deckard` binary. The `deckard-signerd`
+# daemon — which the release resolver launches as a provenance-verified SIBLING under
+# Contents/MacOS/ (finding C1) — is built + copied in by the `just bundle` recipe, not here.
+# No cargo-bundle field co-bundles another workspace crate's binary into Contents/MacOS/
+# (`resources` lands in Contents/Resources/, which the resolver never reads). See issue #134.
 # ---------------------------------------------------------------------------
 [package.metadata.bundle]
 name = "Deckard"
