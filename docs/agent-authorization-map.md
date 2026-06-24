@@ -4,7 +4,7 @@
 > This doc holds the thinking, not the task list. Work items live in **GitHub issues**, decisions live in
 > **`docs/adr/`**, build state lives in **`STATUS.md`**. When those move, this doc does not need to.
 >
-> Last reconciled: **2026-06-15** (`/plan-ceo-review`).
+> Last reconciled: **2026-06-24** (policy model — ADR-0005).
 
 ## What we want (the thesis)
 
@@ -55,6 +55,23 @@ something. Building authorization for money we have never moved is premature.
 - **Dapp connectivity / owned bridge** — ADR-0001 (epic #44). Also audit-gated.
 
 This reverses an earlier "spike #33 first" call, on purpose.
+
+## How the agent's Rules are shaped (ADR-0005)
+
+The policy gate above is moving off a single flat struct onto a small, default-deny, **per-action rule
+list** — the user-facing **"Rules."** Decision and rationale: **ADR-0005**.
+
+- **Default-deny, per action.** Each rule names an action (send / shield / swap …) and its limits (cap,
+  recipients, approval mode). No matching rule ⇒ denied. Adding a capability is one rule, not a new
+  field on a god-struct.
+- **Caps are native `uint256`.** No general policy engine (Cedar, OPA, Biscuit) enforces the spend caps:
+  all are 64-bit-limited and cannot represent wei (verified 2026-06-23). We enforce in Rust and keep
+  `evaluate` one pure function (the mock⇄daemon parity contract).
+- **Vocabulary, not architecture (PEP/PDP/PAP/PIP).** The gate is the PEP, `evaluate` the PDP, authoring
+  the PAP (deferred), balances/`spent_today`/sim the PIP — borrowed from NIST SP 800-162 for naming only.
+- **One vocabulary, two enforcers.** Models 2 and 3 above (session keys, per-origin grants) reuse the
+  Rules *vocabulary* (cap / allowlist / expiry / mode) but stay **distinct enforcers** — software
+  (daemon) vs chain (7702). Never collapse them; software is not "cannot exceed."
 
 ## Invariants any future agent work must respect
 

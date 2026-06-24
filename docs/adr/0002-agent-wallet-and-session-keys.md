@@ -11,7 +11,10 @@
   [`#31`](https://github.com/hellno/deckard/issues/31) (wire evolution).
 - **Supersedes / relates:** records the positioning behind the "agent wallet" goal. The executable
   work lives as GitHub issues (`#33`, `#31`, and a sizing spike drafted alongside this ADR).
-  Convention: work items live in issues; decisions + research live in `docs/`.
+  Convention: work items live in issues; decisions + research live in `docs/`. The agent's policy /
+  "Rules" vocabulary (cap / allowlist / expiry / approval-mode) that a session-key grant reuses — and
+  the rule that a software grant stays a *distinct enforcer* from a chain-enforced one — is defined in
+  [`ADR-0005`](0005-policy-and-authorization-model.md).
 
 ## Decision drivers (agreed with the maintainer)
 
