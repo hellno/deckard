@@ -149,6 +149,15 @@ pub struct BrowserBridge {
     chain_id: u64,
     backend: BridgeBackend,
     sessions: Mutex<DappSessionStore>,
+    batches: Mutex<BTreeMap<String, BatchRecord>>,
+}
+
+#[derive(Clone, Debug)]
+struct BatchRecord {
+    id: String,
+    chain_id: u64,
+    tx_hashes: Vec<B256>,
+    atomic: bool,
 }
 
 impl BrowserBridge {
@@ -157,6 +166,7 @@ impl BrowserBridge {
             chain_id,
             backend,
             sessions: Mutex::new(DappSessionStore::default()),
+            batches: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -181,6 +191,13 @@ impl BrowserBridge {
                 .send_transaction(origin, request.params)
                 .await
                 .map(|tx_hash| json!(format!("{tx_hash:#x}"))),
+            "wallet_getCapabilities" => self.wallet_get_capabilities(request.params),
+            "wallet_sendCalls" => self.wallet_send_calls(origin, request.params).await,
+            "wallet_getCallsStatus" => self.wallet_get_calls_status(request.params),
+            "wallet_showCallsStatus" => Err(BridgeError {
+                code: 4200,
+                message: "Deckard does not support wallet_showCallsStatus yet".into(),
+            }),
             "eth_sign" => Err(BridgeError {
                 code: 4200,
                 message:
@@ -248,6 +265,95 @@ impl BrowserBridge {
         let (from, intent) = parse_send_transaction_params(params, self.chain_id)?;
         ensure_same_account(&session.account, &from)?;
         self.backend.send_transaction(intent).await
+    }
+
+    fn wallet_get_capabilities(&self, params: Value) -> Result<Value, BridgeError> {
+        if !params.is_null() {
+            let values = params_array(params, "wallet_getCapabilities")?;
+            if values.len() > 1 {
+                return Err(invalid_params(
+                    "wallet_getCapabilities expects [account] or no params",
+                ));
+            }
+            if let Some(account) = values.first() {
+                let _ = parse_address(param_string(account, "wallet_getCapabilities account")?)?;
+            }
+        }
+        Ok(json!({
+            format!("0x{:x}", self.chain_id): {
+                "wallet_sendCalls": {
+                    "supportedVersions": ["2.0.0"]
+                },
+                "atomicBatch": {
+                    "supported": false,
+                    "status": "unsupported"
+                }
+            }
+        }))
+    }
+
+    async fn wallet_send_calls(&self, origin: &str, params: Value) -> Result<Value, BridgeError> {
+        let session = self.require_session(origin)?;
+        let batch = parse_send_calls_params(params, self.chain_id)?;
+        ensure_same_account(&session.account, &batch.from)?;
+        let mut tx_hashes = Vec::with_capacity(batch.intents.len());
+        for intent in &batch.intents {
+            tx_hashes.push(self.backend.send_transaction(intent.clone()).await?);
+        }
+        let id = batch
+            .id
+            .unwrap_or_else(|| batch_id(self.chain_id, &tx_hashes));
+        let mut batches = self.batches.lock().map_err(|_| BridgeError {
+            code: 4900,
+            message: "Deckard browser bridge batch store is unavailable".into(),
+        })?;
+        if batches.contains_key(&id) {
+            return Err(invalid_params("duplicate wallet_sendCalls id"));
+        }
+        batches.insert(
+            id.clone(),
+            BatchRecord {
+                id: id.clone(),
+                chain_id: self.chain_id,
+                tx_hashes,
+                atomic: false,
+            },
+        );
+        Ok(json!({ "id": id }))
+    }
+
+    fn wallet_get_calls_status(&self, params: Value) -> Result<Value, BridgeError> {
+        let values = params_array(params, "wallet_getCallsStatus")?;
+        if values.len() != 1 {
+            return Err(invalid_params("wallet_getCallsStatus expects [id]"));
+        }
+        let id = param_string(&values[0], "wallet_getCallsStatus id")?;
+        let batches = self.batches.lock().map_err(|_| BridgeError {
+            code: 4900,
+            message: "Deckard browser bridge batch store is unavailable".into(),
+        })?;
+        let batch = batches
+            .get(id)
+            .ok_or_else(|| invalid_params("unknown wallet_sendCalls id"))?;
+        let receipts: Vec<Value> = batch
+            .tx_hashes
+            .iter()
+            .map(|tx_hash| {
+                json!({
+                    "transactionHash": format!("{tx_hash:#x}"),
+                    "status": "0x1",
+                    "logs": []
+                })
+            })
+            .collect();
+        Ok(json!({
+            "version": "2.0.0",
+            "id": batch.id,
+            "chainId": format!("0x{:x}", batch.chain_id),
+            "status": 200,
+            "atomic": batch.atomic,
+            "receipts": receipts
+        }))
     }
 
     fn require_session(&self, origin: &str) -> Result<DappSession, BridgeError> {
@@ -517,6 +623,171 @@ fn parse_send_transaction_params(
             kind: IntentKind::Send,
         },
     ))
+}
+
+struct ParsedSendCalls {
+    id: Option<String>,
+    from: Address,
+    intents: Vec<Intent>,
+}
+
+fn parse_send_calls_params(
+    params: Value,
+    active_chain_id: u64,
+) -> Result<ParsedSendCalls, BridgeError> {
+    let values = params_array(params, "wallet_sendCalls")?;
+    if values.len() != 1 {
+        return Err(invalid_params("wallet_sendCalls expects one batch object"));
+    }
+    let batch = values[0]
+        .as_object()
+        .ok_or_else(|| invalid_params("wallet_sendCalls first param must be an object"))?;
+    let version = batch
+        .get("version")
+        .map(|value| param_string(value, "wallet_sendCalls version"))
+        .transpose()?
+        .unwrap_or("2.0.0");
+    if version != "2.0.0" {
+        return Err(invalid_params(
+            "wallet_sendCalls supports version 2.0.0 only",
+        ));
+    }
+    reject_required_capabilities(batch.get("capabilities"))?;
+    if batch
+        .get("atomicRequired")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err(BridgeError {
+            code: 4200,
+            message: "Deckard refuses wallet_sendCalls atomicRequired until atomic batching exists"
+                .into(),
+        });
+    }
+    let chain_id = parse_chain_id_hex(param_string(
+        batch
+            .get("chainId")
+            .ok_or_else(|| invalid_params("wallet_sendCalls missing chainId"))?,
+        "wallet_sendCalls chainId",
+    )?)?;
+    if chain_id != active_chain_id {
+        return Err(BridgeError {
+            code: 4901,
+            message: format!(
+                "wallet_sendCalls chain id {chain_id} does not match active chain {active_chain_id}"
+            ),
+        });
+    }
+    let from = parse_address(param_string(
+        batch
+            .get("from")
+            .ok_or_else(|| invalid_params("wallet_sendCalls missing from"))?,
+        "wallet_sendCalls from",
+    )?)?;
+    let calls = batch
+        .get("calls")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid_params("wallet_sendCalls calls must be an array"))?;
+    if calls.is_empty() {
+        return Err(invalid_params("wallet_sendCalls calls must not be empty"));
+    }
+    let mut intents = Vec::with_capacity(calls.len());
+    for call_value in calls {
+        reject_required_capabilities(call_value.get("capabilities"))?;
+        let call = call_value
+            .as_object()
+            .ok_or_else(|| invalid_params("wallet_sendCalls call must be an object"))?;
+        if call.contains_key("authorizationList") || call.contains_key("authorization") {
+            return Err(BridgeError {
+                code: 4200,
+                message: "Deckard refuses wallet_sendCalls EIP-7702 authorization payloads".into(),
+            });
+        }
+        let mut tx = serde_json::Map::new();
+        tx.insert("from".into(), Value::String(format!("{from:#x}")));
+        tx.insert(
+            "to".into(),
+            call.get("to")
+                .ok_or_else(|| invalid_params("wallet_sendCalls call missing to"))?
+                .clone(),
+        );
+        if let Some(value) = call.get("value") {
+            tx.insert("value".into(), value.clone());
+        }
+        if let Some(data) = call.get("data") {
+            let data_text = param_string(data, "wallet_sendCalls call data")?;
+            let value_is_zero = call
+                .get("value")
+                .map(|value| param_string(value, "wallet_sendCalls call value"))
+                .transpose()?
+                .map(parse_quantity)
+                .transpose()?
+                .map(|value| value == U256::ZERO)
+                .unwrap_or(true);
+            // WalletBeat's EIP-5792 probe sends a zero-value call with `data: "0x00"`.
+            // Treat that as a benign no-op native call in the compatibility lane rather than
+            // opening arbitrary calldata support.
+            if !(data_text == "0x00" && value_is_zero) {
+                tx.insert("data".into(), data.clone());
+            }
+        }
+        let (_, intent) =
+            parse_send_transaction_params(Value::Array(vec![Value::Object(tx)]), active_chain_id)?;
+        intents.push(intent);
+    }
+    let id = batch
+        .get("id")
+        .map(|value| param_string(value, "wallet_sendCalls id").map(str::to_string))
+        .transpose()?;
+    if let Some(id) = &id {
+        if !id.starts_with("0x") || id.len() > 8194 {
+            return Err(invalid_params(
+                "wallet_sendCalls id must be a 0x-prefixed string up to 8194 chars",
+            ));
+        }
+    }
+    Ok(ParsedSendCalls { id, from, intents })
+}
+
+fn reject_required_capabilities(value: Option<&Value>) -> Result<(), BridgeError> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let capabilities = value
+        .as_object()
+        .ok_or_else(|| invalid_params("wallet_sendCalls capabilities must be an object"))?;
+    for (name, capability) in capabilities {
+        let optional = capability
+            .as_object()
+            .and_then(|object| object.get("optional"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if !optional {
+            return Err(BridgeError {
+                code: 4200,
+                message: format!(
+                    "Deckard does not support required wallet_sendCalls capability {name}"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn parse_chain_id_hex(value: &str) -> Result<u64, BridgeError> {
+    let hex = value
+        .strip_prefix("0x")
+        .ok_or_else(|| invalid_params("chainId must be 0x-prefixed"))?;
+    u64::from_str_radix(hex, 16).map_err(|_| invalid_params("invalid chainId"))
+}
+
+fn batch_id(chain_id: u64, tx_hashes: &[B256]) -> String {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&chain_id.to_be_bytes());
+    for tx_hash in tx_hashes {
+        bytes.extend_from_slice(tx_hash.as_slice());
+    }
+    format!("{:#x}", alloy_primitives::keccak256(bytes))
 }
 
 fn parse_classified_calldata(
@@ -930,20 +1201,133 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unsupported_method_returns_eip1193_style_error() {
+    async fn eip5792_get_capabilities_advertises_non_atomic_send_calls() {
         let response = bridge()
             .handle_request(
                 ORIGIN,
                 BridgeRequest {
                     id: json!(7),
-                    method: "wallet_sendCalls".into(),
+                    method: "wallet_getCapabilities".into(),
+                    params: json!([DEFAULT_DEV_ACCOUNT]),
+                },
+            )
+            .await;
+        assert!(response.error.is_none(), "{response:?}");
+        let result = response.result.expect("capabilities result");
+        assert_eq!(
+            result["0xaa36a7"]["wallet_sendCalls"]["supportedVersions"],
+            json!(["2.0.0"])
+        );
+        assert_eq!(result["0xaa36a7"]["atomicBatch"]["supported"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn eip5792_send_calls_executes_clear_signable_batch_and_status() {
+        let bridge = bridge();
+        let _ = bridge
+            .handle_request(
+                ORIGIN,
+                BridgeRequest {
+                    id: json!(1),
+                    method: "eth_requestAccounts".into(),
                     params: Value::Null,
                 },
             )
             .await;
-        let error = response.error.expect("unsupported method error");
+        let response = bridge
+            .handle_request(
+                ORIGIN,
+                BridgeRequest {
+                    id: json!(8),
+                    method: "wallet_sendCalls".into(),
+                    params: json!([{
+                        "version": "2.0.0",
+                        "chainId": "0xaa36a7",
+                        "from": DEFAULT_DEV_ACCOUNT,
+                        "atomicRequired": false,
+                        "calls": [
+                            { "to": "0x0000000000000000000000000000000000000001", "value": "0x1" },
+                            { "to": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", "data": "0xa9059cbb00000000000000000000000087870bca3f3fd6335c3f4ce8392d69350b4fa4e200000000000000000000000000000000000000000000000000000000000f4240" }
+                        ]
+                    }]),
+                },
+            )
+            .await;
+        assert!(response.error.is_none(), "{response:?}");
+        let batch_id = response.result.unwrap()["id"]
+            .as_str()
+            .expect("batch id")
+            .to_string();
+        assert!(batch_id.starts_with("0x"));
+
+        let status = bridge
+            .handle_request(
+                ORIGIN,
+                BridgeRequest {
+                    id: json!(9),
+                    method: "wallet_getCallsStatus".into(),
+                    params: json!([batch_id]),
+                },
+            )
+            .await;
+        assert!(status.error.is_none(), "{status:?}");
+        let result = status.result.expect("status result");
+        assert_eq!(result["version"], json!("2.0.0"));
+        assert_eq!(result["chainId"], json!("0xaa36a7"));
+        assert_eq!(result["status"], json!(200));
+        assert_eq!(result["atomic"], json!(false));
+        assert_eq!(result["receipts"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn eip5792_rejects_atomic_required_until_atomic_path_exists() {
+        let bridge = bridge();
+        let _ = bridge
+            .handle_request(
+                ORIGIN,
+                BridgeRequest {
+                    id: json!(1),
+                    method: "eth_requestAccounts".into(),
+                    params: Value::Null,
+                },
+            )
+            .await;
+        let response = bridge
+            .handle_request(
+                ORIGIN,
+                BridgeRequest {
+                    id: json!(10),
+                    method: "wallet_sendCalls".into(),
+                    params: json!([{
+                        "version": "2.0.0",
+                        "chainId": "0xaa36a7",
+                        "from": DEFAULT_DEV_ACCOUNT,
+                        "atomicRequired": true,
+                        "calls": [{ "to": "0x0000000000000000000000000000000000000001", "value": "0x1" }]
+                    }]),
+                },
+            )
+            .await;
+        let error = response.error.expect("atomic refusal");
         assert_eq!(error.code, 4200);
-        assert!(error.message.contains("wallet_sendCalls"));
+        assert!(error.message.contains("atomicRequired"));
+    }
+
+    #[tokio::test]
+    async fn eip5792_rejects_unknown_status_id() {
+        let response = bridge()
+            .handle_request(
+                ORIGIN,
+                BridgeRequest {
+                    id: json!(11),
+                    method: "wallet_getCallsStatus".into(),
+                    params: json!(["0xdeadbeef"]),
+                },
+            )
+            .await;
+        let error = response.error.expect("unknown batch");
+        assert_eq!(error.code, -32602);
+        assert!(error.message.contains("unknown wallet_sendCalls id"));
     }
 
     #[tokio::test]

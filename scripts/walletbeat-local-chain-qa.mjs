@@ -40,6 +40,7 @@ main().catch((error) => {
 async function main() {
   await requireCommand('anvil', ['--version']);
   fs.mkdirSync(artifactsDir, { recursive: true });
+  fs.rmSync(profileDir, { recursive: true, force: true });
   validateExtension();
   await ensureWalletbeatCheckout();
   await run('pnpm', ['install', '--frozen-lockfile'], { cwd: walletbeatDir, name: 'pnpm' });
@@ -110,6 +111,59 @@ async function main() {
           data: '0x095ea7b300000000000000000000000087870bca3f3fd6335c3f4ce8392d69350b4fa4e200000000000000000000000000000000000000000000000000000000000f4240',
         }],
       });
+      const capabilities = await provider.request({
+        method: 'wallet_getCapabilities',
+        params: [account],
+      });
+      const batchResult = await provider.request({
+        method: 'wallet_sendCalls',
+        params: [{
+          version: '2.0.0',
+          chainId,
+          from: account,
+          atomicRequired: false,
+          calls: [
+            { to: '0x0000000000000000000000000000000000000002', value: '0x2' },
+            {
+              to: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
+              data: '0xa9059cbb00000000000000000000000087870bca3f3fd6335c3f4ce8392d69350b4fa4e200000000000000000000000000000000000000000000000000000000000f4241',
+            },
+          ],
+        }],
+      });
+      const batchId = typeof batchResult === 'string' ? batchResult : batchResult?.id;
+      const batchStatus = await provider.request({
+        method: 'wallet_getCallsStatus',
+        params: [batchId],
+      });
+      const walletbeatProbeResult = await provider.request({
+        method: 'wallet_sendCalls',
+        params: [{
+          version: '2.0.0',
+          chainId,
+          from: account,
+          atomicRequired: false,
+          calls: [{ to: '0x0000000000000000000000000000000000000000', value: '0x0', data: '0x00' }],
+        }],
+      });
+      let atomicError = null;
+      try {
+        await provider.request({
+          method: 'wallet_sendCalls',
+          params: [{
+            version: '2.0.0',
+            chainId,
+            from: account,
+            atomicRequired: true,
+            calls: [{ to: '0x0000000000000000000000000000000000000001', value: '0x1' }],
+          }],
+        });
+      } catch (error) {
+        atomicError = {
+          code: typeof error === 'object' && error ? error.code : undefined,
+          message: error instanceof Error ? error.message : String(error),
+        };
+      }
       const simpleSignature = await provider.request({
         method: 'personal_sign',
         params: ['0x68656c6c6f2066726f6d206c6f63616c20636861696e', account],
@@ -164,6 +218,11 @@ async function main() {
         nativeHash,
         transferHash,
         approveHash,
+        capabilities,
+        batchId,
+        batchStatus,
+        walletbeatProbeResult,
+        atomicError,
         simpleSignature,
         siweSignature,
         typedSignature,
@@ -177,6 +236,11 @@ async function main() {
       check('native eth_sendTransaction via signerd', txHash(results.nativeHash), results.nativeHash),
       check('ERC-20 transfer(address,uint256) via signerd', txHash(results.transferHash), results.transferHash),
       check('ERC-20 approve(address,uint256) via signerd', txHash(results.approveHash), results.approveHash),
+      check('wallet_getCapabilities EIP-5792 v2.0.0', Array.isArray(results.capabilities?.[expectedChainId]?.wallet_sendCalls?.supportedVersions) && results.capabilities[expectedChainId].wallet_sendCalls.supportedVersions.includes('2.0.0'), results.capabilities?.[expectedChainId]),
+      check('wallet_sendCalls clear-signable non-atomic batch', typeof results.batchId === 'string' && results.batchId.startsWith('0x'), results.batchId),
+      check('wallet_getCallsStatus for batch', results.batchStatus?.status === 200 && results.batchStatus?.atomic === false && Array.isArray(results.batchStatus?.receipts), results.batchStatus),
+      check('wallet_sendCalls WalletBeat zero-value probe', (typeof results.walletbeatProbeResult === 'string' && results.walletbeatProbeResult.startsWith('0x')) || (typeof results.walletbeatProbeResult?.id === 'string' && results.walletbeatProbeResult.id.startsWith('0x')), results.walletbeatProbeResult),
+      check('wallet_sendCalls atomicRequired refused', results.atomicError?.code === 4200 && /atomicRequired/.test(results.atomicError?.message ?? ''), results.atomicError),
       check('personal_sign via signerd', signature(results.simpleSignature), '<signature redacted>'),
       check('SIWE personal_sign via signerd', signature(results.siweSignature), '<signature redacted>'),
       check('EIP-712 typed data via signerd', signature(results.typedSignature), '<signature redacted>'),
