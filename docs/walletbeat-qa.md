@@ -25,6 +25,12 @@ Run headed while debugging:
 npm run qa:walletbeat:headed
 ```
 
+Validate the scam-alert / transaction-simulation safety matrix:
+
+```sh
+npm run qa:walletbeat:safety
+```
+
 The script:
 
 - clones a pinned WalletBeat beta checkout into `.walletbeat/`
@@ -60,9 +66,11 @@ Useful overrides:
 
 ## Scope
 
-This lane is not a full WalletBeat pass. It intentionally excludes transaction, signature,
-batch-call, scam-alert, and simulation tabs until those flows use reviewed Deckard approval UI and
-local-chain-only fixtures.
+The default safe provider lane is not a full WalletBeat pass. Transaction, signature, and batch-call
+coverage live in dedicated lanes. Scam-alert and transaction-simulation coverage is tracked by
+`docs/WALLETBEAT-SAFETY-MATRIX.md`; that matrix is deliberately not a claim of full support. It
+forces every WalletBeat safety fixture to be classified as supported, safely refused, or linked to a
+follow-up issue before #95 can close.
 
 Tracked follow-up work:
 
