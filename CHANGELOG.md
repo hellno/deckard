@@ -14,7 +14,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **Bundled macOS app (`just bundle`) could not unlock the wallet** ([#134]). `cargo bundle`
+  ships only the `deckard` binary, but the release signer resolver launches `deckard-signerd`
+  exclusively as a provenance-verified sibling under `Contents/MacOS/` (finding C1 — no `$PATH`
+  or env fallback). The daemon was therefore never found or spawned, the socket was never bound,
+  and Unlock failed with `connect …/signerd.sock: No such file or directory`. `just bundle` now
+  builds the daemon in release and co-bundles it next to `deckard`, so the `.app` is
+  self-contained. (Downloaded — vs locally-built — `.app`s additionally need the
+  `com.apple.quarantine` xattr stripped; see [`docs/RELEASING.md`](docs/RELEASING.md).)
+
+[#134]: https://github.com/hellno/deckard/issues/134
 
 ## [0.0.1-alpha] - 2026-06-22
 

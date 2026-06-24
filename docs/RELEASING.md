@@ -273,13 +273,26 @@ one by hand, clearly labelled unsigned / experimental / testnet-only:
 just bundle    # → target/release/bundle/osx/Deckard.app  (needs: cargo install cargo-bundle)
 
 # Zip the .app (GitHub release assets must be single files), then upload it to the release.
+# --keepParent zips the whole bundle tree, so the co-bundled signer daemon is captured too.
 ditto -c -k --sequesterRsrc --keepParent \
   target/release/bundle/osx/Deckard.app Deckard-0.0.1-alpha-macos.app.zip
 gh release upload v0.0.1-alpha Deckard-0.0.1-alpha-macos.app.zip
 ```
 
+`just bundle` co-bundles the **signer daemon** (`deckard-signerd`) into `Contents/MacOS/` next to the
+`deckard` binary. The app launches the daemon only as a provenance-verified sibling there (finding
+C1), so without it the bundled app can't bind its socket and Unlock fails with
+`connect …/signerd.sock: No such file or directory` (issue #134). The `.app` is self-contained.
+
 > The bundle is **not code-signed or notarized**; on first launch macOS Gatekeeper will warn. That is
 > expected for an experimental alpha. Mention it in the release notes so users aren't surprised.
+>
+> ⚠️ **Downloaded** (vs locally-built) `.app`s carry the `com.apple.quarantine` xattr. Under quarantine,
+> macOS can kill the unsigned **child** daemon the app spawns from inside the bundle — so the app opens
+> but Unlock still fails, exactly as if the daemon were missing. A tester running a downloaded zip must
+> strip quarantine first: `xattr -dr com.apple.quarantine /path/to/Deckard.app`. (A locally-built bundle
+> is not quarantined, so this only affects the download path.) The durable fix is Apple codesigning +
+> notarization — see below; until then, put this `xattr` step in the release notes alongside any `.app`.
 
 ### Why source-only (and the path to signed binaries)
 
