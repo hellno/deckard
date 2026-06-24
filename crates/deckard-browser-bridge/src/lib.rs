@@ -10,7 +10,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use alloy_dyn_abi::eip712::TypedData;
-use alloy_primitives::{Address, Bytes, U256};
+use alloy_primitives::{Address, Bytes, B256, U256};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -20,8 +20,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use deckard_contract::{
-    ApprovalStatus, Decision, MessageSigningRisk, ProposalOrigin, RequestId, SignMessage,
-    SignMessageKind, SignMessageResult, SignerRequest, SignerResponse, TypedDataReview,
+    ApprovalStatus, Decision, ExecuteResult, Intent, IntentKind, MessageSigningRisk,
+    ProposalOrigin, RequestId, SignMessage, SignMessageKind, SignMessageResult, SignerRequest,
+    SignerResponse, TypedDataReview,
 };
 use deckard_wallet_client::WalletClient;
 
@@ -133,6 +134,13 @@ impl BridgeBackend {
             Self::WalletClient(wallet) => sign_message_with_daemon(wallet, message).await,
         }
     }
+
+    async fn send_transaction(&self, intent: Intent) -> Result<B256, BridgeError> {
+        match self {
+            Self::DevMock { .. } => Ok(dev_tx_hash_for_intent(&intent)),
+            Self::WalletClient(wallet) => execute_intent_with_daemon(wallet, intent).await,
+        }
+    }
 }
 
 pub struct BrowserBridge {
@@ -167,6 +175,10 @@ impl BrowserBridge {
                 .sign_typed_data_v4(origin, request.params)
                 .await
                 .map(|signature| json!(hex_prefixed(signature.as_ref()))),
+            "eth_sendTransaction" => self
+                .send_transaction(origin, request.params)
+                .await
+                .map(|tx_hash| json!(format!("{tx_hash:#x}"))),
             "eth_sign" => Err(BridgeError {
                 code: 4200,
                 message:
@@ -227,6 +239,13 @@ impl BrowserBridge {
                 kind: SignMessageKind::TypedDataV4(review),
             })
             .await
+    }
+
+    async fn send_transaction(&self, origin: &str, params: Value) -> Result<B256, BridgeError> {
+        let session = self.require_session(origin)?;
+        let (from, intent) = parse_send_transaction_params(params, self.chain_id)?;
+        ensure_same_account(&session.account, &from)?;
+        self.backend.send_transaction(intent).await
     }
 
     fn require_session(&self, origin: &str) -> Result<DappSession, BridgeError> {
@@ -296,9 +315,11 @@ async fn sign_message_with_daemon(
         .await
         .map_err(bridge_daemon_error)?;
     match decision {
-        Decision::Deny { reason } => return Err(bridge_denied(reason)),
+        Decision::Deny { reason } => return Err(bridge_denied("message signing", reason)),
         Decision::Allow => {}
-        Decision::NeedsApproval { .. } => wait_for_message_approval(wallet, request_id).await?,
+        Decision::NeedsApproval { .. } => {
+            wait_for_approval(wallet, request_id, "message signing").await?
+        }
     }
     match wallet
         .signer_client()
@@ -307,13 +328,42 @@ async fn sign_message_with_daemon(
         .map_err(bridge_daemon_error)?
     {
         SignMessageResult::Signed { signature } => Ok(signature),
-        SignMessageResult::Denied { reason } => Err(bridge_denied(reason)),
+        SignMessageResult::Denied { reason } => Err(bridge_denied("message signing", reason)),
     }
 }
 
-async fn wait_for_message_approval(
+async fn execute_intent_with_daemon(
+    wallet: &WalletClient,
+    intent: Intent,
+) -> Result<B256, BridgeError> {
+    let request_id = deckard_wallet_client::SignerClient::request_id_for_intent(&intent);
+    let decision = wallet
+        .signer_client()
+        .propose(&intent, ProposalOrigin::App)
+        .await
+        .map_err(bridge_daemon_error)?;
+    match decision {
+        Decision::Deny { reason } => return Err(bridge_denied("transaction", reason)),
+        Decision::Allow => {}
+        Decision::NeedsApproval { .. } => {
+            wait_for_approval(wallet, request_id, "transaction").await?
+        }
+    }
+    match wallet
+        .signer_client()
+        .execute(request_id)
+        .await
+        .map_err(bridge_daemon_error)?
+    {
+        ExecuteResult::Broadcast { tx_hash } => Ok(tx_hash),
+        ExecuteResult::Denied { reason } => Err(bridge_denied("transaction", reason)),
+    }
+}
+
+async fn wait_for_approval(
     wallet: &WalletClient,
     request_id: RequestId,
+    label: &str,
 ) -> Result<(), BridgeError> {
     let deadline = Instant::now() + MESSAGE_APPROVAL_TIMEOUT;
     loop {
@@ -333,13 +383,13 @@ async fn wait_for_message_approval(
         };
         match status {
             ApprovalStatus::Allowed => return Ok(()),
-            ApprovalStatus::Denied { reason } => return Err(bridge_denied(reason)),
-            ApprovalStatus::Expired => return Err(bridge_denied("expired".into())),
+            ApprovalStatus::Denied { reason } => return Err(bridge_denied(label, reason)),
+            ApprovalStatus::Expired => return Err(bridge_denied(label, "expired".into())),
             ApprovalStatus::Pending => {
                 if Instant::now() >= deadline {
                     return Err(BridgeError {
                         code: 4001,
-                        message: "message-signing approval timed out".into(),
+                        message: format!("{label} approval timed out"),
                     });
                 }
                 sleep(MESSAGE_APPROVAL_POLL).await;
@@ -418,6 +468,61 @@ fn parse_typed_data_v4_params(
     ))
 }
 
+fn parse_send_transaction_params(
+    params: Value,
+    chain_id: u64,
+) -> Result<(Address, Intent), BridgeError> {
+    let values = params_array(params, "eth_sendTransaction")?;
+    if values.len() != 1 {
+        return Err(invalid_params(
+            "eth_sendTransaction expects one transaction object",
+        ));
+    }
+    let tx = values[0]
+        .as_object()
+        .ok_or_else(|| invalid_params("eth_sendTransaction first param must be an object"))?;
+    let from = parse_address(param_string(
+        tx.get("from")
+            .ok_or_else(|| invalid_params("eth_sendTransaction missing from"))?,
+        "eth_sendTransaction from",
+    )?)?;
+    let to = parse_address(param_string(
+        tx.get("to")
+            .ok_or_else(|| invalid_params("eth_sendTransaction missing to"))?,
+        "eth_sendTransaction to",
+    )?)?;
+    let value = match tx.get("value") {
+        Some(value) => parse_quantity(param_string(value, "eth_sendTransaction value")?)?,
+        None => U256::ZERO,
+    };
+    let data = tx
+        .get("data")
+        .or_else(|| tx.get("input"))
+        .map(|value| param_string(value, "eth_sendTransaction data"))
+        .transpose()?
+        .unwrap_or("0x");
+    let calldata = if data == "0x" || data.is_empty() {
+        Bytes::new()
+    } else {
+        return Err(BridgeError {
+            code: 4200,
+            message: "Deckard does not yet support eth_sendTransaction with contract calldata"
+                .into(),
+        });
+    };
+    Ok((
+        from,
+        Intent {
+            chain_id,
+            to,
+            token: None,
+            value,
+            calldata,
+            kind: IntentKind::Send,
+        },
+    ))
+}
+
 fn params_array(params: Value, method: &str) -> Result<Vec<Value>, BridgeError> {
     match params {
         Value::Array(values) => Ok(values),
@@ -429,6 +534,17 @@ fn param_string<'a>(value: &'a Value, label: &str) -> Result<&'a str, BridgeErro
     value
         .as_str()
         .ok_or_else(|| invalid_params(format!("{label} must be a string")))
+}
+
+fn parse_quantity(value: &str) -> Result<U256, BridgeError> {
+    if let Some(hex) = value.strip_prefix("0x") {
+        if hex.is_empty() {
+            return Err(invalid_params("quantity hex string is empty"));
+        }
+        U256::from_str_radix(hex, 16).map_err(|_| invalid_params("invalid hex quantity"))
+    } else {
+        U256::from_str_radix(value, 10).map_err(|_| invalid_params("invalid decimal quantity"))
+    }
 }
 
 fn parse_address(value: &str) -> Result<Address, BridgeError> {
@@ -470,10 +586,10 @@ fn bridge_daemon_error(error: anyhow::Error) -> BridgeError {
     }
 }
 
-fn bridge_denied(reason: String) -> BridgeError {
+fn bridge_denied(action: &str, reason: String) -> BridgeError {
     BridgeError {
         code: 4001,
-        message: format!("message signing denied: {reason}"),
+        message: format!("{action} denied: {reason}"),
     }
 }
 
@@ -494,6 +610,15 @@ fn dev_signature_for_message(message: &SignMessage) -> Bytes {
     signature[32..64].copy_from_slice(digest.as_slice());
     signature[64] = 27;
     Bytes::copy_from_slice(&signature)
+}
+
+fn dev_tx_hash_for_intent(intent: &Intent) -> B256 {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&intent.chain_id.to_be_bytes());
+    bytes.extend_from_slice(intent.to.as_slice());
+    bytes.extend_from_slice(&intent.value.to_be_bytes::<32>());
+    bytes.extend_from_slice(intent.calldata.as_ref());
+    alloy_primitives::keccak256(bytes)
 }
 
 fn frame_dev_personal_message(message: &SignMessage) -> Vec<u8> {
@@ -756,14 +881,112 @@ mod tests {
                 ORIGIN,
                 BridgeRequest {
                     id: json!(7),
-                    method: "eth_sendTransaction".into(),
+                    method: "wallet_sendCalls".into(),
                     params: Value::Null,
                 },
             )
             .await;
         let error = response.error.expect("unsupported method error");
         assert_eq!(error.code, 4200);
-        assert!(error.message.contains("eth_sendTransaction"));
+        assert!(error.message.contains("wallet_sendCalls"));
+    }
+
+    #[tokio::test]
+    async fn send_transaction_requires_connected_account() {
+        let response = bridge()
+            .handle_request(
+                ORIGIN,
+                BridgeRequest {
+                    id: json!(20),
+                    method: "eth_sendTransaction".into(),
+                    params: json!([{ "from": DEFAULT_DEV_ACCOUNT, "to": "0x0000000000000000000000000000000000000001", "value": "0x1" }]),
+                },
+            )
+            .await;
+        assert_eq!(response.error.expect("unauthorized").code, 4100);
+    }
+
+    #[tokio::test]
+    async fn send_transaction_native_send_returns_dev_hash() {
+        let bridge = bridge();
+        let _ = bridge
+            .handle_request(
+                ORIGIN,
+                BridgeRequest {
+                    id: json!(1),
+                    method: "eth_requestAccounts".into(),
+                    params: Value::Null,
+                },
+            )
+            .await;
+        let response = bridge
+            .handle_request(
+                ORIGIN,
+                BridgeRequest {
+                    id: json!(21),
+                    method: "eth_sendTransaction".into(),
+                    params: json!([{ "from": DEFAULT_DEV_ACCOUNT, "to": "0x0000000000000000000000000000000000000001", "value": "0x1" }]),
+                },
+            )
+            .await;
+        assert!(response.error.is_none(), "{response:?}");
+        let tx_hash = response.result.unwrap().as_str().unwrap().to_string();
+        assert!(tx_hash.starts_with("0x"));
+        assert_eq!(tx_hash.len(), 66);
+    }
+
+    #[tokio::test]
+    async fn send_transaction_rejects_wrong_from_account() {
+        let bridge = bridge();
+        let _ = bridge
+            .handle_request(
+                ORIGIN,
+                BridgeRequest {
+                    id: json!(1),
+                    method: "eth_requestAccounts".into(),
+                    params: Value::Null,
+                },
+            )
+            .await;
+        let response = bridge
+            .handle_request(
+                ORIGIN,
+                BridgeRequest {
+                    id: json!(22),
+                    method: "eth_sendTransaction".into(),
+                    params: json!([{ "from": "0x0000000000000000000000000000000000000002", "to": "0x0000000000000000000000000000000000000001", "value": "0x1" }]),
+                },
+            )
+            .await;
+        assert_eq!(response.error.expect("wrong-account error").code, 4100);
+    }
+
+    #[tokio::test]
+    async fn send_transaction_rejects_contract_calldata_until_clear_signing_exists() {
+        let bridge = bridge();
+        let _ = bridge
+            .handle_request(
+                ORIGIN,
+                BridgeRequest {
+                    id: json!(1),
+                    method: "eth_requestAccounts".into(),
+                    params: Value::Null,
+                },
+            )
+            .await;
+        let response = bridge
+            .handle_request(
+                ORIGIN,
+                BridgeRequest {
+                    id: json!(23),
+                    method: "eth_sendTransaction".into(),
+                    params: json!([{ "from": DEFAULT_DEV_ACCOUNT, "to": "0x0000000000000000000000000000000000000001", "data": "0xa9059cbb" }]),
+                },
+            )
+            .await;
+        let error = response.error.expect("contract-call refusal");
+        assert_eq!(error.code, 4200);
+        assert!(error.message.contains("contract calldata"));
     }
 
     #[tokio::test]

@@ -215,6 +215,44 @@ test('local dapp can request reviewed message signatures in dev mode', async ({ 
   });
 });
 
+test('local dapp can request a native send transaction in dev mode', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.locator('#output')).toContainText('window.ethereum detected');
+
+  const state = await page.evaluate(async (account) => {
+    const provider = window.ethereum;
+    if (!provider) {
+      throw new Error('window.ethereum missing');
+    }
+    await provider.request({ method: 'eth_requestAccounts' });
+    const txHash = await provider.request({
+      method: 'eth_sendTransaction',
+      params: [{ from: account, to: '0x0000000000000000000000000000000000000001', value: '0x1' }],
+    });
+
+    let contractCallError: { code?: number; message?: string } | null = null;
+    try {
+      await provider.request({
+        method: 'eth_sendTransaction',
+        params: [{ from: account, to: '0x0000000000000000000000000000000000000001', data: '0xa9059cbb' }],
+      });
+    } catch (error) {
+      contractCallError = {
+        code: typeof error === 'object' && error ? (error as { code?: number }).code : undefined,
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
+
+    return { txHash, contractCallError };
+  }, mockAccount);
+
+  expect(state.txHash).toMatch(/^0x[0-9a-f]{64}$/);
+  expect(state.contractCallError).toEqual({
+    code: 4200,
+    message: expect.stringContaining('contract calldata'),
+  });
+});
+
 declare global {
   interface Window {
     ethereum?: {

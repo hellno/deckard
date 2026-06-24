@@ -11,7 +11,9 @@
     "qa:walletbeat": "node scripts/walletbeat-local-qa.mjs",
     "qa:walletbeat:headed": "DECKARD_WALLETBEAT_HEADED=1 node scripts/walletbeat-local-qa.mjs",
     "qa:walletbeat:signatures": "node scripts/walletbeat-signatures-qa.mjs",
-    "qa:walletbeat:signatures:headed": "DECKARD_WALLETBEAT_HEADED=1 node scripts/walletbeat-signatures-qa.mjs"
+    "qa:walletbeat:signatures:headed": "DECKARD_WALLETBEAT_HEADED=1 node scripts/walletbeat-signatures-qa.mjs",
+    "qa:walletbeat:transactions": "node scripts/walletbeat-transactions-qa.mjs",
+    "qa:walletbeat:transactions:headed": "DECKARD_WALLETBEAT_HEADED=1 node scripts/walletbeat-transactions-qa.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.61.0"
