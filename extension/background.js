@@ -5,6 +5,7 @@ const SUPPORTED_METHODS = new Set([
   'personal_sign',
   'eth_signTypedData_v4',
   'eth_sign',
+  'eth_sendTransaction',
 ]);
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
