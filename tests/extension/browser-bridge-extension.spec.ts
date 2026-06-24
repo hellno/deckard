@@ -145,6 +145,76 @@ test('local dapp can discover Deckard through EIP-6963', async ({ page }) => {
   });
 });
 
+test('local dapp can request reviewed message signatures in dev mode', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.locator('#output')).toContainText('window.ethereum detected');
+
+  const state = await page.evaluate(async (account) => {
+    const provider = window.ethereum;
+    if (!provider) {
+      throw new Error('window.ethereum missing');
+    }
+    await provider.request({ method: 'eth_requestAccounts' });
+    const simple = await provider.request({
+      method: 'personal_sign',
+      params: ['0x68656c6c6f', account],
+    });
+    const legacy = await provider.request({
+      method: 'personal_sign',
+      params: [account, 'hello'],
+    });
+    const typed = await provider.request({
+      method: 'eth_signTypedData_v4',
+      params: [
+        account,
+        {
+          domain: {
+            name: 'Test Signature App',
+            version: '1',
+            chainId: 11155111,
+            verifyingContract: '0x0000000000000000000000000000000000000000',
+          },
+          types: {
+            EIP712Domain: [
+              { name: 'name', type: 'string' },
+              { name: 'version', type: 'string' },
+              { name: 'chainId', type: 'uint256' },
+              { name: 'verifyingContract', type: 'address' },
+            ],
+            TestMessage: [
+              { name: 'purpose', type: 'string' },
+              { name: 'message', type: 'string' },
+            ],
+          },
+          primaryType: 'TestMessage',
+          message: {
+            purpose: 'Educational Testing Only',
+            message: 'This signature is for testing purposes only.',
+          },
+        },
+      ],
+    });
+    let ethSignError: { code?: number; message?: string } | null = null;
+    try {
+      await provider.request({ method: 'eth_sign', params: [account, '0x1234'] });
+    } catch (error) {
+      ethSignError = {
+        code: typeof error === 'object' && error ? (error as { code?: number }).code : undefined,
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
+    return { simple, legacy, typed, ethSignError };
+  }, mockAccount);
+
+  expect(state.simple).toMatch(/^0x[0-9a-f]{130}$/);
+  expect(state.legacy).toMatch(/^0x[0-9a-f]{130}$/);
+  expect(state.typed).toMatch(/^0x[0-9a-f]{130}$/);
+  expect(state.ethSignError).toEqual({
+    code: 4200,
+    message: expect.stringContaining('raw eth_sign'),
+  });
+});
+
 declare global {
   interface Window {
     ethereum?: {

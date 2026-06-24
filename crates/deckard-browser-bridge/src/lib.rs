@@ -6,20 +6,30 @@
 //! enabled for browser-bridge testing.
 
 use std::collections::BTreeMap;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
+use alloy_dyn_abi::eip712::TypedData;
+use alloy_primitives::{Address, Bytes, U256};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::time::{sleep, Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use deckard_contract::{
+    ApprovalStatus, Decision, MessageSigningRisk, ProposalOrigin, RequestId, SignMessage,
+    SignMessageKind, SignMessageResult, SignerRequest, SignerResponse, TypedDataReview,
+};
 use deckard_wallet_client::WalletClient;
 
 const PERMISSION_ETH_ACCOUNTS: &str = "eth_accounts";
 const DEV_ACCOUNT_ENV: &str = "DECKARD_BRIDGE_DEV_ACCOUNT";
 const DEFAULT_DEV_ACCOUNT: &str = "0xdec0ded000000000000000000000000000001193";
+const MESSAGE_APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
+const MESSAGE_APPROVAL_POLL: Duration = Duration::from_millis(250);
 
 /// Per-origin dapp session remembered by the bridge process.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,6 +126,13 @@ impl BridgeBackend {
             }
         }
     }
+
+    async fn sign_message(&self, message: SignMessage) -> Result<Bytes, BridgeError> {
+        match self {
+            Self::DevMock { .. } => Ok(dev_signature_for_message(&message)),
+            Self::WalletClient(wallet) => sign_message_with_daemon(wallet, message).await,
+        }
+    }
 }
 
 pub struct BrowserBridge {
@@ -142,6 +159,20 @@ impl BrowserBridge {
                 .request_accounts(origin)
                 .await
                 .map(|accounts| json!(accounts)),
+            "personal_sign" => self
+                .personal_sign(origin, request.params)
+                .await
+                .map(|signature| json!(hex_prefixed(signature.as_ref()))),
+            "eth_signTypedData_v4" => self
+                .sign_typed_data_v4(origin, request.params)
+                .await
+                .map(|signature| json!(hex_prefixed(signature.as_ref()))),
+            "eth_sign" => Err(BridgeError {
+                code: 4200,
+                message:
+                    "Deckard refuses raw eth_sign because raw hash signing is not clear-signable"
+                        .into(),
+            }),
             method => Err(BridgeError {
                 code: 4200,
                 message: format!("Deckard browser bridge does not support {method}"),
@@ -170,6 +201,43 @@ impl BrowserBridge {
             store.grant_accounts(origin.to_string(), self.chain_id, account)
         };
         Ok(vec![session.account])
+    }
+
+    async fn personal_sign(&self, origin: &str, params: Value) -> Result<Bytes, BridgeError> {
+        let session = self.require_session(origin)?;
+        let (account, message) = parse_personal_sign_params(params)?;
+        ensure_same_account(&session.account, &account)?;
+        self.backend
+            .sign_message(SignMessage {
+                chain_id: self.chain_id,
+                origin: origin.to_string(),
+                kind: SignMessageKind::PersonalSign { message },
+            })
+            .await
+    }
+
+    async fn sign_typed_data_v4(&self, origin: &str, params: Value) -> Result<Bytes, BridgeError> {
+        let session = self.require_session(origin)?;
+        let (account, review) = parse_typed_data_v4_params(params, self.chain_id)?;
+        ensure_same_account(&session.account, &account)?;
+        self.backend
+            .sign_message(SignMessage {
+                chain_id: self.chain_id,
+                origin: origin.to_string(),
+                kind: SignMessageKind::TypedDataV4(review),
+            })
+            .await
+    }
+
+    fn require_session(&self, origin: &str) -> Result<DappSession, BridgeError> {
+        let store = self.sessions.lock().map_err(|_| BridgeError {
+            code: 4900,
+            message: "Deckard browser bridge session store is unavailable".into(),
+        })?;
+        store.get(origin).cloned().ok_or_else(|| BridgeError {
+            code: 4100,
+            message: "Deckard requires eth_requestAccounts before signing".into(),
+        })
     }
 }
 
@@ -215,6 +283,263 @@ impl BridgeResponse {
 pub struct BridgeError {
     pub code: i64,
     pub message: String,
+}
+
+async fn sign_message_with_daemon(
+    wallet: &WalletClient,
+    message: SignMessage,
+) -> Result<Bytes, BridgeError> {
+    let request_id = deckard_wallet_client::SignerClient::request_id_for_message(&message);
+    let decision = wallet
+        .signer_client()
+        .propose_message(&message, ProposalOrigin::App)
+        .await
+        .map_err(bridge_daemon_error)?;
+    match decision {
+        Decision::Deny { reason } => return Err(bridge_denied(reason)),
+        Decision::Allow => {}
+        Decision::NeedsApproval { .. } => wait_for_message_approval(wallet, request_id).await?,
+    }
+    match wallet
+        .signer_client()
+        .sign_message(request_id)
+        .await
+        .map_err(bridge_daemon_error)?
+    {
+        SignMessageResult::Signed { signature } => Ok(signature),
+        SignMessageResult::Denied { reason } => Err(bridge_denied(reason)),
+    }
+}
+
+async fn wait_for_message_approval(
+    wallet: &WalletClient,
+    request_id: RequestId,
+) -> Result<(), BridgeError> {
+    let deadline = Instant::now() + MESSAGE_APPROVAL_TIMEOUT;
+    loop {
+        let status = match wallet
+            .signer_client()
+            .request(&SignerRequest::Status { request_id })
+            .await
+            .map_err(bridge_daemon_error)?
+        {
+            SignerResponse::Status(status) => status,
+            other => {
+                return Err(BridgeError {
+                    code: 4900,
+                    message: format!("daemon returned unexpected response to Status: {other:?}"),
+                })
+            }
+        };
+        match status {
+            ApprovalStatus::Allowed => return Ok(()),
+            ApprovalStatus::Denied { reason } => return Err(bridge_denied(reason)),
+            ApprovalStatus::Expired => return Err(bridge_denied("expired".into())),
+            ApprovalStatus::Pending => {
+                if Instant::now() >= deadline {
+                    return Err(BridgeError {
+                        code: 4001,
+                        message: "message-signing approval timed out".into(),
+                    });
+                }
+                sleep(MESSAGE_APPROVAL_POLL).await;
+            }
+        }
+    }
+}
+
+fn parse_personal_sign_params(params: Value) -> Result<(Address, Bytes), BridgeError> {
+    let values = params_array(params, "personal_sign")?;
+    if values.len() != 2 {
+        return Err(invalid_params("personal_sign expects [message, account]"));
+    }
+    let first = param_string(&values[0], "personal_sign first parameter")?;
+    let second = param_string(&values[1], "personal_sign second parameter")?;
+    match (parse_address(first), parse_address(second)) {
+        (Ok(account), Err(_)) => Ok((account, message_bytes(second)?)),
+        (Err(_), Ok(account)) => Ok((account, message_bytes(first)?)),
+        (Ok(_), Ok(_)) => Err(invalid_params(
+            "personal_sign needs one account and one message",
+        )),
+        (Err(_), Err(_)) => Err(invalid_params("personal_sign missing account parameter")),
+    }
+}
+
+fn parse_typed_data_v4_params(
+    params: Value,
+    chain_id: u64,
+) -> Result<(Address, TypedDataReview), BridgeError> {
+    let values = params_array(params, "eth_signTypedData_v4")?;
+    if values.len() != 2 {
+        return Err(invalid_params(
+            "eth_signTypedData_v4 expects [account, typedData]",
+        ));
+    }
+    let account = parse_address(param_string(
+        &values[0],
+        "eth_signTypedData_v4 account parameter",
+    )?)?;
+    let typed_data: TypedData = serde_json::from_value(values[1].clone()).map_err(|error| {
+        invalid_params(format!("invalid eth_signTypedData_v4 payload: {error}"))
+    })?;
+    let digest = typed_data.eip712_signing_hash().map_err(|error| {
+        invalid_params(format!("invalid eth_signTypedData_v4 encoding: {error}"))
+    })?;
+    let domain_chain_id = typed_data
+        .domain
+        .chain_id
+        .and_then(|value| u256_to_u64(value).ok());
+    if let Some(domain_chain_id) = domain_chain_id {
+        if domain_chain_id != chain_id {
+            return Err(BridgeError {
+                code: 4901,
+                message: format!(
+                    "typed-data domain chain id {domain_chain_id} does not match active chain {chain_id}"
+                ),
+            });
+        }
+    }
+    let risks = if typed_data.domain.verifying_contract.is_none() {
+        vec![MessageSigningRisk::UnknownVerifyingContract]
+    } else {
+        Vec::new()
+    };
+    Ok((
+        account,
+        TypedDataReview {
+            domain_name: typed_data.domain.name.map(|value| value.into_owned()),
+            domain_version: typed_data.domain.version.map(|value| value.into_owned()),
+            domain_chain_id,
+            verifying_contract: typed_data.domain.verifying_contract,
+            primary_type: typed_data.primary_type,
+            digest,
+            risks,
+        },
+    ))
+}
+
+fn params_array(params: Value, method: &str) -> Result<Vec<Value>, BridgeError> {
+    match params {
+        Value::Array(values) => Ok(values),
+        _ => Err(invalid_params(format!("{method} params must be an array"))),
+    }
+}
+
+fn param_string<'a>(value: &'a Value, label: &str) -> Result<&'a str, BridgeError> {
+    value
+        .as_str()
+        .ok_or_else(|| invalid_params(format!("{label} must be a string")))
+}
+
+fn parse_address(value: &str) -> Result<Address, BridgeError> {
+    Address::from_str(value).map_err(|_| invalid_params("invalid Ethereum address"))
+}
+
+fn message_bytes(value: &str) -> Result<Bytes, BridgeError> {
+    if let Some(hex) = value.strip_prefix("0x") {
+        Ok(Bytes::from(hex_to_bytes(hex)?))
+    } else {
+        Ok(Bytes::copy_from_slice(value.as_bytes()))
+    }
+}
+
+fn ensure_same_account(session_account: &str, requested: &Address) -> Result<(), BridgeError> {
+    let connected = parse_address(session_account)?;
+    if connected == *requested {
+        Ok(())
+    } else {
+        Err(BridgeError {
+            code: 4100,
+            message: "signing account is not connected to this origin".into(),
+        })
+    }
+}
+
+fn u256_to_u64(value: U256) -> Result<u64, ()> {
+    if value > U256::from(u64::MAX) {
+        Err(())
+    } else {
+        Ok(value.to::<u64>())
+    }
+}
+
+fn bridge_daemon_error(error: anyhow::Error) -> BridgeError {
+    BridgeError {
+        code: 4900,
+        message: error.to_string(),
+    }
+}
+
+fn bridge_denied(reason: String) -> BridgeError {
+    BridgeError {
+        code: 4001,
+        message: format!("message signing denied: {reason}"),
+    }
+}
+
+fn invalid_params(message: impl Into<String>) -> BridgeError {
+    BridgeError {
+        code: -32602,
+        message: message.into(),
+    }
+}
+
+fn dev_signature_for_message(message: &SignMessage) -> Bytes {
+    let digest = match message.signing_digest() {
+        Some(digest) => digest,
+        None => alloy_primitives::keccak256(frame_dev_personal_message(message)),
+    };
+    let mut signature = [0_u8; 65];
+    signature[..32].copy_from_slice(digest.as_slice());
+    signature[32..64].copy_from_slice(digest.as_slice());
+    signature[64] = 27;
+    Bytes::copy_from_slice(&signature)
+}
+
+fn frame_dev_personal_message(message: &SignMessage) -> Vec<u8> {
+    match &message.kind {
+        SignMessageKind::PersonalSign { message } => {
+            let prefix = format!("\x19Ethereum Signed Message:\n{}", message.len());
+            let mut framed = prefix.into_bytes();
+            framed.extend_from_slice(message.as_ref());
+            framed
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, BridgeError> {
+    if !hex.len().is_multiple_of(2) {
+        return Err(invalid_params("hex string has odd length"));
+    }
+    let mut out = Vec::with_capacity(hex.len() / 2);
+    let bytes = hex.as_bytes();
+    for i in (0..bytes.len()).step_by(2) {
+        let high = hex_nibble(bytes[i])?;
+        let low = hex_nibble(bytes[i + 1])?;
+        out.push((high << 4) | low);
+    }
+    Ok(out)
+}
+
+fn hex_nibble(byte: u8) -> Result<u8, BridgeError> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(invalid_params("hex string contains a non-hex character")),
+    }
+}
+
+fn hex_prefixed(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(2 + bytes.len() * 2);
+    out.push_str("0x");
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
 pub fn dev_account_from_env() -> String {
@@ -458,5 +783,174 @@ mod tests {
 
         let accounts = bridge.accounts_for_origin(ORIGIN);
         assert_eq!(accounts, vec![DEFAULT_DEV_ACCOUNT]);
+    }
+
+    #[tokio::test]
+    async fn personal_sign_requires_connected_account_and_returns_dev_signature() {
+        let bridge = bridge();
+        let before_connect = bridge
+            .handle_request(
+                ORIGIN,
+                BridgeRequest {
+                    id: json!(2),
+                    method: "personal_sign".into(),
+                    params: json!(["0x68656c6c6f", DEFAULT_DEV_ACCOUNT]),
+                },
+            )
+            .await;
+        assert_eq!(before_connect.error.expect("unauthorized").code, 4100);
+
+        let _ = bridge
+            .handle_request(
+                ORIGIN,
+                BridgeRequest {
+                    id: json!(1),
+                    method: "eth_requestAccounts".into(),
+                    params: Value::Null,
+                },
+            )
+            .await;
+
+        let response = bridge
+            .handle_request(
+                ORIGIN,
+                BridgeRequest {
+                    id: json!(3),
+                    method: "personal_sign".into(),
+                    params: json!(["0x68656c6c6f", DEFAULT_DEV_ACCOUNT]),
+                },
+            )
+            .await;
+        let signature = response
+            .result
+            .expect("signature result")
+            .as_str()
+            .expect("hex signature")
+            .to_string();
+        assert!(signature.starts_with("0x"));
+        assert_eq!(signature.len(), 132);
+    }
+
+    #[tokio::test]
+    async fn personal_sign_accepts_legacy_account_first_order() {
+        let bridge = bridge();
+        let _ = bridge
+            .handle_request(
+                ORIGIN,
+                BridgeRequest {
+                    id: json!(1),
+                    method: "eth_requestAccounts".into(),
+                    params: Value::Null,
+                },
+            )
+            .await;
+        let response = bridge
+            .handle_request(
+                ORIGIN,
+                BridgeRequest {
+                    id: json!(3),
+                    method: "personal_sign".into(),
+                    params: json!([DEFAULT_DEV_ACCOUNT, "hello"]),
+                },
+            )
+            .await;
+        assert!(response.error.is_none(), "{response:?}");
+        assert_eq!(response.result.unwrap().as_str().unwrap().len(), 132);
+    }
+
+    #[tokio::test]
+    async fn eth_sign_is_refused_explicitly() {
+        let response = bridge()
+            .handle_request(
+                ORIGIN,
+                BridgeRequest {
+                    id: json!(4),
+                    method: "eth_sign".into(),
+                    params: json!([DEFAULT_DEV_ACCOUNT, "0x1234"]),
+                },
+            )
+            .await;
+        let error = response.error.expect("eth_sign refusal");
+        assert_eq!(error.code, 4200);
+        assert!(error.message.contains("raw eth_sign"));
+    }
+
+    #[tokio::test]
+    async fn typed_data_v4_returns_dev_signature_for_walletbeat_shape() {
+        let bridge = bridge();
+        let _ = bridge
+            .handle_request(
+                ORIGIN,
+                BridgeRequest {
+                    id: json!(1),
+                    method: "eth_requestAccounts".into(),
+                    params: Value::Null,
+                },
+            )
+            .await;
+
+        let typed_data = json!({
+            "domain": {
+                "name": "Test Signature App",
+                "version": "1",
+                "chainId": 11155111,
+                "verifyingContract": "0x0000000000000000000000000000000000000000"
+            },
+            "types": {
+                "EIP712Domain": [
+                    {"name": "name", "type": "string"},
+                    {"name": "version", "type": "string"},
+                    {"name": "chainId", "type": "uint256"},
+                    {"name": "verifyingContract", "type": "address"}
+                ],
+                "TestMessage": [
+                    {"name": "purpose", "type": "string"},
+                    {"name": "message", "type": "string"}
+                ]
+            },
+            "primaryType": "TestMessage",
+            "message": {
+                "purpose": "Educational Testing Only",
+                "message": "This signature is for testing purposes only."
+            }
+        });
+        let response = bridge
+            .handle_request(
+                ORIGIN,
+                BridgeRequest {
+                    id: json!(5),
+                    method: "eth_signTypedData_v4".into(),
+                    params: json!([DEFAULT_DEV_ACCOUNT, typed_data]),
+                },
+            )
+            .await;
+        assert!(response.error.is_none(), "{response:?}");
+        assert_eq!(response.result.unwrap().as_str().unwrap().len(), 132);
+    }
+
+    #[tokio::test]
+    async fn signing_rejects_wrong_connected_account() {
+        let bridge = bridge();
+        let _ = bridge
+            .handle_request(
+                ORIGIN,
+                BridgeRequest {
+                    id: json!(1),
+                    method: "eth_requestAccounts".into(),
+                    params: Value::Null,
+                },
+            )
+            .await;
+        let response = bridge
+            .handle_request(
+                ORIGIN,
+                BridgeRequest {
+                    id: json!(6),
+                    method: "personal_sign".into(),
+                    params: json!(["0x68656c6c6f", "0x0000000000000000000000000000000000000001"]),
+                },
+            )
+            .await;
+        assert_eq!(response.error.expect("wrong-account error").code, 4100);
     }
 }
