@@ -83,6 +83,22 @@ async function main() {
         method: 'eth_sendTransaction',
         params: [{ from: account, to: '0x0000000000000000000000000000000000000001', value: '0x1' }],
       });
+      const transferHash = await provider.request({
+        method: 'eth_sendTransaction',
+        params: [{
+          from: account,
+          to: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
+          data: '0xa9059cbb00000000000000000000000087870bca3f3fd6335c3f4ce8392d69350b4fa4e200000000000000000000000000000000000000000000000000000000000f4240',
+        }],
+      });
+      const approveHash = await provider.request({
+        method: 'eth_sendTransaction',
+        params: [{
+          from: account,
+          to: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
+          data: '0x095ea7b300000000000000000000000087870bca3f3fd6335c3f4ce8392d69350b4fa4e200000000000000000000000000000000000000000000000000000000000f4240',
+        }],
+      });
       let contractCallError = null;
       try {
         await provider.request({
@@ -90,7 +106,7 @@ async function main() {
           params: [{
             from: account,
             to: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
-            data: '0x095ea7b300000000000000000000000087870bca3f3fd6335c3f4ce8392d69350b4fa4e200000000000000000000000000000000000000000000000000000000000f4240',
+            data: '0xdeadbeef00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001',
           }],
         });
       } catch (error) {
@@ -99,7 +115,7 @@ async function main() {
           message: error instanceof Error ? error.message : String(error),
         };
       }
-      return { accounts, activeChain, nativeHash, contractCallError };
+      return { accounts, activeChain, nativeHash, transferHash, approveHash, contractCallError };
     }, { account: mockAccount });
 
     const checks = [
@@ -109,8 +125,18 @@ async function main() {
         detail: results.nativeHash,
       },
       {
-        name: 'ERC-20 contract call refused until clear-signing classifier exists',
-        passed: results.contractCallError?.code === 4200 && /contract calldata/.test(results.contractCallError?.message ?? ''),
+        name: 'ERC-20 transfer(address,uint256)',
+        passed: typeof results.transferHash === 'string' && /^0x[0-9a-f]{64}$/.test(results.transferHash),
+        detail: results.transferHash,
+      },
+      {
+        name: 'ERC-20 approve(address,uint256)',
+        passed: typeof results.approveHash === 'string' && /^0x[0-9a-f]{64}$/.test(results.approveHash),
+        detail: results.approveHash,
+      },
+      {
+        name: 'unknown contract calldata refused',
+        passed: results.contractCallError?.code === 4200 && /unsupported transaction calldata/.test(results.contractCallError?.message ?? ''),
         detail: results.contractCallError,
       },
       {

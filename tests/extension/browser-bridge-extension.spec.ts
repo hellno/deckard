@@ -215,7 +215,7 @@ test('local dapp can request reviewed message signatures in dev mode', async ({ 
   });
 });
 
-test('local dapp can request a native send transaction in dev mode', async ({ page }) => {
+test('local dapp can request reviewed send transactions in dev mode', async ({ page }) => {
   await page.goto('/');
   await expect(page.locator('#output')).toContainText('window.ethereum detected');
 
@@ -225,16 +225,36 @@ test('local dapp can request a native send transaction in dev mode', async ({ pa
       throw new Error('window.ethereum missing');
     }
     await provider.request({ method: 'eth_requestAccounts' });
-    const txHash = await provider.request({
+    const nativeHash = await provider.request({
       method: 'eth_sendTransaction',
       params: [{ from: account, to: '0x0000000000000000000000000000000000000001', value: '0x1' }],
+    });
+    const transferHash = await provider.request({
+      method: 'eth_sendTransaction',
+      params: [{
+        from: account,
+        to: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
+        data: '0xa9059cbb00000000000000000000000087870bca3f3fd6335c3f4ce8392d69350b4fa4e200000000000000000000000000000000000000000000000000000000000f4240',
+      }],
+    });
+    const approveHash = await provider.request({
+      method: 'eth_sendTransaction',
+      params: [{
+        from: account,
+        to: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
+        data: '0x095ea7b300000000000000000000000087870bca3f3fd6335c3f4ce8392d69350b4fa4e200000000000000000000000000000000000000000000000000000000000f4240',
+      }],
     });
 
     let contractCallError: { code?: number; message?: string } | null = null;
     try {
       await provider.request({
         method: 'eth_sendTransaction',
-        params: [{ from: account, to: '0x0000000000000000000000000000000000000001', data: '0xa9059cbb' }],
+        params: [{
+          from: account,
+          to: '0x0000000000000000000000000000000000000001',
+          data: '0xdeadbeef00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001',
+        }],
       });
     } catch (error) {
       contractCallError = {
@@ -243,13 +263,15 @@ test('local dapp can request a native send transaction in dev mode', async ({ pa
       };
     }
 
-    return { txHash, contractCallError };
+    return { nativeHash, transferHash, approveHash, contractCallError };
   }, mockAccount);
 
-  expect(state.txHash).toMatch(/^0x[0-9a-f]{64}$/);
+  expect(state.nativeHash).toMatch(/^0x[0-9a-f]{64}$/);
+  expect(state.transferHash).toMatch(/^0x[0-9a-f]{64}$/);
+  expect(state.approveHash).toMatch(/^0x[0-9a-f]{64}$/);
   expect(state.contractCallError).toEqual({
     code: 4200,
-    message: expect.stringContaining('contract calldata'),
+    message: expect.stringContaining('unsupported transaction calldata'),
   });
 });
 

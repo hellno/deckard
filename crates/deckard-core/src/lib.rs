@@ -75,9 +75,9 @@ pub use chain::{
 // CoW order machinery, re-exported so the daemon + app + MCP can build/sign/cancel orders and
 // decode shaped approvals through core without naming the `cow_types` path directly.
 pub use cow_types::{
-    apply_slippage, build_invalidate_order_calldata, cow_api_base, decode_approve, order_digest,
-    order_uid, APPROVE_SELECTOR, APP_DATA_DOC, APP_DATA_HASH, GPV2_SETTLEMENT, GPV2_VAULT_RELAYER,
-    ORDER_TYPE_HASH,
+    apply_slippage, build_erc20_transfer_calldata, build_invalidate_order_calldata, cow_api_base,
+    decode_approve, order_digest, order_uid, APPROVE_SELECTOR, APP_DATA_DOC, APP_DATA_HASH,
+    GPV2_SETTLEMENT, GPV2_VAULT_RELAYER, ORDER_TYPE_HASH,
 };
 // The orderbook REST client + its serde types + pure parse helpers, re-exported only when the
 // `cow-client` feature is on (the daemon, built without it, never sees these symbols).
