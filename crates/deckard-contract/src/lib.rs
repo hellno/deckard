@@ -42,14 +42,16 @@ pub use clear_signing::{
 };
 pub use decision::{Decision, RequestId};
 pub use intent::{Intent, IntentKind};
-pub use message_signing::{MessageSigningRisk, SignMessage, SignMessageKind, TypedDataReview};
+pub use message_signing::{
+    MessageSigningRisk, PermitReview, SignMessage, SignMessageKind, TypedDataReview,
+};
 pub use mock::MockSigner;
 pub use policy::{evaluate, evaluate_message, evaluate_order, ApprovalMode, Policy};
 pub use read_status::ReadStatus;
 pub use rpc::{
-    ActivityLifecycle, ActivityRecord, ApprovalStatus, BalanceReport, BreachedLimit, ExecuteResult,
-    PendingPayloadView, PendingRecord, ProposalOrigin, RailgunViewGrant, SignMessageResult,
-    SignOrderResult, SignerRequest, SignerResponse, StatusView, UnlockOutcome,
+    ActivityLifecycle, ActivityRecord, ApprovalRisk, ApprovalStatus, BalanceReport, BreachedLimit,
+    ExecuteResult, PendingPayloadView, PendingRecord, ProposalOrigin, RailgunViewGrant,
+    SignMessageResult, SignOrderResult, SignerRequest, SignerResponse, StatusView, UnlockOutcome,
 };
 pub use shield_status::ShieldStatus;
 pub use signer::Signer;
@@ -140,6 +142,12 @@ mod roundtrip_tests {
                 primary_type: "PermitSingle".into(),
                 digest: B256::repeat_byte(0x42),
                 risks: vec![MessageSigningRisk::PermitLike],
+                permit: Some(Box::new(PermitReview {
+                    owner: Address::repeat_byte(0x11),
+                    spender: Address::repeat_byte(0x33),
+                    value: U256::MAX,
+                    deadline: U256::from(1_950_000_000_u64),
+                })),
             }),
         }
     }
@@ -420,6 +428,7 @@ mod roundtrip_tests {
                 token: Address::repeat_byte(0xA1),
                 spender: Address::repeat_byte(0xC9),
                 amount: U256::MAX,
+                risks: vec![ApprovalRisk::UnlimitedAllowance],
             },
             timestamp_ms: u64::MAX,
             tx_hash: None,
@@ -479,6 +488,7 @@ mod roundtrip_tests {
             token: Address::repeat_byte(0xA1),
             spender: Address::repeat_byte(0xC9),
             amount: U256::from(1_000_000_000_000_000_000_u64),
+            risks: Vec::new(),
         });
 
         roundtrip(&PendingRecord {
@@ -495,6 +505,7 @@ mod roundtrip_tests {
                 token: Address::repeat_byte(0xA1),
                 spender: Address::repeat_byte(0xC9),
                 amount: U256::MAX,
+                risks: vec![ApprovalRisk::UnlimitedAllowance],
             },
             // u64::MAX exercises the wire's full width for the new field.
             remaining_ms: u64::MAX,

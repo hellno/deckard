@@ -21,6 +21,7 @@ Deckard currently provides:
 - explicit raw `eth_sign` refusal
 - reviewed native ETH send
 - reviewed ERC-20 `transfer(address,uint256)` and `approve(address,uint256)` classification
+- first-class unlimited ERC-20 approval and Permit-style typed-data risk warnings
 - non-atomic EIP-5792 batches made only from current clear-signable transaction shapes
 - fail-closed refusal for unknown/arbitrary calldata
 
@@ -28,7 +29,7 @@ Deckard does **not** yet provide:
 
 - address reputation or known-scam lists
 - recent-contract or previous-interaction context
-- first-class infinite-approval / Permit risk warnings
+
 - revm-style transaction simulation
 - token/NFT asset-delta rendering
 - misleading-selector / fake-airdrop / volatile-outcome / guaranteed-revert detection
@@ -43,8 +44,8 @@ Source: `.walletbeat/walletbeat/src/constants/test-scam-alerts.ts`.
 | `previous-interaction-1` | previous interaction | tracked gap | Deckard does not track or display per-wallet contract interaction history. | #150 |
 | `wallet-own-1` | known scam / custom recipient | tracked gap | Deckard can review a native send, but does not score arbitrary recipients as suspicious. | #149, #135 |
 | `known-scam-eth-send` | known scam address | tracked gap | Deckard does not maintain a scam-address fixture/list or reputation source. | #149, #135 |
-| `allow-infinite-usdc` | infinite ERC-20 approval | tracked gap | Deckard classifies ERC-20 `approve`, but does not yet elevate unlimited allowance/spender risk as a dedicated warning. | #151, #135 |
-| `allow-infinite-permit` | infinite permit signature | tracked gap | Deckard supports EIP-712 review and chain-id mismatch denial, but does not yet render Permit-specific owner/spender/value/deadline risk rows. | #151, #135 |
+| `allow-infinite-usdc` | infinite ERC-20 approval | supported | Deckard classifies ERC-20 `approve`, marks `uint256::MAX` as an unlimited allowance, and renders an explicit warning in the review card. | #151; richer policy actions remain #135 |
+| `allow-infinite-permit` | infinite permit signature | supported | Deckard recognizes Permit-style EIP-712 payloads, extracts owner/spender/value/deadline, and flags unlimited values plus long deadlines. | #151; richer policy actions remain #135 |
 
 ## Transaction-simulation fixtures
 

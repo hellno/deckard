@@ -111,6 +111,14 @@ async function main() {
           data: '0x095ea7b300000000000000000000000087870bca3f3fd6335c3f4ce8392d69350b4fa4e200000000000000000000000000000000000000000000000000000000000f4240',
         }],
       });
+      const infiniteApproveHash = await provider.request({
+        method: 'eth_sendTransaction',
+        params: [{
+          from: account,
+          to: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
+          data: '0x095ea7b300000000000000000000000087870bca3f3fd6335c3f4ce8392d69350b4fa4e2ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff',
+        }],
+      });
       const capabilities = await provider.request({
         method: 'wallet_getCapabilities',
         params: [account],
@@ -203,6 +211,43 @@ async function main() {
           },
         ],
       });
+      const permitSignature = await provider.request({
+        method: 'eth_signTypedData_v4',
+        params: [
+          account,
+          {
+            domain: {
+              name: 'USDC',
+              version: '2',
+              chainId: Number(chainId),
+              verifyingContract: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
+            },
+            types: {
+              EIP712Domain: [
+                { name: 'name', type: 'string' },
+                { name: 'version', type: 'string' },
+                { name: 'chainId', type: 'uint256' },
+                { name: 'verifyingContract', type: 'address' },
+              ],
+              Permit: [
+                { name: 'owner', type: 'address' },
+                { name: 'spender', type: 'address' },
+                { name: 'value', type: 'uint256' },
+                { name: 'nonce', type: 'uint256' },
+                { name: 'deadline', type: 'uint256' },
+              ],
+            },
+            primaryType: 'Permit',
+            message: {
+              owner: account,
+              spender: '0x0000000000000000000000000000000000000000',
+              value: '115792089237316195423570985008687907853269984665640564039457584007913129639935',
+              nonce: 0,
+              deadline: 1950000000,
+            },
+          },
+        ],
+      });
       let ethSignError = null;
       try {
         await provider.request({ method: 'eth_sign', params: [account, '0x1234'] });
@@ -218,6 +263,7 @@ async function main() {
         nativeHash,
         transferHash,
         approveHash,
+        infiniteApproveHash,
         capabilities,
         batchId,
         batchStatus,
@@ -226,6 +272,7 @@ async function main() {
         simpleSignature,
         siweSignature,
         typedSignature,
+        permitSignature,
         ethSignError,
       };
     }, { account, chainId: expectedChainId });
@@ -236,6 +283,7 @@ async function main() {
       check('native eth_sendTransaction via signerd', txHash(results.nativeHash), results.nativeHash),
       check('ERC-20 transfer(address,uint256) via signerd', txHash(results.transferHash), results.transferHash),
       check('ERC-20 approve(address,uint256) via signerd', txHash(results.approveHash), results.approveHash),
+      check('ERC-20 infinite approve warning path via signerd', txHash(results.infiniteApproveHash), results.infiniteApproveHash),
       check('wallet_getCapabilities EIP-5792 v2.0.0', Array.isArray(results.capabilities?.[expectedChainId]?.wallet_sendCalls?.supportedVersions) && results.capabilities[expectedChainId].wallet_sendCalls.supportedVersions.includes('2.0.0'), results.capabilities?.[expectedChainId]),
       check('wallet_sendCalls clear-signable non-atomic batch', typeof results.batchId === 'string' && results.batchId.startsWith('0x'), results.batchId),
       check('wallet_getCallsStatus for batch', results.batchStatus?.status === 200 && results.batchStatus?.atomic === false && Array.isArray(results.batchStatus?.receipts), results.batchStatus),
@@ -244,6 +292,7 @@ async function main() {
       check('personal_sign via signerd', signature(results.simpleSignature), '<signature redacted>'),
       check('SIWE personal_sign via signerd', signature(results.siweSignature), '<signature redacted>'),
       check('EIP-712 typed data via signerd', signature(results.typedSignature), '<signature redacted>'),
+      check('EIP-712 infinite Permit warning path via signerd', signature(results.permitSignature), '<signature redacted>'),
       check('raw eth_sign refused', results.ethSignError?.code === 4200 && /raw eth_sign/.test(results.ethSignError?.message ?? ''), results.ethSignError),
     ];
 
@@ -474,7 +523,7 @@ function signature(value) {
 }
 
 function isIgnoredWalletbeatDevError(message) {
-  return /generateFallbackAnalysis|Cannot read properties of undefined \(reading 'overall'\)|Failed to load resource: the server responded with a status of 404|Failed to load resource: the server responded with a status of 504 \(Outdated Optimize Dep\)|Failed to fetch dynamically imported module: .*node_modules\/\.vite\/deps\//.test(message);
+  return /generateFallbackAnalysis|Cannot read properties of undefined \(reading 'overall'\)|Failed to load resource: the server responded with a status of 404|Failed to load resource: the server responded with a status of 504 \(Outdated Optimize Dep\)|Failed to fetch dynamically imported module: http:\/\/127\.0\.0\.1:\d+\/src\/components\/WalletTest\.svelte|Failed to fetch dynamically imported module: .*node_modules\//.test(message);
 }
 
 function validateExtension() {

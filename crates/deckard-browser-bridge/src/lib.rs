@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use deckard_contract::{
-    ApprovalStatus, Decision, ExecuteResult, Intent, IntentKind, MessageSigningRisk,
+    ApprovalStatus, Decision, ExecuteResult, Intent, IntentKind, MessageSigningRisk, PermitReview,
     ProposalOrigin, RequestId, SignMessage, SignMessageKind, SignMessageResult, SignerRequest,
     SignerResponse, TypedDataReview,
 };
@@ -537,9 +537,11 @@ fn parse_typed_data_v4_params(
         &values[0],
         "eth_signTypedData_v4 account parameter",
     )?)?;
-    let typed_data: TypedData = serde_json::from_value(values[1].clone()).map_err(|error| {
-        invalid_params(format!("invalid eth_signTypedData_v4 payload: {error}"))
-    })?;
+    let typed_data_value = values[1].clone();
+    let typed_data: TypedData =
+        serde_json::from_value(typed_data_value.clone()).map_err(|error| {
+            invalid_params(format!("invalid eth_signTypedData_v4 payload: {error}"))
+        })?;
     let digest = typed_data.eip712_signing_hash().map_err(|error| {
         invalid_params(format!("invalid eth_signTypedData_v4 encoding: {error}"))
     })?;
@@ -557,11 +559,20 @@ fn parse_typed_data_v4_params(
             });
         }
     }
-    let risks = if typed_data.domain.verifying_contract.is_none() {
-        vec![MessageSigningRisk::UnknownVerifyingContract]
-    } else {
-        Vec::new()
-    };
+    let permit = permit_review_from_typed_data_json(&typed_data_value)?;
+    let mut risks = Vec::new();
+    if typed_data.domain.verifying_contract.is_none() {
+        risks.push(MessageSigningRisk::UnknownVerifyingContract);
+    }
+    if let Some(permit) = &permit {
+        risks.push(MessageSigningRisk::PermitLike);
+        if permit.value == U256::MAX {
+            risks.push(MessageSigningRisk::UnlimitedAllowance);
+        }
+        if permit_deadline_is_long(permit.deadline) {
+            risks.push(MessageSigningRisk::LongDeadline);
+        }
+    }
     Ok((
         account,
         TypedDataReview {
@@ -572,8 +583,88 @@ fn parse_typed_data_v4_params(
             primary_type: typed_data.primary_type,
             digest,
             risks,
+            permit,
         },
     ))
+}
+
+fn permit_review_from_typed_data_json(
+    value: &Value,
+) -> Result<Option<Box<PermitReview>>, BridgeError> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| invalid_params("typed data payload must be an object"))?;
+    if object
+        .get("primaryType")
+        .and_then(Value::as_str)
+        .map(|primary_type| primary_type != "Permit")
+        .unwrap_or(true)
+    {
+        return Ok(None);
+    }
+    let message = object
+        .get("message")
+        .and_then(Value::as_object)
+        .ok_or_else(|| invalid_params("Permit typed data missing message object"))?;
+    let owner = parse_address(param_string(
+        message
+            .get("owner")
+            .ok_or_else(|| invalid_params("Permit message missing owner"))?,
+        "Permit owner",
+    )?)?;
+    let spender = parse_address(param_string(
+        message
+            .get("spender")
+            .ok_or_else(|| invalid_params("Permit message missing spender"))?,
+        "Permit spender",
+    )?)?;
+    let value = parse_u256_json(
+        message
+            .get("value")
+            .ok_or_else(|| invalid_params("Permit message missing value"))?,
+        "Permit value",
+    )?;
+    let deadline = parse_u256_json(
+        message
+            .get("deadline")
+            .ok_or_else(|| invalid_params("Permit message missing deadline"))?,
+        "Permit deadline",
+    )?;
+    Ok(Some(Box::new(PermitReview {
+        owner,
+        spender,
+        value,
+        deadline,
+    })))
+}
+
+fn parse_u256_json(value: &Value, label: &str) -> Result<U256, BridgeError> {
+    match value {
+        Value::String(text) => parse_u256_text(text, label),
+        Value::Number(number) => number
+            .as_u64()
+            .map(U256::from)
+            .ok_or_else(|| invalid_params(format!("{label} must be an unsigned integer"))),
+        _ => Err(invalid_params(format!(
+            "{label} must be a string or number"
+        ))),
+    }
+}
+
+fn parse_u256_text(text: &str, label: &str) -> Result<U256, BridgeError> {
+    if let Some(hex) = text.strip_prefix("0x") {
+        U256::from_str_radix(hex, 16).map_err(|_| invalid_params(format!("invalid {label}")))
+    } else {
+        U256::from_str_radix(text, 10).map_err(|_| invalid_params(format!("invalid {label}")))
+    }
+}
+
+fn permit_deadline_is_long(deadline: U256) -> bool {
+    let one_year = U256::from(365 * 24 * 60 * 60u64);
+    let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+        return true;
+    };
+    deadline > U256::from(now.as_secs()).saturating_add(one_year)
 }
 
 fn parse_send_transaction_params(
@@ -1198,6 +1289,52 @@ mod tests {
         );
         assert!(store.revoke(ORIGIN));
         assert!(store.get(ORIGIN).is_none());
+    }
+
+    #[test]
+    fn typed_data_parser_extracts_infinite_permit_review() {
+        let typed_data = json!({
+            "domain": {
+                "name": "USDC",
+                "version": "2",
+                "chainId": 11155111,
+                "verifyingContract": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+            },
+            "types": {
+                "EIP712Domain": [
+                    { "name": "name", "type": "string" },
+                    { "name": "version", "type": "string" },
+                    { "name": "chainId", "type": "uint256" },
+                    { "name": "verifyingContract", "type": "address" }
+                ],
+                "Permit": [
+                    { "name": "owner", "type": "address" },
+                    { "name": "spender", "type": "address" },
+                    { "name": "value", "type": "uint256" },
+                    { "name": "nonce", "type": "uint256" },
+                    { "name": "deadline", "type": "uint256" }
+                ]
+            },
+            "primaryType": "Permit",
+            "message": {
+                "owner": DEFAULT_DEV_ACCOUNT,
+                "spender": "0x0000000000000000000000000000000000000000",
+                "value": "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+                "nonce": 0,
+                "deadline": 1950000000
+            }
+        });
+        let (_account, review) =
+            parse_typed_data_v4_params(json!([DEFAULT_DEV_ACCOUNT, typed_data]), 11155111)
+                .expect("permit parses");
+        let permit = review.permit.expect("permit review");
+        assert_eq!(permit.value, U256::MAX);
+        assert_eq!(permit.deadline, U256::from(1_950_000_000u64));
+        assert!(review.risks.contains(&MessageSigningRisk::PermitLike));
+        assert!(review
+            .risks
+            .contains(&MessageSigningRisk::UnlimitedAllowance));
+        assert!(review.risks.contains(&MessageSigningRisk::LongDeadline));
     }
 
     #[tokio::test]
