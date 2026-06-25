@@ -39,6 +39,7 @@ fn typed_message(domain_chain_id: u64) -> SignMessage {
             primary_type: "PermitSingle".into(),
             digest: B256::repeat_byte(0x42),
             risks: vec![MessageSigningRisk::PermitLike],
+            permit: None,
         }),
     }
 }

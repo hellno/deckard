@@ -4,7 +4,7 @@
 //! parses `personal_sign` / `eth_signTypedData_v4` into this bounded model before the
 //! daemon proposes it. The daemon signs only a stored, approved payload.
 
-use alloy_primitives::{Address, Bytes, B256};
+use alloy_primitives::{Address, Bytes, B256, U256};
 use serde::{Deserialize, Serialize};
 
 /// A human-reviewed off-chain signature request.
@@ -45,12 +45,25 @@ pub struct TypedDataReview {
     /// Display warnings derived by the bounded parser / descriptor resolver.
     #[serde(default)]
     pub risks: Vec<MessageSigningRisk>,
+    /// Structured Permit/EIP-2612-style review facts, when the typed-data shape is recognized.
+    #[serde(default)]
+    pub permit: Option<Box<PermitReview>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermitReview {
+    pub owner: Address,
+    pub spender: Address,
+    pub value: U256,
+    pub deadline: U256,
 }
 
 /// Warnings the clear-signing card can render without trusting arbitrary descriptor text.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MessageSigningRisk {
     PermitLike,
+    UnlimitedAllowance,
+    LongDeadline,
     OwnershipChange,
     SeaportOrder,
     UnknownVerifyingContract,

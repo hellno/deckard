@@ -458,6 +458,7 @@ mod message_signing_tests {
                 primary_type: "PermitSingle".into(),
                 digest: B256::repeat_byte(0x42),
                 risks: vec![MessageSigningRisk::PermitLike],
+                permit: None,
             }),
         }
     }

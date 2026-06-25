@@ -21,10 +21,10 @@ use zeroize::Zeroizing;
 
 use deckard_contract::{
     deny_reasons, evaluate, evaluate_message, evaluate_order, ActivityLifecycle, ActivityRecord,
-    ApprovalStatus, BalanceReport, BreachedLimit, Decision, ExecuteResult, Intent, IntentKind,
-    PendingPayloadView, PendingRecord, Policy, ProposalOrigin, ReadStatus, RequestId, SignMessage,
-    SignMessageKind, SignMessageResult, SignOrderResult, SignerRequest, SignerResponse, StatusView,
-    SwapOrder, UnlockOutcome,
+    ApprovalRisk, ApprovalStatus, BalanceReport, BreachedLimit, Decision, ExecuteResult, Intent,
+    IntentKind, PendingPayloadView, PendingRecord, Policy, ProposalOrigin, ReadStatus, RequestId,
+    SignMessage, SignMessageKind, SignMessageResult, SignOrderResult, SignerRequest,
+    SignerResponse, StatusView, SwapOrder, UnlockOutcome,
 };
 // Only the `shield`-gated view-grant handler constructs this; an unconditional import would
 // warn in the no-default-features build (e.g. deckard-mcp's dependency edge).
@@ -1745,9 +1745,18 @@ fn payload_view(payload: &PendingPayload) -> PendingPayloadView {
                 token: intent.to,
                 spender,
                 amount,
+                risks: approval_risks(amount),
             },
             None => PendingPayloadView::Tx(intent.clone()),
         },
+    }
+}
+
+fn approval_risks(amount: U256) -> Vec<ApprovalRisk> {
+    if amount == U256::MAX {
+        vec![ApprovalRisk::UnlimitedAllowance]
+    } else {
+        Vec::new()
     }
 }
 
@@ -1861,6 +1870,42 @@ mod exempt_list_tests {
         // Sepolia (demo fork) + anvil/hardhat default (qa vault + e2e suites) must stay hands-free.
         assert!(is_testnet_or_dev(11_155_111));
         assert!(is_testnet_or_dev(31_337));
+    }
+}
+
+#[cfg(test)]
+mod approval_risk_tests {
+    use super::*;
+    use deckard_contract::ApprovalRisk;
+
+    fn approve_intent(amount: U256) -> Intent {
+        let spender = Address::repeat_byte(0x33);
+        let mut calldata = Vec::with_capacity(68);
+        calldata.extend_from_slice(&deckard_core::APPROVE_SELECTOR);
+        calldata.extend_from_slice(&[0u8; 12]);
+        calldata.extend_from_slice(spender.as_slice());
+        let amount_word = amount.to_be_bytes::<32>();
+        calldata.extend_from_slice(&amount_word);
+        Intent {
+            chain_id: 31_337,
+            to: Address::repeat_byte(0x22),
+            token: None,
+            value: U256::ZERO,
+            calldata: Bytes::from(calldata),
+            kind: IntentKind::ContractCall,
+        }
+    }
+
+    #[test]
+    fn payload_view_marks_unlimited_approvals() {
+        let view = payload_view(&PendingPayload::Tx(approve_intent(U256::MAX)));
+        match view {
+            PendingPayloadView::Approve { amount, risks, .. } => {
+                assert_eq!(amount, U256::MAX);
+                assert!(risks.contains(&ApprovalRisk::UnlimitedAllowance));
+            }
+            other => panic!("expected approve view, got {other:?}"),
+        }
     }
 }
 

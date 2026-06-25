@@ -243,7 +243,14 @@ pub enum PendingPayloadView {
         token: Address,
         spender: Address,
         amount: U256,
+        #[serde(default)]
+        risks: Vec<ApprovalRisk>,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ApprovalRisk {
+    UnlimitedAllowance,
 }
 
 /// Where an [`ActivityRecord`] sits in its lifecycle: `Proposed` (stored, awaiting a human

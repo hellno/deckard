@@ -47,8 +47,9 @@ use gpui_component::{
 };
 
 use deckard_contract::{
-    ActivityLifecycle, ActivityRecord, BreachedLimit, Intent, IntentKind, PendingPayloadView,
-    ProposalOrigin, RequestId, SignMessage, SignMessageKind,
+    ActivityLifecycle, ActivityRecord, ApprovalRisk, BreachedLimit, Intent, IntentKind,
+    MessageSigningRisk, PendingPayloadView, ProposalOrigin, RequestId, SignMessage,
+    SignMessageKind,
 };
 
 use crate::money::money;
@@ -138,9 +139,19 @@ fn payload_summary(payload: &PendingPayloadView, mask: bool) -> String {
                 masked_amount(order.buy_amount_min, mask)
             )
         }
-        PendingPayloadView::Approve { token, spender, .. } => {
+        PendingPayloadView::Approve {
+            token,
+            spender,
+            risks,
+            ..
+        } => {
+            let prefix = if risks.contains(&ApprovalRisk::UnlimitedAllowance) {
+                "unlimited approve"
+            } else {
+                "approve"
+            };
             format!(
-                "approve {} to spend {}",
+                "{prefix} {} to spend {}",
                 short_address(spender),
                 short_address(token)
             )
@@ -173,6 +184,23 @@ fn message_preview(bytes: &[u8]) -> String {
         }
         Err(_) => format!("{} bytes (not UTF-8)", bytes.len()),
     }
+}
+
+fn message_risk_summary(risks: &[MessageSigningRisk]) -> String {
+    risks
+        .iter()
+        .map(|risk| match risk {
+            MessageSigningRisk::PermitLike => "permit-style allowance",
+            MessageSigningRisk::UnlimitedAllowance => "unlimited allowance",
+            MessageSigningRisk::LongDeadline => "long deadline",
+            MessageSigningRisk::OwnershipChange => "ownership change",
+            MessageSigningRisk::SeaportOrder => "marketplace order",
+            MessageSigningRisk::UnknownVerifyingContract => "unknown contract",
+            MessageSigningRisk::DescriptorMissing => "missing descriptor",
+            MessageSigningRisk::DescriptorInvalid => "invalid descriptor",
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// The verb+object for a transaction intent. A shield (the demo hero) reads `shield {amount} ETH`;
@@ -998,6 +1026,7 @@ impl Shell {
                 token,
                 spender,
                 amount,
+                risks,
             } => {
                 rows.push(
                     kv_money_row("Approve", *amount, None, masked, mono.clone(), fg, muted)
@@ -1011,6 +1040,18 @@ impl Shell {
                     kv_mono_row("Spender", &short_address(spender), mono.clone(), fg, muted)
                         .into_any_element(),
                 );
+                if risks.contains(&ApprovalRisk::UnlimitedAllowance) {
+                    rows.push(
+                        kv_mono_row(
+                            "Warning",
+                            "Unlimited approval — spender can move all tokens",
+                            mono.clone(),
+                            fg,
+                            muted,
+                        )
+                        .into_any_element(),
+                    );
+                }
             }
             PendingPayloadView::Message(message) => {
                 rows.push(
@@ -1072,6 +1113,62 @@ impl Shell {
                                 kv_mono_row(
                                     "Contract",
                                     &short_address(contract),
+                                    mono.clone(),
+                                    fg,
+                                    muted,
+                                )
+                                .into_any_element(),
+                            );
+                        }
+                        if let Some(permit) = review.permit.as_ref() {
+                            rows.push(
+                                kv_mono_row(
+                                    "Owner",
+                                    &short_address(&permit.owner),
+                                    mono.clone(),
+                                    fg,
+                                    muted,
+                                )
+                                .into_any_element(),
+                            );
+                            rows.push(
+                                kv_mono_row(
+                                    "Spender",
+                                    &short_address(&permit.spender),
+                                    mono.clone(),
+                                    fg,
+                                    muted,
+                                )
+                                .into_any_element(),
+                            );
+                            rows.push(
+                                kv_money_row(
+                                    "Permit value",
+                                    permit.value,
+                                    None,
+                                    masked,
+                                    mono.clone(),
+                                    fg,
+                                    muted,
+                                )
+                                .into_any_element(),
+                            );
+                            rows.push(
+                                kv_mono_row(
+                                    "Permit deadline",
+                                    &permit.deadline.to_string(),
+                                    mono.clone(),
+                                    fg,
+                                    muted,
+                                )
+                                .into_any_element(),
+                            );
+                        }
+                        if !review.risks.is_empty() {
+                            rows.push(
+                                kv_mono_row(
+                                    "Warnings",
+                                    &message_risk_summary(&review.risks),
                                     mono.clone(),
                                     fg,
                                     muted,
@@ -1457,6 +1554,25 @@ mod tests {
             settled_label(&lapsed),
             settled_label(&denied),
             "a lapsed window must not read identically to a human denial"
+        );
+    }
+
+    #[test]
+    fn approval_and_message_risk_summaries_are_plain_language() {
+        let approve = PendingPayloadView::Approve {
+            token: Address::repeat_byte(0xA1),
+            spender: Address::repeat_byte(0xC9),
+            amount: U256::MAX,
+            risks: vec![ApprovalRisk::UnlimitedAllowance],
+        };
+        assert!(payload_summary(&approve, false).starts_with("unlimited approve"));
+        assert_eq!(
+            message_risk_summary(&[
+                MessageSigningRisk::PermitLike,
+                MessageSigningRisk::UnlimitedAllowance,
+                MessageSigningRisk::LongDeadline,
+            ]),
+            "permit-style allowance, unlimited allowance, long deadline"
         );
     }
 
