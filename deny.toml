@@ -48,6 +48,7 @@ ignore = [
     { id = "RUSTSEC-2025-0052", reason = "async-std discontinued; transitive, no maintained drop-in in the pinned tree" },
     { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile unmaintained (superseded by rustls-pki-types); transitive via Helios + the Zed gpui fork" },
     { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 unmaintained; build-time proc-macro only, no runtime surface" },
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser unmaintained; transitive via gpui (fontdb->usvg) runtime font/SVG glyph parsing; no maintained drop-in in the pinned tree; re-evaluate on just bump-gpui" },
     # ── gtk-rs GTK3 bindings — unmaintained (the gtk3-rs project is EOL, superseded by gtk4-rs). Pulled
     #    ONLY by the optional `tray` feature (libappindicator → gtk3); not in the default build. The tray
     #    ecosystem (tray-icon/libappindicator) has no GTK4 path yet, so this rides until that lands.
