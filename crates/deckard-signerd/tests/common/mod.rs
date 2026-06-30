@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::types::TransactionReceipt;
 use alloy_primitives::{Address, B256, U256};
+use deckard_contract::{Allowlist, ApprovalMode, Effect, Policy, Rule, POLICY_VERSION};
 use deckard_core::{KdfParams, Vault};
 
 /// Anvil's default dev mnemonic — account 0 is prefunded with 10000 ETH at the same BIP-44
@@ -56,9 +57,55 @@ impl Drop for TempDir {
     }
 }
 
-/// Seal a vault for anvil's account 0 into `<dir>/vault.bin` and return
-/// `(account0_address, account1_address)` (the wallet + a recipient), derived locally without
-/// any key leaving this process.
+/// Default per-tx cap the cap-semantics tests assert against: 0.05 ETH.
+pub const TEST_PER_TX_CAP_WEI: u128 = 50_000_000_000_000_000;
+/// Default daily cap: 0.2 ETH.
+pub const TEST_DAILY_CAP_WEI: u128 = 200_000_000_000_000_000;
+
+/// The v1 policy the integration tests run against by default: a `Send` rule with the OverCap
+/// approval mode + a 0.05 ETH per-tx cap + any recipient, a `Shield` rule (same mode), and a
+/// `Swap` rule allowing any token. This preserves the pre-v2 default-policy semantics the e2e
+/// tests assert (within cap → Allow, over cap → NeedsApproval, any swap token admitted) — the
+/// daemon's *built-in* default is now the friendlier Always-card policy, so the tests pin the
+/// old cap/swap behavior with an explicit on-disk policy instead.
+pub fn test_policy() -> Policy {
+    Policy {
+        version: POLICY_VERSION,
+        default_effect: Effect::Deny,
+        revoked: false,
+        daily_cap_wei: U256::from(TEST_DAILY_CAP_WEI),
+        auto_shield_min_wei: U256::from(10_000_000_000_000_000u128),
+        spent_today_wei: U256::ZERO,
+        rules: vec![
+            Rule::Send {
+                approval: ApprovalMode::OverCap,
+                per_tx_cap_wei: Some(U256::from(TEST_PER_TX_CAP_WEI)),
+                recipients: Allowlist::Any,
+            },
+            Rule::Shield {
+                approval: ApprovalMode::OverCap,
+            },
+            Rule::Swap {
+                tokens: Allowlist::Any,
+            },
+        ],
+    }
+}
+
+/// Write `policy` to `<dir>/policy.json` (the path the daemon loads). Used by tests that need a
+/// policy other than [`test_policy`] (a tight cap, a restricted allowlist, a specific mode).
+pub fn write_policy(dir: &Path, policy: &Policy) {
+    std::fs::write(
+        dir.join("policy.json"),
+        serde_json::to_vec(policy).expect("serialize policy"),
+    )
+    .expect("write policy.json");
+}
+
+/// Seal a vault for anvil's account 0 into `<dir>/vault.bin`, write the default cap-semantics
+/// [`test_policy`] alongside it, and return `(account0_address, account1_address)` (the wallet +
+/// a recipient), derived locally without any key leaving this process. Tests that need a
+/// different policy simply [`write_policy`] over the file afterward.
 pub fn seal_account0(dir: &Path) -> (Address, Address) {
     let vault = Vault::import_mnemonic(MNEMONIC, PASS, fast_kdf()).expect("import mnemonic");
     let unlocked = vault.unlock(PASS).expect("unlock");
@@ -67,6 +114,7 @@ pub fn seal_account0(dir: &Path) -> (Address, Address) {
     vault
         .write_atomic(&dir.join("vault.bin"))
         .expect("write vault");
+    write_policy(dir, &test_policy());
     (wallet, recipient)
 }
 

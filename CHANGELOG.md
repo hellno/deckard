@@ -14,6 +14,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Policy is now versioned and default-deny** ([#135]). The `policy.json` file changed shape.
+  It is now `{ "version": 1, "default": "deny", "daily_cap_wei", "auto_shield_min_wei", "rules": [...] }`,
+  where each rule grants one kind of action (`send`, `shield`, `unshield`, `swap`, `contract_call`)
+  and carries its own settings — for example a send rule's `approval` (`never` / `over_cap` / `always`),
+  its per-transaction cap (`per_tx_cap_wei`), and its `recipients` (the string `"any"` or a list of
+  allowed addresses). An action with no matching rule is denied. The old flat shape
+  (`{ per_tx_cap_wei, allow_to, require_approval, … }`) and its `allow_to: []` "any recipient" default
+  are removed; `recipients` replaces `allow_to`, and an omitted `recipients` now denies every send
+  rather than allowing all of them.
+- **A policy file with no `version` key is now rejected** ([#135]). Such a file is treated as a stale
+  pre-v1 file: the daemon refuses it, logs loudly, and falls back to a most-restrictive deny-all policy
+  that approves nothing. **Demo machines must upgrade their policy file by hand.** If you have an
+  existing demo policy, delete it and reinstall the v1 file before running the demo again:
+  `rm ~/.deckard/demo/policy.json` then `just demo` (or `cp policy.demo.json ~/.deckard/demo/policy.json`).
+  Skip this and the daemon loads the deny-all fallback, so the demo's auto-shield quietly stops working.
+
+[#135]: https://github.com/hellno/deckard/issues/135
+
 ### Fixed
 
 - **Bundled macOS app (`just bundle`) could not unlock the wallet** ([#134]). `cargo bundle`

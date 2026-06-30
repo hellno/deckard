@@ -57,7 +57,7 @@ const PREFIX_BUILDERS: &[&str] = &[
     "broadcast_failed",
 ];
 
-/// The complete frozen vocabulary: 32 static tags + 4 dynamic-prefix tags. Editing this list
+/// The complete frozen vocabulary: 38 static tags + 4 dynamic-prefix tags. Editing this list
 /// is the deliberate gate — change it here, in `deny_reasons.rs`, AND (for a real, non-test
 /// tag) in `docs/build/31-agent-quickstart.md`. `swap_unsupported_in_mock` is test-surface
 /// only and is intentionally absent from the docs table.
@@ -67,6 +67,7 @@ const FROZEN: &[&str] = &[
     r::OFF_ALLOWLIST,
     r::UNDECODABLE,
     r::OVER_CAP,
+    r::NO_RULE,
     r::RECEIVER_ZERO,
     r::RECEIVER_NOT_WALLET,
     r::ZERO_AMOUNT,
@@ -435,7 +436,7 @@ fn frozen_set_matches_module_exports() {
 fn frozen_set_is_exactly_documented() {
     assert_eq!(
         FROZEN.len(),
-        41,
+        42,
         "added/removed a Deny tag? update FROZEN, deny_reasons.rs, and the docs table"
     );
 

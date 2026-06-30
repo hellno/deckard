@@ -150,14 +150,21 @@ deckard_shield("0.2")  →  loop: deckard_status(request_id)  →  allowed  → 
 rendered as ETH for convenience. You can read it, never write it (a human edits `policy.json`
 in the Deckard config dir).
 
+The policy is versioned and **default-deny**: it carries a `version` (currently `1`), a `default`
+that is always `deny`, the two global numbers below, and a `rules` array. Each rule grants one kind
+of action and carries its own settings. An action with no matching rule is denied (`no_rule`).
+
 | Field | Meaning | What it means for you |
 |---|---|---|
-| `per_tx_cap_wei` | Max wei a single write may move. | Propose amounts at or under this and they can auto-allow. |
-| `daily_cap_wei` | Max total wei per UTC day (see `spent_today_wei` for the running count). | Even within-cap writes are refused once the day's total would pass this; it rolls over at UTC midnight. |
-| `allow_to` | Recipient allowlist; **empty = any recipient**. | Shield targets the wallet's own private address, so this rarely blocks you. |
-| `require_approval` | `never` / `over_cap` / `always`. | `over_cap` (the demo default): within-cap auto-allows, over-cap needs a human. `always`: every write needs a human. |
-| `revoked` | `true` once STOP is engaged. | Nothing will sign; a human must re-unlock in the app. |
+| `version` | Policy file format version (currently `1`). | Informational; a mismatch means a human must update the file. |
+| `default` | Always `deny` — nothing is allowed unless a rule grants it. | If there's no rule for what you want, you're denied; a human must add one. |
+| `daily_cap_wei` | Max total wei per UTC day across **all** rules (see `spent_today_wei` for the running count). | Even within a rule's per-tx cap, writes are refused once the day's total would pass this; it rolls over at UTC midnight. |
 | `auto_shield_min_wei` | Advisory threshold: inbound amounts at or above it are worth proposing a shield for. | Guidance for you; the policy gate does not enforce it. |
+| `rules` | The per-action grants. Each rule has an `approval` (`never` / `over_cap` / `always`); a `send` rule also has `per_tx_cap_wei` (its single-write ceiling) and `recipients` (the string `"any"`, or a list of allowed addresses); a `swap` rule has `tokens` (`"any"` or a token list). | These decide what auto-allows. `over_cap`: within the cap auto-allows, over-cap needs a human. `always`: every such write needs a human. `recipients` replaces the old `allow_to`; if a send rule omits it (or lists none), every send is refused. |
+| `revoked` | `true` once STOP is engaged. | Nothing will sign; a human must re-unlock in the app. |
+
+For convenience, `deckard_policy_get` also surfaces the send rule's `per_tx_cap_wei` and its
+`require_approval` (`never` / `over_cap` / `always`) at the top level, alongside `rules`.
 
 ## When you are refused — every deny tag, with the fix
 
@@ -178,10 +185,11 @@ error is to retry — for two of these (marked **do NOT retry**) that instinct i
 | `user_denied` | A human said no. | Respect it; propose something different only if asked. |
 | `resolve_not_authorized` | A `Resolve` (approval) was sent on the public proposer socket, which can't approve — only the Deckard app, over its private channel, can. | Don't try to self-approve. A human approves in the Deckard app (hold-to-confirm); the sidecar never gets a `resolve` tool. |
 | `chain_mismatch` | Sidecar and daemon disagree on the chain (e.g. demo sidecar → real daemon). | Re-run `deckard-mcp install --demo` and make sure `just demo` is what's running. |
+| `no_rule` | No rule in the policy grants this action — default-deny. | The policy has no rule for this action kind; a human must add one (edit `policy.json`) before the agent can do it. |
 | `over_cap` | Over the cap with `require_approval = never` — nothing can authorize it. | Lower the amount under `per_tx_cap_wei` (read it with `deckard_policy_get`). |
 | `cap_exceeded` | Executing would pass the spending caps as re-checked at sign time. | Lower the amount or wait for the UTC-midnight rollover; re-read the policy for current numbers. |
 | `reserve_failed` | The daemon could not durably record the spend before signing (a disk/fsync error), so it refused to sign rather than move funds it can't account against the cap. | Transient — check disk space, then re-run from `deckard_shield`. If it persists, a human checks the daemon host. |
-| `off_allowlist` | The recipient isn't in `allow_to`. | Use an allowed recipient, or a human edits `policy.json`. |
+| `off_allowlist` | The recipient isn't in the send rule's `recipients` allowlist. | Use an allowed recipient, or a human edits `policy.json`. |
 | `undecodable` | The intent's calldata doesn't match its kind (client-side bug if it recurs). | Re-run the flow from `deckard_shield`. |
 | `shield_to_mismatch` | The shield doesn't target the official Railgun contract for this chain. | Re-run from `deckard_shield` (it builds the right target); recurring means the chain is unsupported. |
 | `unsupported_v1` / `erc20_unsupported_v1` | v0.1 supports native-ETH shield/send only. | Stay with native-ETH `deckard_shield` / `deckard_execute`. |
@@ -222,7 +230,7 @@ real funds can be touched from it:
 | Config dir | `~/.deckard/demo` |
 | Daemon socket | `~/.deckard/demo/signerd.sock` |
 | RPC | `http://127.0.0.1:8545` (the local fork) |
-| Demo policy | per-tx cap **0.1 ETH** · daily cap **0.5 ETH** · `allow_to` empty (any) · `require_approval: over_cap` · advisory auto-shield min **0.01 ETH** (`policy.demo.json`) |
+| Demo policy | send rule: `over_cap` with a **0.1 ETH** per-tx cap, `recipients: any` · shield rule: `over_cap` (auto-allows within the 0.5 ETH daily wall) · global daily cap **0.5 ETH** · advisory auto-shield min **0.01 ETH** (`policy.demo.json`) |
 
 So the canonical demo ask — shield **0.02 ETH** — is within cap and auto-allows; anything over
 0.1 ETH comes back `needs_approval`. Each `just demo` is a fresh fork: re-run `just demo-fund`

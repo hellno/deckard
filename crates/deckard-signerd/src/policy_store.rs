@@ -1,9 +1,17 @@
 //! Loading the signer [`Policy`] and tracking the daily spend.
 //!
-//! The policy is read from `policy.json` in the config dir; a **sane default** is used if the
-//! file is absent or malformed (fail-safe: a tight cap, no allowlist, approval-over-cap).
+//! The policy is read from `policy.json` in the config dir. There are **two distinct
+//! fallbacks** (ADR 0005 §5):
+//!
+//! * **No file** ⇒ the FRIENDLY built-in [`default_policy`] (a sane first-run policy:
+//!   shield freely, send with an always-card, swap any token, under a 0.2 ETH daily cap).
+//! * **A file that exists but does NOT load** (malformed JSON, a legacy v0 flat policy with
+//!   no `version` key, or a v1 file that fails [`Policy::validate`]) ⇒ the MOST-RESTRICTIVE
+//!   [`deny_all_policy`] (every action denied, `NO_RULE`). This is loud: a typo'd policy must
+//!   never silently degrade into a permissive default.
+//!
 //! `spent_today_wei` is **in-memory only**, rolls over at UTC midnight, and resets on daemon
-//! restart — cross-restart persistence is a documented v1 limitation / fast-follow. There is
+//! restart — cross-restart persistence is owned by the durable `SpendStore` (#108). There is
 //! no `SetPolicy` mutation API yet.
 
 use std::path::Path;
@@ -11,27 +19,53 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use alloy_primitives::U256;
 
-use deckard_contract::{ApprovalMode, Policy};
+use deckard_contract::{Allowlist, ApprovalMode, Effect, Policy, Rule, POLICY_VERSION};
 
-/// Default per-tx cap: 0.05 ETH.
-pub const DEFAULT_PER_TX_CAP_WEI: u128 = 50_000_000_000_000_000;
 /// Default rolling daily cap: 0.2 ETH.
 pub const DEFAULT_DAILY_CAP_WEI: u128 = 200_000_000_000_000_000;
 /// Default auto-shield threshold: 0.01 ETH.
 pub const DEFAULT_AUTO_SHIELD_MIN_WEI: u128 = 10_000_000_000_000_000;
 
-/// The fail-safe default policy used when `policy.json` is absent or unreadable.
+/// The FRIENDLY built-in policy used when `policy.json` is absent (a normal first run, ADR
+/// 0005 §5): shield freely (no card), send to any recipient with an always-card and no per-tx
+/// cap, swap any token — all under the 0.2 ETH daily cap. Default-deny still holds for every
+/// action without a rule (e.g. `Unshield`/`ContractCall`).
 pub fn default_policy() -> Policy {
     Policy {
-        per_tx_cap_wei: U256::from(DEFAULT_PER_TX_CAP_WEI),
-        daily_cap_wei: U256::from(DEFAULT_DAILY_CAP_WEI),
-        spent_today_wei: U256::ZERO,
-        allow_to: vec![], // empty = any recipient; the caps still apply
-        auto_shield_min_wei: U256::from(DEFAULT_AUTO_SHIELD_MIN_WEI),
-        require_approval: ApprovalMode::OverCap,
+        version: POLICY_VERSION,
+        default_effect: Effect::Deny,
         revoked: false,
-        // Empty = any token allowed; the daemon may later populate from `tokens_for(chain_id)`.
-        allow_swap_tokens: vec![],
+        daily_cap_wei: U256::from(DEFAULT_DAILY_CAP_WEI),
+        auto_shield_min_wei: U256::from(DEFAULT_AUTO_SHIELD_MIN_WEI),
+        spent_today_wei: U256::ZERO,
+        rules: vec![
+            Rule::Shield {
+                approval: ApprovalMode::Never,
+            },
+            Rule::Send {
+                approval: ApprovalMode::Always,
+                per_tx_cap_wei: None,
+                recipients: Allowlist::Any,
+            },
+            Rule::Swap {
+                tokens: Allowlist::Any,
+            },
+        ],
+    }
+}
+
+/// The MOST-RESTRICTIVE deny-all policy used when `policy.json` EXISTS but did not load
+/// (malformed, legacy v0, or fails `validate`). No rules ⇒ every action is `NO_RULE`-denied,
+/// and the caps are zero. A typo'd policy fails closed, never open.
+pub fn deny_all_policy() -> Policy {
+    Policy {
+        version: POLICY_VERSION,
+        default_effect: Effect::Deny,
+        revoked: false,
+        daily_cap_wei: U256::ZERO,
+        auto_shield_min_wei: U256::ZERO,
+        spent_today_wei: U256::ZERO,
+        rules: vec![],
     }
 }
 
@@ -39,38 +73,55 @@ pub fn default_policy() -> Policy {
 /// unit-testable (the logging wrapper can't be asserted on).
 #[derive(Debug)]
 pub enum PolicyLoad {
-    /// `policy.json` parsed cleanly.
+    /// `policy.json` parsed cleanly and passed [`Policy::validate`].
     Loaded(Policy),
-    /// No file at the path — a normal first run; the default applies quietly.
+    /// No file at the path — a normal first run; the FRIENDLY [`default_policy`] applies quietly.
     DefaultMissing,
-    /// The file EXISTS but didn't load (unreadable or malformed). The default applies, but
-    /// this is loud: a typo'd policy would otherwise silently run the default
-    /// any-recipient policy.
+    /// The file EXISTS but didn't load (unreadable, not JSON, a legacy v0 policy with no
+    /// `version` key, or a v1 file that fails `validate`). The MOST-RESTRICTIVE
+    /// [`deny_all_policy`] applies (every action denied), and this is loud: a typo'd policy
+    /// must never silently degrade into a permissive default.
     DefaultInvalid(String),
 }
 
-/// Resolve a policy load without logging. `spent_today_wei` and `revoked` are forced to
-/// their fresh-start values regardless of what the file says: spend tracking is in-memory,
-/// and a daemon boots *armed* (the brake is a live STOP, not a persisted flag).
+/// Resolve a policy load without logging. The classification is strict (ADR 0005 §5): a file
+/// that exists but does not cleanly parse-and-validate is `DefaultInvalid` (⇒ deny-all), never
+/// reinterpreted. A legacy v0 flat policy (no `version` key) is rejected with a SPECIFIC
+/// message rather than reinterpreting its `allow_to: [] = any` semantics. On success
+/// `spent_today_wei`/`revoked` are forced to their fresh-start values (belt-and-suspenders:
+/// they are `#[serde(skip)]` and the daemon boots armed with in-memory spend).
 pub fn load_policy_outcome(path: &Path) -> PolicyLoad {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return PolicyLoad::DefaultMissing,
         Err(e) => return PolicyLoad::DefaultInvalid(format!("read failed: {e}")),
     };
-    match serde_json::from_slice::<Policy>(&bytes) {
-        Ok(mut p) => {
-            p.spent_today_wei = U256::ZERO;
-            p.revoked = false;
-            PolicyLoad::Loaded(p)
-        }
-        Err(e) => PolicyLoad::DefaultInvalid(format!("parse failed: {e}")),
+    // Parse to a generic Value first so a missing `version` key (a legacy v0 flat policy) is
+    // detected and rejected with a specific message — rather than the v1 decoder's generic
+    // "missing field `version`" parse error.
+    let value: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(e) => return PolicyLoad::DefaultInvalid(format!("not json: {e}")),
+    };
+    if value.get("version").is_none() {
+        return PolicyLoad::DefaultInvalid("legacy v0 policy — rewrite to v1".into());
     }
+    let mut p: Policy = match serde_json::from_value(value) {
+        Ok(p) => p,
+        Err(e) => return PolicyLoad::DefaultInvalid(format!("parse failed/invalid: {e}")),
+    };
+    if let Err(e) = p.validate() {
+        return PolicyLoad::DefaultInvalid(format!("parse failed/invalid: {e}"));
+    }
+    p.spent_today_wei = U256::ZERO;
+    p.revoked = false;
+    PolicyLoad::Loaded(p)
 }
 
-/// Load the policy from `path`, falling back to [`default_policy`] on any problem — and
-/// falling back LOUDLY when a file exists but doesn't load. A silent fallback would let a
-/// typo'd `policy.json` run the default (any-recipient) policy with nobody the wiser.
+/// Load the policy from `path` with the two fallbacks: a missing file quietly uses the
+/// FRIENDLY [`default_policy`]; a file that exists but did not load falls back LOUDLY to the
+/// MOST-RESTRICTIVE [`deny_all_policy`] (every action denied) — a silent fallback would let a
+/// typo'd `policy.json` run a permissive default with nobody the wiser.
 pub fn load_policy(path: &Path) -> Policy {
     match load_policy_outcome(path) {
         PolicyLoad::Loaded(p) => p,
@@ -84,11 +135,11 @@ pub fn load_policy(path: &Path) -> Policy {
         PolicyLoad::DefaultInvalid(why) => {
             eprintln!(
                 "signerd: ⚠ POLICY FALLBACK — {} exists but did not load ({why}); \
-                 RUNNING THE BUILT-IN DEFAULT POLICY instead (per-tx 0.05 ETH, daily 0.2 ETH, \
-                 any recipient, approval over cap). Fix the file and restart the daemon.",
+                 running the MOST-RESTRICTIVE DENY-ALL policy (every action denied). \
+                 Fix the file and restart the daemon.",
                 path.display()
             );
-            default_policy()
+            deny_all_policy()
         }
     }
 }
@@ -105,14 +156,20 @@ pub fn current_utc_day() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use deckard_contract::IntentKind;
 
     #[test]
     fn absent_file_yields_default() {
+        // No file ⇒ the FRIENDLY built-in: default-deny, the 0.2 ETH daily cap, armed, and a
+        // Send rule that allows any recipient.
         let p = load_policy(Path::new("/nonexistent/deckard/policy.json"));
-        assert_eq!(p.per_tx_cap_wei, U256::from(DEFAULT_PER_TX_CAP_WEI));
+        assert_eq!(p.default_effect, Effect::Deny);
         assert_eq!(p.daily_cap_wei, U256::from(DEFAULT_DAILY_CAP_WEI));
         assert!(!p.revoked);
-        assert!(p.allow_to.is_empty());
+        match p.rule_for(IntentKind::Send) {
+            Some(Rule::Send { recipients, .. }) => assert_eq!(*recipients, Allowlist::Any),
+            other => panic!("expected a Send rule with Any recipients, got {other:?}"),
+        }
     }
 
     #[test]
@@ -120,13 +177,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("deckard-policy-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("policy.json");
-        // A file that (maliciously or staleley) claims spent + revoked.
-        let on_disk = Policy {
-            spent_today_wei: U256::from(999u64),
-            revoked: true,
-            ..default_policy()
-        };
-        std::fs::write(&path, serde_json::to_vec(&on_disk).unwrap()).unwrap();
+        // The FRIENDLY default, serialized to disk. `spent_today_wei`/`revoked` are
+        // `#[serde(skip)]`, so they never make it to the file — but the loader forces them to
+        // fresh-start values regardless.
+        std::fs::write(&path, serde_json::to_vec(&default_policy()).unwrap()).unwrap();
 
         let loaded = load_policy(&path);
         assert_eq!(
@@ -139,20 +193,49 @@ mod tests {
     }
 
     #[test]
-    fn malformed_file_yields_default() {
+    fn malformed_file_yields_deny_all() {
         let dir = std::env::temp_dir().join(format!("deckard-policy-bad-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("policy.json");
         std::fs::write(&path, b"{ not valid json").unwrap();
-        assert_eq!(
-            load_policy(&path).per_tx_cap_wei,
-            U256::from(DEFAULT_PER_TX_CAP_WEI)
+        let p = load_policy(&path);
+        assert!(
+            p.rules.is_empty(),
+            "malformed file must fall back to deny-all"
+        );
+        assert_eq!(p.daily_cap_wei, U256::ZERO, "deny-all has a zero daily cap");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A legacy v0 flat policy (no `version` key) is REJECTED with a specific message rather
+    /// than reinterpreted — its `allow_to: [] = any` semantics would silently flip the
+    /// recipient axis. The loud `DefaultInvalid` arm ⇒ deny-all.
+    #[test]
+    fn legacy_v0_file_is_rejected() {
+        let dir = std::env::temp_dir().join(format!("deckard-policy-v0-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("policy.json");
+        std::fs::write(
+            &path,
+            br#"{"per_tx_cap_wei":"1","daily_cap_wei":"1","allow_to":[],"require_approval":"OverCap"}"#,
+        )
+        .unwrap();
+        match load_policy_outcome(&path) {
+            PolicyLoad::DefaultInvalid(why) => {
+                assert!(why.contains("legacy v0"), "unexpected cause: {why}")
+            }
+            other => panic!("expected DefaultInvalid (legacy v0), got {other:?}"),
+        }
+        let p = load_policy(&path);
+        assert!(
+            p.rules.is_empty(),
+            "a legacy v0 file must fall back to deny-all"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The fallback is CLASSIFIED correctly: absent → quiet default, present-but-broken →
-    /// the loud `DefaultInvalid` arm (the one `load_policy` shouts about).
+    /// The fallback is CLASSIFIED correctly: absent → quiet `DefaultMissing`, a present file
+    /// that has a `version` key but a bad field → the loud `DefaultInvalid` arm.
     #[test]
     fn fallback_distinguishes_missing_from_invalid() {
         assert!(matches!(
@@ -163,7 +246,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("deckard-policy-loud-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("policy.json");
-        std::fs::write(&path, b"{ \"per_tx_cap_wei\": tyop }").unwrap();
+        std::fs::write(
+            &path,
+            br#"{"version":1,"default":"deny","daily_cap_wei":"oops","auto_shield_min_wei":"0","rules":[]}"#,
+        )
+        .unwrap();
         match load_policy_outcome(&path) {
             PolicyLoad::DefaultInvalid(why) => {
                 assert!(why.contains("parse failed"), "unexpected cause: {why}")

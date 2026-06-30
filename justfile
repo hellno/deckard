@@ -455,8 +455,10 @@ demo-check:
     )" ; PROBE_RC=$?
     if [[ ${PROBE_RC} -eq 0 ]] && echo "${ADDR_PROBE}" | jq -e '.address' >/dev/null 2>&1; then
         ok "demo daemon reachable, unlocked, on the right chain ($(echo "${ADDR_PROBE}" | jq -r '.address'))"
-        # 6. Policy drift: diff the LIVE policy (PolicyGet) vs the intended demo values. The MCP
-        #    CLI renders ApprovalMode::OverCap as the snake_case string "over_cap" (sidecar.rs).
+        # 6. Policy drift: diff the LIVE policy (PolicyGet) vs the intended demo values. The
+        #    per_tx_cap_wei + require_approval below come from the demo's SEND rule; daily_cap_wei
+        #    is the global daily wall. PolicyGet surfaces these top-level for convenience and renders
+        #    the send rule's approval as the snake_case string "over_cap" (sidecar.rs).
         POLICY_JSON="$(
             DECKARD_CONFIG_DIR="${DEMO_DIR}" \
             DECKARD_SOCKET_PATH="{{demo_socket}}" \
@@ -470,9 +472,9 @@ demo-check:
         echo
         echo "─── current demo state ───────────────────────────────────"
         echo "  chain:           11155111 (Sepolia fork) — mainnet guardrail INACTIVE"
-        echo "  per_tx_cap_wei:  ${GOT_PER_TX}"
-        echo "  daily_cap_wei:   ${GOT_DAILY}"
-        echo "  require_approval:${GOT_MODE}  (within-cap auto-allows; over-cap -> NeedsApproval)"
+        echo "  per_tx_cap_wei:  ${GOT_PER_TX}  (send rule's per-tx cap — 0.1 ETH)"
+        echo "  daily_cap_wei:   ${GOT_DAILY}  (global daily wall — 0.5 ETH)"
+        echo "  require_approval:${GOT_MODE}  (send rule: within-cap auto-allows; a send over 0.1 ETH -> NeedsApproval)"
         echo "  auto-allow:      ON for within-cap writes (Sepolia; no mainnet guardrail)"
         echo "──────────────────────────────────────────────────────────"
         if [[ "${GOT_PER_TX}" != "100000000000000000" || "${GOT_DAILY}" != "500000000000000000" || "${GOT_MODE}" != "over_cap" ]]; then

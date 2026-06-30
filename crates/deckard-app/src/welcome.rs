@@ -41,10 +41,15 @@ pub(crate) fn agent_policy_rows(
     p: &deckard_contract::Policy,
     masked: bool,
 ) -> Vec<(&'static str, String)> {
-    use deckard_contract::ApprovalMode;
+    use deckard_contract::{Allowlist, ApprovalMode, IntentKind};
     let eth = |wei: U256| format!("{} ETH", deckard_core::format_amount(wei, 18, 6));
     vec![
-        ("Per-transaction cap", eth(p.per_tx_cap_wei)),
+        (
+            "Per-transaction cap",
+            eth(p
+                .per_tx_cap_for(IntentKind::Send)
+                .unwrap_or(deckard_core::U256::ZERO)),
+        ),
         ("Daily budget", format!("{} / day", eth(p.daily_cap_wei))),
         (
             "Spent today",
@@ -52,10 +57,11 @@ pub(crate) fn agent_policy_rows(
         ),
         (
             "Recipients",
-            if p.allow_to.is_empty() {
-                "any (no allowlist)".to_string()
-            } else {
-                format!("{} allowed", p.allow_to.len())
+            match p.recipients_for(IntentKind::Send) {
+                Allowlist::Any => "any (no allowlist)".to_string(),
+                Allowlist::DenyAll => "none (deny all)".to_string(),
+                Allowlist::Only(v) if v.is_empty() => "none (deny all)".to_string(),
+                Allowlist::Only(v) => format!("{} allowed", v.len()),
             },
         ),
         (
@@ -64,10 +70,11 @@ pub(crate) fn agent_policy_rows(
         ),
         (
             "Approval",
-            match p.require_approval {
-                ApprovalMode::Never => "auto within caps · over cap denied",
-                ApprovalMode::OverCap => "auto within caps · ask over cap",
-                ApprovalMode::Always => "ask for every move",
+            match p.approval_for(IntentKind::Send) {
+                Some(ApprovalMode::Never) => "auto within caps · over cap denied",
+                Some(ApprovalMode::OverCap) => "auto within caps · ask over cap",
+                Some(ApprovalMode::Always) => "ask for every move",
+                None => "send denied",
             }
             .to_string(),
         ),
@@ -892,18 +899,29 @@ fn render_row(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use deckard_contract::{ApprovalMode, Policy};
+    use deckard_contract::{Allowlist, ApprovalMode, Effect, Policy, Rule, POLICY_VERSION};
 
     fn policy() -> Policy {
         Policy {
-            per_tx_cap_wei: U256::from(100_000_000_000_000_000u128), // 0.1 ETH
-            daily_cap_wei: U256::from(500_000_000_000_000_000u128),  // 0.5 ETH
-            spent_today_wei: U256::from(20_000_000_000_000_000u128), // 0.02 ETH
-            allow_to: vec![],
-            auto_shield_min_wei: U256::from(10_000_000_000_000_000u128), // 0.01 ETH
-            require_approval: ApprovalMode::OverCap,
+            version: POLICY_VERSION,
+            default_effect: Effect::Deny,
             revoked: false,
-            allow_swap_tokens: vec![],
+            daily_cap_wei: U256::from(500_000_000_000_000_000u128), // 0.5 ETH
+            auto_shield_min_wei: U256::from(10_000_000_000_000_000u128), // 0.01 ETH
+            spent_today_wei: U256::from(20_000_000_000_000_000u128), // 0.02 ETH
+            rules: vec![
+                Rule::Send {
+                    approval: ApprovalMode::OverCap,
+                    per_tx_cap_wei: Some(U256::from(100_000_000_000_000_000u128)), // 0.1 ETH
+                    recipients: Allowlist::Any,
+                },
+                Rule::Shield {
+                    approval: ApprovalMode::OverCap,
+                },
+                Rule::Swap {
+                    tokens: Allowlist::Any,
+                },
+            ],
         }
     }
 
@@ -933,7 +951,13 @@ mod tests {
     fn policy_rows_mask_activity_and_surface_a_stop() {
         let mut p = policy();
         p.revoked = true;
-        p.allow_to = vec![deckard_core::Address::repeat_byte(0x22)];
+        // Replace the Send rule's recipients with a single-address allowlist so the
+        // "Recipients" row renders "1 allowed".
+        for rule in &mut p.rules {
+            if let Rule::Send { recipients, .. } = rule {
+                *recipients = Allowlist::Only(vec![deckard_core::Address::repeat_byte(0x22)]);
+            }
+        }
         let rows = agent_policy_rows(&p, true);
         let get = |label: &str| {
             rows.iter()

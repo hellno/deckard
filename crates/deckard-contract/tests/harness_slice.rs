@@ -12,7 +12,8 @@
 
 use alloy_primitives::{Address, Bytes, U256};
 use deckard_contract::{
-    ApprovalStatus, Decision, ExecuteResult, Intent, IntentKind, MockSigner, Policy, Signer,
+    Allowlist, ApprovalMode, ApprovalStatus, Decision, Effect, ExecuteResult, Intent, IntentKind,
+    MockSigner, Policy, Rule, Signer, POLICY_VERSION,
 };
 
 const PER_TX_CAP: u64 = 50_000_000_000_000_000; // 0.05 ETH
@@ -23,14 +24,27 @@ const WITHIN_CAP_VALUE: u64 = 20_000_000_000_000_000; // 0.02 ETH (< per-tx cap)
 
 fn demo_signer() -> MockSigner {
     MockSigner::new(Policy {
-        per_tx_cap_wei: U256::from(PER_TX_CAP),
-        daily_cap_wei: U256::from(DAILY_CAP),
-        spent_today_wei: U256::ZERO,
-        allow_to: vec![], // empty = any address
-        auto_shield_min_wei: U256::from(AUTO_SHIELD_MIN),
-        require_approval: deckard_contract::ApprovalMode::OverCap,
+        version: POLICY_VERSION,
+        default_effect: Effect::Deny,
         revoked: false,
-        allow_swap_tokens: vec![], // empty = any token (this harness exercises sends, not swaps)
+        daily_cap_wei: U256::from(DAILY_CAP),
+        auto_shield_min_wei: U256::from(AUTO_SHIELD_MIN),
+        spent_today_wei: U256::ZERO,
+        rules: vec![
+            Rule::Send {
+                approval: ApprovalMode::OverCap,
+                per_tx_cap_wei: Some(U256::from(PER_TX_CAP)),
+                recipients: Allowlist::Any, // any address (this harness exercises sends)
+            },
+            // T6 proposes a within-cap Shield and expects it to auto-allow → Allow, so the
+            // Shield rule MUST be `OverCap` (within cap ⇒ no card ⇒ Allow), not Always.
+            Rule::Shield {
+                approval: ApprovalMode::OverCap,
+            },
+            Rule::Swap {
+                tokens: Allowlist::Any, // any token (this harness exercises sends, not swaps)
+            },
+        ],
     })
 }
 
@@ -59,7 +73,10 @@ fn mcp_surface_daemon_free_slice() {
     // ---- T2: read tools succeed, deterministic, carry no secret -----------------------
     assert_eq!(s.address(), MockSigner::mock_address());
     let pol = s.policy();
-    assert_eq!(pol.per_tx_cap_wei, U256::from(PER_TX_CAP));
+    assert_eq!(
+        pol.per_tx_cap_for(IntentKind::Send),
+        Some(U256::from(PER_TX_CAP))
+    );
     assert!(!pol.revoked);
     let bal = s.balance(false);
     assert_eq!(bal.public_wei, U256::ZERO); // unset → zero, never a key

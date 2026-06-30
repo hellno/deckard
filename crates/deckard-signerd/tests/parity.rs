@@ -16,7 +16,8 @@
 
 use alloy_primitives::{Address, Bytes, B256, U256};
 use deckard_contract::{
-    evaluate, ApprovalMode, Decision, Intent, IntentKind, MockSigner, Policy, Signer,
+    evaluate, Allowlist, ApprovalMode, Decision, Effect, Intent, IntentKind, MockSigner, Policy,
+    Rule, Signer, POLICY_VERSION,
 };
 
 /// Normalize away the (stateful, impl-specific) `NeedsApproval` request id so the comparison
@@ -50,15 +51,29 @@ fn policy(
     allow: Vec<Address>,
     revoked: bool,
 ) -> Policy {
+    // v1 shape: a `Send` rule carries the per-tx cap, approval mode, and recipient allowlist
+    // (empty `allow` ⇒ `Any` to preserve the old "empty = any recipient" vector semantics; a
+    // non-empty list ⇒ `Only`). The companion `Shield` rule keeps the fixture a realistic full
+    // policy; these `Send` vectors never reach it.
     Policy {
-        per_tx_cap_wei: U256::from(per_tx),
-        daily_cap_wei: U256::from(daily),
-        spent_today_wei: U256::from(spent),
-        allow_to: allow,
-        auto_shield_min_wei: U256::from(10u64),
-        require_approval: mode,
+        version: POLICY_VERSION,
+        default_effect: Effect::Deny,
         revoked,
-        allow_swap_tokens: vec![],
+        daily_cap_wei: U256::from(daily),
+        auto_shield_min_wei: U256::from(10u64),
+        spent_today_wei: U256::from(spent),
+        rules: vec![
+            Rule::Send {
+                approval: mode,
+                per_tx_cap_wei: Some(U256::from(per_tx)),
+                recipients: if allow.is_empty() {
+                    Allowlist::Any
+                } else {
+                    Allowlist::Only(allow)
+                },
+            },
+            Rule::Shield { approval: mode },
+        ],
     }
 }
 

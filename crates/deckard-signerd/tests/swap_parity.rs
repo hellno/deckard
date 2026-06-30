@@ -11,7 +11,8 @@
 
 use alloy_primitives::{Address, B256, U256};
 use deckard_contract::{
-    evaluate_order, ApprovalMode, Decision, MockSigner, Policy, Signer, SwapOrder,
+    evaluate_order, Allowlist, ApprovalMode, Decision, Effect, MockSigner, Policy, Rule, Signer,
+    SwapOrder, POLICY_VERSION,
 };
 
 /// Normalize away the stateful `NeedsApproval` request id — the comparison is on the
@@ -33,18 +34,35 @@ fn wallet() -> Address {
 /// The injected unix-secs clock both sides use (the mock's default).
 const NOW: u64 = 1_700_000_000;
 
-/// A policy with the given swap allowlist + revoked flag. The cap/mode fields are inert for
-/// `evaluate_order` (swaps never touch the spend caps), but we set sane values for clarity.
+/// A policy with the given swap allowlist + revoked flag. `evaluate_order` only inspects the
+/// `Swap` rule's `tokens` (empty list ⇒ `Any` to preserve the "any token" vector; a non-empty
+/// list ⇒ `Only`) plus `revoked`; the `Send`/`Shield` rules and caps are inert here, set to
+/// sane values so the fixture reads as a realistic full policy.
 fn policy(allow_swap_tokens: Vec<Address>, revoked: bool) -> Policy {
     Policy {
-        per_tx_cap_wei: U256::from(50u64),
-        daily_cap_wei: U256::from(1000u64),
-        spent_today_wei: U256::ZERO,
-        allow_to: vec![],
-        auto_shield_min_wei: U256::from(10u64),
-        require_approval: ApprovalMode::OverCap,
+        version: POLICY_VERSION,
+        default_effect: Effect::Deny,
         revoked,
-        allow_swap_tokens,
+        daily_cap_wei: U256::from(1000u64),
+        auto_shield_min_wei: U256::from(10u64),
+        spent_today_wei: U256::ZERO,
+        rules: vec![
+            Rule::Swap {
+                tokens: if allow_swap_tokens.is_empty() {
+                    Allowlist::Any
+                } else {
+                    Allowlist::Only(allow_swap_tokens)
+                },
+            },
+            Rule::Send {
+                approval: ApprovalMode::OverCap,
+                per_tx_cap_wei: Some(U256::from(50u64)),
+                recipients: Allowlist::Any,
+            },
+            Rule::Shield {
+                approval: ApprovalMode::OverCap,
+            },
+        ],
     }
 }
 
