@@ -905,6 +905,19 @@ mod tests {
         }
 
         #[test]
+        fn rejects_a_missing_file() {
+            let dir = fresh_dir("missing");
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+            // Never written: the candidate points at a file that does not exist.
+            let candidate = dir.join("deckard-signerd");
+            assert!(
+                verify_bundled_binary(&candidate).is_err(),
+                "a missing daemon binary must be refused, never silently resolved"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
         fn rejects_a_world_writable_parent_dir() {
             let dir = fresh_dir("wwdir");
             let bin = write_bin(&dir, 0o755);
