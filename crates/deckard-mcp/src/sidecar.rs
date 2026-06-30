@@ -1,5 +1,5 @@
 //! The key-less MCP/agent sidecar: shared wallet-client access to the daemon socket,
-//! the expected chain, and the seven agent operations. **No key material ever enters
+//! the expected chain, and the eight agent operations. **No key material ever enters
 //! this process** — writes are `Intent`s proposed to `deckard-signerd`, which enforces
 //! policy and signs. The one secret this sidecar transiently handles is the Railgun
 //! *viewing* key (it rides alongside the wallet's own 0zk address in `RailgunViewGrant`);
@@ -7,12 +7,12 @@
 
 use std::path::PathBuf;
 
-use alloy_primitives::{B256, U256};
+use alloy_primitives::{Bytes, B256, U256};
 use serde_json::json;
 use zeroize::Zeroizing;
 
 use deckard_contract::{
-    ActivityLifecycle, Allowlist, ApprovalMode, ApprovalStatus, Decision, ExecuteResult,
+    ActivityLifecycle, Allowlist, ApprovalMode, ApprovalStatus, Decision, ExecuteResult, Intent,
     IntentKind, Policy, ProposalOrigin, ReadStatus, Rule, SignerRequest, SignerResponse,
     StatusView,
 };
@@ -196,6 +196,98 @@ impl Sidecar {
                 Ok(json!({
                     "decision": "allow",
                     "request_id": format!("{id:#x}"),
+                    "amount_eth": amount_eth.trim(),
+                    "next": "call deckard_execute with this request_id to sign + broadcast",
+                }))
+            }
+            SignerResponse::Decision(Decision::NeedsApproval { request_id }) => Ok(json!({
+                "decision": "needs_approval",
+                "request_id": format!("{request_id:#x}"),
+                "next": "a human must approve this in the Deckard app's Approvals queue \
+                         (⌘⇧A) before deckard_execute can run; once approved, call \
+                         deckard_execute with this request_id — or lower the amount under \
+                         the policy per-tx cap (deckard_policy_get) or edit policy.json",
+            })),
+            SignerResponse::Decision(Decision::Deny { reason }) => {
+                Err(failure::from_deny_reason(&reason, self.config_dir()))
+            }
+            other => Err(unexpected("Propose", &other)),
+        }
+    }
+
+    /// `deckard_send` / `deckard-mcp send <to> --amount-eth`. Proposes a native-ETH transfer
+    /// of `amount_eth` to `to` (a 0x-hex address; ENS is NOT resolved here — pass the resolved
+    /// address). Nothing is signed or broadcast here; `execute` does that with the returned
+    /// request_id. Within the policy's Send rule (per-tx + daily caps) this auto-allows; over it,
+    /// a human must approve — the first agent-channel path that moves non-zero native ETH.
+    pub async fn send(&self, to: &str, amount_eth: &str) -> OpResult {
+        let wei = parse_eth_to_wei(amount_eth).map_err(|msg| {
+            Failure::new(
+                format!("could not parse amount_eth {amount_eth:?}"),
+                msg,
+                "pass a decimal ETH string like \"0.02\" (units: ETH, not wei)",
+            )
+        })?;
+        if wei == U256::ZERO {
+            return Err(Failure::new(
+                "amount_eth is zero",
+                "a zero-value send moves nothing",
+                "pass an amount greater than zero, e.g. \"0.02\"",
+            ));
+        }
+        let to: alloy_primitives::Address = to.trim().parse().map_err(|_| {
+            Failure::new(
+                format!("could not parse recipient {to:?}"),
+                "a recipient is a 20-byte 0x-hex Ethereum address",
+                "pass a 0x-hex address like 0xAbC… (ENS is not resolved here — pass the \
+                 resolved 0x address)",
+            )
+        })?;
+        self.ensure_chain().await?;
+
+        // Funded-balance pre-check (best effort): block only on a positive on-chain read
+        // that's still below the ask — an unsynced 0 must not false-block a funded wallet.
+        if let SignerResponse::Balance(report) = self
+            .request(&SignerRequest::Balance { shielded: false })
+            .await?
+        {
+            if report.public_wei > U256::ZERO && wei > report.public_wei {
+                return Err(Failure::new(
+                    format!(
+                        "amount {amount_eth} ETH exceeds the public balance ({} ETH)",
+                        format_wei_as_eth(report.public_wei)
+                    ),
+                    "the wallet's public balance can't cover the send (plus gas)",
+                    "lower the amount, or fund the wallet first (`just demo-fund` in demo \
+                     mode)",
+                ));
+            }
+        }
+
+        // A native-ETH Send is the trivial intent — empty calldata (the daemon's `calldata_ok`
+        // REQUIRES a Send to carry no calldata). Built inline (no core builder exists for it).
+        let intent = Intent {
+            chain_id: self.chain_id(),
+            to,
+            token: None,
+            value: wei,
+            calldata: Bytes::new(),
+            kind: IntentKind::Send,
+        };
+
+        match self
+            .request(&SignerRequest::Propose {
+                intent: intent.clone(),
+                origin: ProposalOrigin::Agent,
+            })
+            .await?
+        {
+            SignerResponse::Decision(Decision::Allow) => {
+                let id = SignerClient::request_id_for_intent(&intent);
+                Ok(json!({
+                    "decision": "allow",
+                    "request_id": format!("{id:#x}"),
+                    "to": format!("{to:#x}"),
                     "amount_eth": amount_eth.trim(),
                     "next": "call deckard_execute with this request_id to sign + broadcast",
                 }))

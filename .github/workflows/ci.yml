@@ -53,16 +53,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
       # The dep tree (gpui + Helios/revm/bls + the Railgun ZK tree) overflows the stock ubuntu
-      # runner's ~14 GB and OOMs the build / cache-save. Reclaim ~20 GB of preinstalled toolchains we
-      # never use, first. (macOS runners have the headroom, so this is Linux-only.)
+      # runner's ~14 GB and OOMs the build / cache-save — and the rust-cache RESTORE below extracts a
+      # multi-GB target dir that can itself exhaust the disk before anything builds. Reclaim ~20 GB of
+      # preinstalled toolchains we never use FIRST, before the cache restore, so neither the restore
+      # nor the build runs out of space. (macOS runners have the headroom, so this is Linux-only.)
       - name: Free up disk space
         run: |
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
             /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
           sudo docker image prune --all --force >/dev/null 2>&1 || true
           df -h /
+      - uses: Swatinem/rust-cache@v2
       # System libraries GPUI needs on Linux (X11 + Wayland + Vulkan + fonts), plus GTK/appindicator
       # + libxdo for the optional tray feature (tray-icon/muda link against libxdo).
       - name: Install system dependencies

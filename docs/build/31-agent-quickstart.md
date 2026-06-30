@@ -80,7 +80,7 @@ registered servers), and the narrow `--allowedTools` allowlist keeps the agent o
 tools — so the smoke is reproducible and can't reach for anything else. Preconditions are the
 same as the quick prompt: `just demo` running, a wallet unlocked, `just demo-fund` done.
 
-## The 7 tools
+## The 8 tools
 
 This is the complete `mcp.v0.1` surface. There is deliberately no raw "propose" and no
 "approve" tool — you cannot submit an arbitrary transaction or approve your own request.
@@ -91,6 +91,7 @@ This is the complete `mcp.v0.1` surface. There is deliberately no raw "propose" 
 | `deckard_wallet_balance` | Read the **public** balance (`public_wei`, `public_eth`) plus a `read_status` trust label. | none |
 | `deckard_policy_get` | Read the policy fence (fields below). **Call this first.** | none |
 | `deckard_shield` | **Propose** shielding `amount_eth` (a decimal ETH **string**, e.g. `"0.02"`) to the wallet's own private address. Signs nothing. | creates a pending request |
+| `deckard_send` | **Propose** a native-ETH transfer of `amount_eth` (decimal ETH **string**) to a 0x-hex `to` (ENS is not resolved here). Returns `allow`+`request_id` or `needs_approval`. Signs nothing. | creates a pending request |
 | `deckard_status` | Read the approval state of a `request_id` (`pending` / `allowed` / `denied` / `expired`) plus `remaining_ms` (approval TTL left) and `tx_hash` once executed. Read-only; no approval, no side effects. | none |
 | `deckard_execute` | Sign + broadcast a previously allowed `request_id`. Policy is re-checked at sign time. | broadcasts a transaction |
 | `deckard_revoke_all` | **STOP — the panic brake.** Zeroizes the signing key, locks the daemon, denies every in-flight request. | irreversible for the session |
