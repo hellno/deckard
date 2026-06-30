@@ -142,8 +142,8 @@ cargo build -p deckard-mcp               # one-time: builds ./target/debug/decka
 - The **shield** hero (auto-private via [Railgun](https://railgun.org/)) — **wired and black-box
   tested on an anvil fork.**
 - The **agent surface** (`deckard-mcp`): a key-less CLI **and** MCP stdio sidecar — the
-  `mcp.v0.1` **7-tool** profile (`deckard_wallet_address`, `deckard_wallet_balance`,
-  `deckard_policy_get`, `deckard_shield`, `deckard_status`, `deckard_execute`,
+  `mcp.v0.1` **8-tool** profile (`deckard_wallet_address`, `deckard_wallet_balance`,
+  `deckard_policy_get`, `deckard_shield`, `deckard_send`, `deckard_status`, `deckard_execute`,
   `deckard_revoke_all`). Deliberately **no raw `propose` and no `resolve`**, so an injected agent
   can't submit an arbitrary intent or approve its own request.
 - The **demo loop** (`just demo` / `demo-fund` / `demo-check`) on a local Sepolia fork — see

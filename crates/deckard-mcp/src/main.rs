@@ -20,7 +20,7 @@ enum InstallClient {
 #[command(
     name = "deckard-mcp",
     version,
-    about = "Deckard's key-less agent surface: CLI + MCP stdio server (mcp.v0.1, 7 tools). \
+    about = "Deckard's key-less agent surface: CLI + MCP stdio server (mcp.v0.1, 8 tools). \
              Holds no keys — every write is proposed to the local deckard-signerd, which \
              enforces policy and signs.",
     after_help = "Env: DECKARD_SOCKET_PATH (daemon socket), DECKARD_CHAIN_ID (default 1), \
@@ -49,6 +49,15 @@ enum Command {
     /// Propose shielding ETH into the wallet's own private balance, then print the
     /// request id to pass to `execute`.
     Shield {
+        /// Amount as a decimal ETH string, e.g. 0.02 (units: ETH, not wei).
+        #[arg(long = "amount-eth")]
+        amount_eth: String,
+    },
+    /// Propose a native-ETH transfer to a 0x-hex recipient (ENS is not resolved here), then
+    /// print the request id to pass to `execute`.
+    Send {
+        /// Recipient as a 0x-hex Ethereum address (ENS is not resolved here).
+        to: String,
         /// Amount as a decimal ETH string, e.g. 0.02 (units: ETH, not wei).
         #[arg(long = "amount-eth")]
         amount_eth: String,
@@ -141,6 +150,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Address => sidecar.wallet_address().await,
         Command::Policy => sidecar.policy_get().await,
         Command::Shield { amount_eth } => sidecar.shield(amount_eth).await,
+        Command::Send { to, amount_eth } => sidecar.send(to, amount_eth).await,
         Command::Execute { request_id } => sidecar.execute(request_id).await,
         Command::Status { request_id } => sidecar.status(request_id).await,
         Command::Stop => sidecar.revoke_all().await,

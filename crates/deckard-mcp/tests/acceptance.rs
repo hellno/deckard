@@ -35,10 +35,10 @@ async fn session(
     (dir, state, child)
 }
 
-/// T1 — `list_tools` is exactly the 7-tool launch profile, every description non-empty and
+/// T1 — `list_tools` is exactly the 8-tool launch profile, every description non-empty and
 /// keyword-bearing (the descriptions ARE the agent's documentation).
 #[tokio::test]
-async fn t1_list_tools_is_the_seven_tool_launch_profile() {
+async fn t1_list_tools_is_the_eight_tool_launch_profile() {
     let (_dir, _state, mut child) = session(&[]).await;
     let tools = child.list_tools().await;
 
@@ -53,12 +53,13 @@ async fn t1_list_tools_is_the_seven_tool_launch_profile() {
             "deckard_execute",
             "deckard_policy_get",
             "deckard_revoke_all",
+            "deckard_send",
             "deckard_shield",
             "deckard_status",
             "deckard_wallet_address",
             "deckard_wallet_balance",
         ],
-        "the launch surface is FINAL at these 7 deckard_-prefixed tools"
+        "the launch surface is FINAL at these 8 deckard_-prefixed tools"
     );
 
     // Keyword-bearing descriptions: units, preconditions, sequencing, safety notes.
@@ -69,6 +70,10 @@ async fn t1_list_tools_is_the_seven_tool_launch_profile() {
             &["wei", "Deckard app", "unlocked"],
         ),
         ("deckard_policy_get", &["cap", "FIRST"]),
+        (
+            "deckard_send",
+            &["decimal ETH string", "request_id", "deckard_execute", "0x"],
+        ),
         (
             "deckard_shield",
             &[
@@ -237,6 +242,79 @@ async fn t6_within_cap_shield_allows_then_executes_to_tx_hash() {
     assert!(err, "a replay must be refused");
     assert!(text.contains("already broadcast"), "replay copy: {text}");
     assert!(text.contains("vary the amount"), "replay copy: {text}");
+
+    child.shutdown().await;
+}
+
+/// A within-cap native-ETH send (PR2) is allowed and executes to a tx hash — the first
+/// agent-channel path that moves non-zero native ETH on the agent's own authority. The mock's
+/// demo policy has a Send rule (OverCap, 0.05 ETH per-tx cap, any recipient), so 0.02 ETH is
+/// within the fence and auto-allows through the shared `evaluate`.
+#[tokio::test]
+async fn deckard_send_within_cap_allows_then_executes() {
+    let (_dir, _state, mut child) = session(&[]).await;
+
+    let to = format!("{:#x}", alloy_primitives::Address::repeat_byte(0x42));
+    let (err, text, _) = child
+        .call_tool(
+            "deckard_send",
+            serde_json::json!({ "to": to, "amount_eth": "0.02" }),
+        )
+        .await;
+    assert!(!err, "within-cap send must be allowed: {text}");
+    let v: serde_json::Value = serde_json::from_str(&text).expect("send JSON");
+    assert_eq!(v["decision"], "allow");
+    assert_eq!(v["to"], to, "the response echoes the recipient");
+    assert_eq!(v["amount_eth"], "0.02");
+    let request_id = v["request_id"].as_str().expect("request_id").to_string();
+    assert!(v["next"]
+        .as_str()
+        .expect("next")
+        .contains("deckard_execute"));
+
+    let (err, text, _) = child
+        .call_tool(
+            "deckard_execute",
+            serde_json::json!({ "request_id": request_id }),
+        )
+        .await;
+    assert!(!err, "execute on an allow must broadcast: {text}");
+    let v: serde_json::Value = serde_json::from_str(&text).expect("execute JSON");
+    assert_eq!(v["status"], "broadcast");
+    assert_eq!(v["tx_hash"], format!("{:#x}", mock_tx_hash()));
+
+    child.shutdown().await;
+}
+
+/// An over-cap native-ETH send classifies NeedsApproval (never Allow) — the same fence shape as
+/// an over-cap shield: 0.2 ETH > the 0.05 ETH Send per-tx cap, so a human must approve it.
+#[tokio::test]
+async fn deckard_send_over_cap_needs_approval() {
+    let (_dir, _state, mut child) = session(&[]).await;
+
+    let to = format!("{:#x}", alloy_primitives::Address::repeat_byte(0x42));
+    let (err, text, _) = child
+        .call_tool(
+            "deckard_send",
+            serde_json::json!({ "to": to, "amount_eth": "0.2" }),
+        )
+        .await;
+    assert!(
+        !err,
+        "an over-cap send is a decision, not a transport error: {text}"
+    );
+    let v: serde_json::Value = serde_json::from_str(&text).expect("send JSON");
+    assert_eq!(
+        v["decision"], "needs_approval",
+        "over-cap must NOT be allow"
+    );
+    assert!(
+        v["request_id"]
+            .as_str()
+            .expect("request_id")
+            .starts_with("0x"),
+        "needs_approval carries the request_id to poll"
+    );
 
     child.shutdown().await;
 }

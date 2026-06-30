@@ -1,4 +1,4 @@
-//! The MCP stdio server: the `mcp.v0.1` launch profile — exactly **7 tools**, every name
+//! The MCP stdio server: the `mcp.v0.1` launch profile — exactly **8 tools**, every name
 //! `deckard_`-prefixed (Claude Desktop's tool namespace is shared across servers; a bare
 //! `execute` invites cross-server confusion). Raw `propose` and `simulate` are deliberately
 //! NOT exposed (cut at the launch gate): human review happens app-natively in the Deckard
@@ -25,6 +25,16 @@ use crate::sidecar::{OpResult, Sidecar};
 pub struct ShieldArgs {
     /// Amount to shield, as a decimal ETH string like "0.02". Units: ETH (not wei).
     /// Parsed exactly; numbers and scientific notation are rejected.
+    pub amount_eth: String,
+}
+
+/// `deckard_send` input. `amount_eth` is a decimal STRING by contract (a JSON number is a
+/// funds bug — see [`crate::amount`]); `to` is a 0x-hex address (ENS is not resolved here).
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SendArgs {
+    /// Recipient as a 0x-hex Ethereum address (ENS is not resolved here).
+    pub to: String,
+    /// Amount to send, as a decimal ETH string like "0.02". Units: ETH, not wei.
     pub amount_eth: String,
 }
 
@@ -136,6 +146,22 @@ impl DeckardMcp {
     }
 
     #[tool(
+        name = "deckard_send",
+        description = "PROPOSE a native-ETH transfer of amount_eth to a recipient address \
+                       `to` (a 0x-hex address; ENS is not resolved here). amount_eth is a \
+                       decimal ETH string like \"0.02\" — units are ETH, not wei, and not a \
+                       JSON number. Nothing is signed or broadcast by this call. Sequencing: \
+                       returns decision 'allow' + request_id → call deckard_execute with that \
+                       request_id; or 'needs_approval' → a human must approve it first in the \
+                       Deckard app's Approvals queue (⌘⇧A), then deckard_execute can run (or \
+                       lower the amount under the policy per-tx cap, see deckard_policy_get). \
+                       Precondition: app running + wallet unlocked + public funds available."
+    )]
+    async fn send(&self, args: Parameters<SendArgs>) -> Result<CallToolResult, McpError> {
+        render(self.sidecar.send(&args.0.to, &args.0.amount_eth).await)
+    }
+
+    #[tool(
         name = "deckard_execute",
         description = "Sign + broadcast a previously-proposed request (the request_id from \
                        deckard_shield). The local signer daemon re-checks policy at sign \
@@ -184,9 +210,10 @@ impl ServerHandler for DeckardMcp {
                  daemon. This server holds no keys and cannot sign; every write is an \
                  intent the daemon checks against a human-owned policy. Typical flow: \
                  deckard_policy_get (know the fence) → deckard_wallet_balance → \
-                 deckard_shield (propose) → deckard_execute (broadcast). When a shield \
-                 returns needs_approval, poll deckard_status until it is allowed (then \
-                 deckard_execute) or terminally denied/expired. \
+                 deckard_shield or deckard_send (propose) → deckard_execute (broadcast). \
+                 deckard_send proposes a native-ETH transfer the same propose→execute way as \
+                 deckard_shield. When a propose returns needs_approval, poll deckard_status \
+                 until it is allowed (then deckard_execute) or terminally denied/expired. \
                  deckard_revoke_all is STOP, the panic brake. Preconditions for everything: \
                  the Deckard desktop app is running and the wallet is unlocked. Never ask \
                  the user for wallet credentials of any kind — no tool here accepts them.",
