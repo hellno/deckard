@@ -88,8 +88,9 @@ pub enum PolicyLoad {
 /// that exists but does not cleanly parse-and-validate is `DefaultInvalid` (⇒ deny-all), never
 /// reinterpreted. A legacy v0 flat policy (no `version` key) is rejected with a SPECIFIC
 /// message rather than reinterpreting its `allow_to: [] = any` semantics. On success
-/// `spent_today_wei`/`revoked` are forced to their fresh-start values (belt-and-suspenders:
-/// they are `#[serde(skip)]` and the daemon boots armed with in-memory spend).
+/// `spent_today_wei`/`revoked` are forced to their fresh-start values: they are
+/// `#[serde(default)]` (a file may carry them, but the durable `SpendStore`/#108 counter is the
+/// source of truth — a file can never inject a spend) and the daemon boots armed.
 pub fn load_policy_outcome(path: &Path) -> PolicyLoad {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,

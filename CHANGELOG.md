@@ -27,10 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than allowing all of them.
 - **A policy file with no `version` key is now rejected** ([#135]). Such a file is treated as a stale
   pre-v1 file: the daemon refuses it, logs loudly, and falls back to a most-restrictive deny-all policy
-  that approves nothing. **Demo machines must upgrade their policy file by hand.** If you have an
-  existing demo policy, delete it and reinstall the v1 file before running the demo again:
-  `rm ~/.deckard/demo/policy.json` then `just demo` (or `cp policy.demo.json ~/.deckard/demo/policy.json`).
-  Skip this and the daemon loads the deny-all fallback, so the demo's auto-shield quietly stops working.
+  that approves nothing — so the demo's auto-shield quietly stops working. **`just demo` now upgrades a
+  legacy demo policy for you**: it detects a v0 `~/.deckard/demo/policy.json` (no `version` key), backs
+  it up to `policy.json.v0.bak`, and installs the v1 file. A v1 or hand-edited file is left untouched.
+  If you don't use `just demo`, reinstall by hand: `rm ~/.deckard/demo/policy.json` then `just demo`,
+  or `cp policy.demo.json ~/.deckard/demo/policy.json`.
 
 [#135]: https://github.com/hellno/deckard/issues/135
 

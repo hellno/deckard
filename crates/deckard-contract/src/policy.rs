@@ -164,14 +164,20 @@ impl Serialize for Rule {
                 per_tx_cap_wei,
                 recipients,
             } => {
-                let len = 3 + usize::from(per_tx_cap_wei.is_some());
+                // `DenyAll` is the omitted-field default, so we SKIP the field for it (rather
+                // than emit `[]`): that makes every `Allowlist` variant round-trip byte-stably
+                // (`DenyAll` ⇒ omitted ⇒ `DenyAll`), not just `Any`/`Only`.
+                let has_recipients = !recipients.is_deny_all();
+                let len = 2 + usize::from(per_tx_cap_wei.is_some()) + usize::from(has_recipients);
                 let mut map = serializer.serialize_map(Some(len))?;
                 map.serialize_entry("action", "send")?;
                 map.serialize_entry("approval", approval)?;
                 if let Some(cap) = per_tx_cap_wei {
                     map.serialize_entry("per_tx_cap_wei", cap)?;
                 }
-                map.serialize_entry("recipients", recipients)?;
+                if has_recipients {
+                    map.serialize_entry("recipients", recipients)?;
+                }
                 map.end()
             }
             Rule::Shield { approval } => {
@@ -194,16 +200,24 @@ impl Serialize for Rule {
                 map.end()
             }
             Rule::Swap { tokens } => {
-                let mut map = serializer.serialize_map(Some(2))?;
+                let has_tokens = !tokens.is_deny_all();
+                let len = 1 + usize::from(has_tokens);
+                let mut map = serializer.serialize_map(Some(len))?;
                 map.serialize_entry("action", "swap")?;
-                map.serialize_entry("tokens", tokens)?;
+                if has_tokens {
+                    map.serialize_entry("tokens", tokens)?;
+                }
                 map.end()
             }
             Rule::ContractCall { approval, targets } => {
-                let mut map = serializer.serialize_map(Some(3))?;
+                let has_targets = !targets.is_deny_all();
+                let len = 2 + usize::from(has_targets);
+                let mut map = serializer.serialize_map(Some(len))?;
                 map.serialize_entry("action", "contract_call")?;
                 map.serialize_entry("approval", approval)?;
-                map.serialize_entry("targets", targets)?;
+                if has_targets {
+                    map.serialize_entry("targets", targets)?;
+                }
                 map.end()
             }
         }
@@ -370,10 +384,9 @@ impl<'de> Deserialize<'de> for Rule {
 /// `DenyAll`) and a future monotonic grant-narrowing (#33/#48) well-defined.
 ///
 /// Custom serde (see [`Serialize`]/[`Deserialize`] impls below): `Any` ↔ the string `"any"`,
-/// `Only(v)` ↔ a JSON array, and an **omitted** field ↔ `DenyAll` (handled by the rule
-/// decoder's `unwrap_or_default`). Because `DenyAll` *serializes* to an empty array `[]`, it
-/// round-trips back as `Only(vec![])` — semantically identical (both deny everyone). Keep a
-/// bare `DenyAll` field value out of any byte-stable round-trip fixture for that reason.
+/// `Only(v)` ↔ a JSON array, and `DenyAll` ↔ an **omitted** field (the [`Rule`] serializer skips
+/// the field for it; the decoder's `unwrap_or_default` restores it). So every variant — `DenyAll`
+/// included — round-trips byte-stably in both JSON and CBOR.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Allowlist {
     /// Deny everyone (⊥). The default — an action whose allowlist is omitted grants nothing.
@@ -382,6 +395,14 @@ pub enum Allowlist {
     Any,
     /// Allow exactly the listed addresses.
     Only(Vec<Address>),
+}
+
+impl Allowlist {
+    /// `true` for the deny-everyone floor (⊥). The `Rule` serializer skips the allowlist field
+    /// for this variant (omitted ⇒ `DenyAll`), so the wire byte-stably round-trips it.
+    pub fn is_deny_all(&self) -> bool {
+        matches!(self, Allowlist::DenyAll)
+    }
 }
 
 impl Default for Allowlist {
@@ -452,8 +473,10 @@ impl Serialize for Allowlist {
             // ⊤ renders as the tag string the deserializer round-trips.
             Allowlist::Any => serializer.serialize_str("any"),
             Allowlist::Only(v) => v.serialize(serializer),
-            // ⊥ has no string form, so it renders as an empty array (which decodes back to
-            // `Only(vec![])` — the same deny-everyone meaning). See the type doc.
+            // ⊥ has no string form. The `Rule` serializer never reaches here — it SKIPS the
+            // allowlist field for `DenyAll` (omitted ⇒ `DenyAll`), which is what makes the wire
+            // round-trip byte-stable. This arm only fires if an `Allowlist` is serialized
+            // standalone (off the `Rule` path); it renders the same deny-everyone `[]`.
             Allowlist::DenyAll => Vec::<Address>::new().serialize(serializer),
         }
     }

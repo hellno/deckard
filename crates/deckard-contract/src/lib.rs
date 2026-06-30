@@ -117,8 +117,8 @@ mod roundtrip_tests {
             auto_shield_min_wei: U256::from(10_000_000_000_000_000_u64),
             spent_today_wei: U256::ZERO,
             // Non-trivial allowlists (`Only(non-empty)` / `Any`) so the custom `Allowlist`
-            // serde gets real coverage — NEVER a bare `DenyAll`, which serializes to `[]` and
-            // decodes back to `Only(vec![])`, breaking the byte-stable `assert_eq`.
+            // serde gets real coverage. (`DenyAll` round-trips too — the serializer omits the
+            // field for it — exercised separately in `deny_all_allowlist_roundtrips`.)
             rules: vec![
                 Rule::Send {
                     approval: ApprovalMode::OverCap,
@@ -240,8 +240,7 @@ mod roundtrip_tests {
     #[test]
     fn recipients_omitted_field_decodes_to_deny_all() {
         // The `#[serde(default)]` path: a `send` rule that OMITS `recipients` decodes to the
-        // default-deny floor (`DenyAll`) — NOT "any". This is the trust-relevant default; the
-        // round-trip helper can't assert it (DenyAll re-encodes to `[]`), so it's deserialize-only.
+        // default-deny floor (`DenyAll`) — NOT "any". This is the trust-relevant default.
         let omitted: Policy = serde_json::from_str(
             r#"{"version":1,"default":"deny","daily_cap_wei":"0x1","auto_shield_min_wei":"0x0",
                 "rules":[{"action":"send","approval":"over_cap"}]}"#,
@@ -282,6 +281,71 @@ mod roundtrip_tests {
             bad.is_err(),
             "a non-\"any\" allowlist string must be rejected"
         );
+    }
+
+    #[test]
+    fn deny_all_allowlist_roundtrips() {
+        // The serializer SKIPS the allowlist field for `DenyAll` (omitted ⇒ `DenyAll`), so a
+        // rule carrying the deny-everyone floor round-trips byte-stably in BOTH JSON and CBOR —
+        // closing the old "DenyAll re-encodes to `[]` → `Only(vec![])`" gap.
+        let policy = Policy {
+            version: POLICY_VERSION,
+            default_effect: Effect::Deny,
+            revoked: false,
+            daily_cap_wei: U256::from(1_000u64),
+            auto_shield_min_wei: U256::ZERO,
+            spent_today_wei: U256::ZERO,
+            rules: vec![
+                Rule::Send {
+                    approval: ApprovalMode::Always,
+                    per_tx_cap_wei: None,
+                    recipients: Allowlist::DenyAll,
+                },
+                Rule::Swap {
+                    tokens: Allowlist::DenyAll,
+                },
+                Rule::ContractCall {
+                    approval: ApprovalMode::Always,
+                    targets: Allowlist::DenyAll,
+                },
+            ],
+        };
+        roundtrip(&policy);
+        // And the omitted field is genuinely gone from the JSON (not emitted as `[]`).
+        let json = serde_json::to_string(&policy).unwrap();
+        assert!(
+            !json.contains("recipients") && !json.contains("tokens") && !json.contains("targets"),
+            "DenyAll must omit the allowlist field, got: {json}"
+        );
+    }
+
+    #[test]
+    fn runtime_fields_cross_the_policy_get_wire() {
+        // `revoked`/`spent_today_wei` are `#[serde(default)]`, NOT `#[serde(skip)]`: the daemon
+        // returns the WHOLE `Policy` over the `PolicyGet` RPC, so the app's spend gauge and the
+        // agent's spent view must read the daemon's LIVE values, not a silent zero/false. A
+        // non-default round-trip proves they stay on the wire (a `skip` would reset them on
+        // decode and fail this `assert_eq`). The loader's force-reset (a file can't inject a
+        // spend) is a separate path, covered in `policy_store`.
+        let live = Policy {
+            version: POLICY_VERSION,
+            default_effect: Effect::Deny,
+            revoked: true,
+            daily_cap_wei: U256::from(500u64),
+            auto_shield_min_wei: U256::ZERO,
+            spent_today_wei: U256::from(321u64),
+            rules: vec![Rule::Shield {
+                approval: ApprovalMode::Never,
+            }],
+        };
+        roundtrip(&live);
+        let back: Policy = serde_json::from_slice(&serde_json::to_vec(&live).unwrap()).unwrap();
+        assert_eq!(
+            back.spent_today_wei,
+            U256::from(321u64),
+            "spend lost on the wire"
+        );
+        assert!(back.revoked, "revoked lost on the wire");
     }
 
     #[test]

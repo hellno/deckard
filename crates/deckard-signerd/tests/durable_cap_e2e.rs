@@ -50,10 +50,10 @@ fn tight_policy(cap: u128) -> Policy {
 }
 
 /// Whether a within-per-tx send is HELD (the recovered spend ate the daily headroom) vs
-/// auto-ALLOWED (headroom available). The daemon's `spent_today_wei` is `#[serde(skip)]`
-/// runtime state and no longer crosses the `PolicyGet` wire, so the durable spend is observed
-/// through this cap-enforcement decision — the actual security property — rather than read back
-/// as a number.
+/// auto-ALLOWED (headroom available). We observe the recovered durable spend through this
+/// cap-enforcement decision — the actual security property (a recovered spend must gate
+/// signing) — which is stronger than reading the `spent_today_wei` number off the wire. (That
+/// number does cross `PolicyGet`; its wire fidelity is covered by a contract-crate round-trip.)
 async fn send_is_held(client: &SignerClient, recipient: Address, value: u128) -> bool {
     match client
         .propose(&send(recipient, value), ProposalOrigin::App)
@@ -169,8 +169,8 @@ async fn restart_does_not_reset_the_cap() {
 
     // A 0.03 ETH send fits per-tx (0.05) and would auto-allow IF the cap had reset — but the
     // recovered 0.04 + 0.03 exceeds the 0.05 daily cap, so it is HELD for approval, not drained.
-    // (The recovered spend is observed through this decision: `spent_today_wei` is `#[serde(skip)]`
-    // runtime state and no longer crosses the `PolicyGet` wire.)
+    // (The recovered spend is observed through this cap decision — the security property —
+    // not by reading the `spent_today_wei` wire number, whose fidelity is covered separately.)
     assert!(
         send_is_held(&client2, recipient, 30_000_000_000_000_000).await,
         "the durable cap blocks the post-restart drain (would be Allow if the cap had reset)"
