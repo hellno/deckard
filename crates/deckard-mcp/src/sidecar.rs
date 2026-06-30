@@ -12,8 +12,9 @@ use serde_json::json;
 use zeroize::Zeroizing;
 
 use deckard_contract::{
-    ActivityLifecycle, ApprovalMode, ApprovalStatus, Decision, ExecuteResult, Policy,
-    ProposalOrigin, ReadStatus, SignerRequest, SignerResponse, StatusView,
+    ActivityLifecycle, Allowlist, ApprovalMode, ApprovalStatus, Decision, ExecuteResult,
+    IntentKind, Policy, ProposalOrigin, ReadStatus, Rule, SignerRequest, SignerResponse,
+    StatusView,
 };
 use deckard_wallet_client::{failure, unexpected, Failure, SignerClient, WalletClient};
 
@@ -348,24 +349,105 @@ fn read_status_label(status: &ReadStatus) -> String {
     }
 }
 
-/// The agent-readable policy snapshot, with both wei strings and ETH renderings.
+/// The agent-readable policy snapshot (policy v2: versioned, default-deny, per-action rule
+/// list — ADR 0005). Emits the full v1 structure under `rules`, plus a flat set of top-level
+/// keys **derived from the Send rule** for back-compat: the agent's quickstart and
+/// `just demo-check`'s jq read `.per_tx_cap_wei` / `.daily_cap_wei` / `.require_approval`, and
+/// the acceptance suite pins `per_tx_cap_eth` / `require_approval`. Read-only.
 fn policy_json(p: &Policy) -> serde_json::Value {
+    // Back-compat top-level fields are the Send rule's view of the policy: the cap an agent
+    // planning a transfer must stay under, and the mode that decides whether a card is raised.
+    let send_cap = p.per_tx_cap_for(IntentKind::Send).unwrap_or(U256::ZERO);
+    let send_approval = match p.approval_for(IntentKind::Send) {
+        Some(mode) => approval_mode_str(mode),
+        // No Send rule at all ⇒ default-deny: a send grants no authority.
+        None => "denied",
+    };
+    let send_recipients = p.recipients_for(IntentKind::Send);
+
     json!({
-        "per_tx_cap_wei": p.per_tx_cap_wei.to_string(),
-        "per_tx_cap_eth": format_wei_as_eth(p.per_tx_cap_wei),
+        "version": p.version,
+        "default": "deny",
         "daily_cap_wei": p.daily_cap_wei.to_string(),
         "daily_cap_eth": format_wei_as_eth(p.daily_cap_wei),
         "spent_today_wei": p.spent_today_wei.to_string(),
         "spent_today_eth": format_wei_as_eth(p.spent_today_wei),
-        "allow_to": p.allow_to.iter().map(|a| format!("{a:#x}")).collect::<Vec<_>>(),
-        "allow_to_note": if p.allow_to.is_empty() { "empty = any recipient allowed" } else { "only these recipients" },
         "auto_shield_min_wei": p.auto_shield_min_wei.to_string(),
-        "require_approval": match p.require_approval {
-            ApprovalMode::Never => "never",
-            ApprovalMode::OverCap => "over_cap",
-            ApprovalMode::Always => "always",
-        },
         "revoked": p.revoked,
+        // Back-compat top-level keys, derived from the Send rule (see the fn doc).
+        "per_tx_cap_wei": send_cap.to_string(),
+        "per_tx_cap_eth": format_wei_as_eth(send_cap),
+        "require_approval": send_approval,
+        "allow_to": match send_recipients {
+            Allowlist::Only(v) => v.iter().map(|a| format!("{a:#x}")).collect::<Vec<_>>(),
+            // `Any` and `DenyAll` carry no concrete address list; the note disambiguates.
+            Allowlist::Any | Allowlist::DenyAll => Vec::new(),
+        },
+        "allow_to_note": match send_recipients {
+            Allowlist::Any => "empty = any recipient allowed",
+            Allowlist::Only(_) => "only these recipients",
+            Allowlist::DenyAll => "deny all (no send rule)",
+        },
+        "rules": p.rules.iter().map(rule_json).collect::<Vec<_>>(),
         "note": "read-only here — a human edits policy.json in the Deckard config dir",
     })
+}
+
+/// One per-action [`Rule`] rendered for the agent: the action tag plus only the fields that
+/// govern it (caps in both wei and ETH where present; allowlists via [`allowlist_json`]).
+fn rule_json(rule: &Rule) -> serde_json::Value {
+    match rule {
+        Rule::Send {
+            approval,
+            per_tx_cap_wei,
+            recipients,
+        } => json!({
+            "action": "send",
+            "approval": approval_mode_str(*approval),
+            "per_tx_cap_wei": per_tx_cap_wei.map(|c| c.to_string()),
+            "per_tx_cap_eth": per_tx_cap_wei.map(format_wei_as_eth),
+            "recipients": allowlist_json(recipients),
+        }),
+        Rule::Shield { approval } => json!({
+            "action": "shield",
+            "approval": approval_mode_str(*approval),
+        }),
+        Rule::Unshield {
+            approval,
+            per_tx_cap_wei,
+        } => json!({
+            "action": "unshield",
+            "approval": approval_mode_str(*approval),
+            "per_tx_cap_wei": per_tx_cap_wei.map(|c| c.to_string()),
+        }),
+        Rule::Swap { tokens } => json!({
+            "action": "swap",
+            "tokens": allowlist_json(tokens),
+        }),
+        Rule::ContractCall { approval, targets } => json!({
+            "action": "contract_call",
+            "approval": approval_mode_str(*approval),
+            "targets": allowlist_json(targets),
+        }),
+    }
+}
+
+/// An [`ApprovalMode`] as the stable snake_case string the agent (and the back-compat
+/// `require_approval` field) branch on.
+fn approval_mode_str(mode: ApprovalMode) -> &'static str {
+    match mode {
+        ApprovalMode::Never => "never",
+        ApprovalMode::OverCap => "over_cap",
+        ApprovalMode::Always => "always",
+    }
+}
+
+/// An [`Allowlist`] lattice value the agent can read: `Any` → `"any"`, `DenyAll` →
+/// `"deny_all"`, `Only(v)` → the concrete `0x`-hex address array.
+fn allowlist_json(allowlist: &Allowlist) -> serde_json::Value {
+    match allowlist {
+        Allowlist::Any => json!("any"),
+        Allowlist::DenyAll => json!("deny_all"),
+        Allowlist::Only(v) => json!(v.iter().map(|a| format!("{a:#x}")).collect::<Vec<_>>()),
+    }
 }

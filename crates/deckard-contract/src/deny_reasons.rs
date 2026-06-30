@@ -37,20 +37,24 @@
 /// STOP / `revoke_all` is engaged: the panic brake denied this request. Fires whenever
 /// `policy.revoked` is set — at propose and at the execute/sign TOCTOU re-check.
 pub const REVOKED: &str = "revoked";
-/// The recipient is not in the (non-empty) `allow_to` allowlist.
+/// The recipient/target is denied by the rule's `Allowlist` (`DenyAll`, or an `Only` set the
+/// address is not in). Issue #135 replaced the old `allow_to: [] = any` sentinel with this lattice.
 pub const OFF_ALLOWLIST: &str = "off_allowlist";
 /// The intent's calldata does not match its `IntentKind` (e.g. a Shield with empty calldata,
 /// or a Send carrying calldata).
 pub const UNDECODABLE: &str = "undecodable";
 /// Over a spending cap while `require_approval = Never` — no card exists to authorise it.
 pub const OVER_CAP: &str = "over_cap";
+/// No rule in the policy matches this intent's action — default-deny (issue #135).
+pub const NO_RULE: &str = "no_rule";
 /// Swap order receiver is the zero address.
 pub const RECEIVER_ZERO: &str = "receiver_zero";
 /// Swap order receiver is not the daemon's unlocked wallet (funds would leave the operator).
 pub const RECEIVER_NOT_WALLET: &str = "receiver_not_wallet";
 /// Swap order sell amount is zero (a garbage order).
 pub const ZERO_AMOUNT: &str = "zero_amount";
-/// Swap sell or buy token is not in the (non-empty) `allow_swap_tokens` list.
+/// Swap sell or buy token is denied by the `Swap` rule's `tokens` `Allowlist` (`DenyAll` —
+/// including when there is no `Swap` rule — or an `Only` set missing the sell/buy token).
 pub const OFF_SWAP_LIST: &str = "off_swap_list";
 /// Swap order `valid_to` is more than 24h in the future.
 pub const VALID_TO_TOO_FAR: &str = "valid_to_too_far";

@@ -3,6 +3,28 @@
 //!
 //! [`evaluate`] is **the one decision function** — both `MockSigner` and the real
 //! `deckard-signerd` call it, so there is no mock⇄daemon drift in the verdict logic.
+//!
+//! # Policy v2 — a versioned, default-deny, per-action typed rule list (ADR 0005, issue #135)
+//!
+//! The flat god-struct (one global `require_approval`, an `allow_to: Vec` whose **empty =
+//! any** sentinel default-*allowed* the most dangerous axis) is gone. In its place is a
+//! [`Vec`] of typed [`Rule`]s, one per action, each carrying only the constraints that make
+//! sense for it. Three trust-relevant properties drive the shape:
+//!
+//! * **Default-deny.** No [`Rule`] matches an action ⇒ `Deny{NO_RULE}`. A present-but-empty
+//!   `rules: []` denies everything. There is no representable "allow by default": [`Effect`]
+//!   has only `Deny`, so a wallet can never be allow-by-default by construction.
+//! * **A real allowlist lattice, not a sentinel.** [`Allowlist`] is `DenyAll` (⊥) / `Any`
+//!   (⊤) / `Only(set)` — so "deny everyone" and "allow everyone" are *distinct, explicit*
+//!   values. The old "empty `Vec` accidentally means any" foot-gun is unrepresentable, and a
+//!   future grant intersection (#33/#48) is well-defined against this lattice.
+//! * **Wei stays `U256`.** Every cap comparison is native `U256` (no general policy engine
+//!   can enforce a `uint256` ceiling — see ADR 0005 §3), and the daily cap is **one global
+//!   wall** mirroring the single `SpendStore` (#108); per-tx caps live per action.
+//!
+//! Adding a wallet action is therefore a localized `Rule` variant + one match arm — never a
+//! new top-level field threaded through `evaluate`, the loader, the demo policy, and every
+//! test (the sprawl v1 exists to kill).
 
 use alloy_primitives::{Address, U256};
 use serde::{Deserialize, Serialize};
@@ -13,32 +35,465 @@ use crate::intent::{Intent, IntentKind};
 use crate::message_signing::{SignMessage, SignMessageKind};
 use crate::swap_order::SwapOrder;
 
+/// The on-the-wire schema version of [`Policy`]. A file without a `version` key is a legacy
+/// v0 flat policy; the loader rejects it loudly rather than reinterpret its `allow_to: [] =
+/// any` semantics (which would silently flip every recipient axis to deny-all). Bumping this
+/// is an intentional, versioned breaking change to a freeze-first crate (ADR 0005 §6).
+pub const POLICY_VERSION: u32 = 1;
+
+/// Sentinel returned by [`Policy::recipients_for`] / [`Policy::swap_tokens`] when an action
+/// carries no allowlist (Shield/Unshield) — `Any`, since those actions never gate on a
+/// recipient set. `'static` so the accessors hand back a borrow with no heap allocation.
+static ANY: Allowlist = Allowlist::Any;
+
+/// Sentinel returned by [`Policy::recipients_for`] / [`Policy::swap_tokens`] when **no rule**
+/// matches the action — `DenyAll`, the default-deny floor (an action with no rule grants no
+/// authority). `'static`, like [`ANY`], so the accessors allocate nothing.
+static DENY_ALL: Allowlist = Allowlist::DenyAll;
+
 /// The agent-readable policy. All caps are in wei.
+///
+/// `version`, `default`, the two caps, and `rules` are the authored fields. `revoked` and
+/// `spent_today_wei` are runtime state owned by the daemon (the STOP brake and the rolling
+/// spend counter): they are `#[serde(default)]`, so a hand-authored `policy.json` may omit
+/// them (the loader force-resets both on load — a file can never inject a spend), but they
+/// **stay on the wire** for the `PolicyGet` RPC so a client (the app gauge, the agent's
+/// `spent_today` view) reads the daemon's live values instead of a silent zero.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Policy {
-    /// Per-transaction ceiling.
-    pub per_tx_cap_wei: U256,
-    /// Rolling daily ceiling.
-    pub daily_cap_wei: U256,
-    /// Spent so far today; the cap check compares `spent_today_wei + value`.
-    pub spent_today_wei: U256,
-    /// Allowed recipients. **EMPTY = any address allowed.**
-    pub allow_to: Vec<Address>,
-    /// Demo rule: auto-shield inbound ETH ≥ this. Read by the agent to decide *whether to
-    /// propose a shield*; the policy gate itself does not switch on it.
-    pub auto_shield_min_wei: U256,
-    /// When a write needs a human approval card.
-    pub require_approval: ApprovalMode,
-    /// Set true by `revoke_all` / STOP. Re-checked at execute time (TOCTOU guard).
-    pub revoked: bool,
-    /// Per-token swap allowlist (sell+buy must both be present). **EMPTY = any token allowed.**
-    /// Daemon config populates it from `tokens_for(chain_id)`; agent-readable via PolicyGet.
+    /// Schema version. The loader rejects anything but [`POLICY_VERSION`] (loud, never a
+    /// silent verdict) via [`Policy::validate`].
+    pub version: u32,
+    /// The default effect when no rule matches. v1 can only be [`Effect::Deny`] — `"allow"`
+    /// is intentionally not representable (a wallet must not be allow-by-default).
+    #[serde(rename = "default")]
+    pub default_effect: Effect,
+    /// Set true by `revoke_all` / STOP. Re-checked at execute time (TOCTOU guard). Runtime
+    /// state the loader force-resets to `false` on load (a daemon boots armed); `#[serde(default)]`
+    /// so the file may omit it, but it stays on the `PolicyGet` wire so a client sees a live STOP.
     #[serde(default)]
-    pub allow_swap_tokens: Vec<Address>,
+    pub revoked: bool,
+    /// The **one global** daily ceiling, applied to every value-bearing action. A single wall
+    /// mirrors the single `SpendStore` counter (#108) — a per-action daily cap would let a
+    /// `Send` consume an `Unshield`'s budget, so it is deliberately not v1.
+    pub daily_cap_wei: U256,
+    /// Demo rule: auto-shield inbound ETH ≥ this. **Advisory** — read by the agent (via
+    /// `policy_get`) to decide *whether to propose a shield*; the policy gate itself does not
+    /// switch on it (preserves today's semantics).
+    pub auto_shield_min_wei: U256,
+    /// Spent so far today; the cap check compares `spent_today_wei + value`. Runtime state the
+    /// loader force-resets to `0` on load (the durable `SpendStore`/#108 counter is the source
+    /// of truth, never the file); `#[serde(default)]` so the file may omit it, but it stays on
+    /// the `PolicyGet` wire so the app's spend gauge reads the daemon's live counter.
+    #[serde(default)]
+    pub spent_today_wei: U256,
+    /// The typed, per-action rule list. The loader rejects a duplicate action (see
+    /// [`Policy::validate`]), so "find the rule for this action" is unambiguous. An empty list
+    /// denies everything (default-deny).
+    pub rules: Vec<Rule>,
 }
 
-/// When the policy gate raises a native approval card.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// One per-action rule. On the JSON wire it is the RFC 9396 "array of typed objects" shape —
+/// internally tagged by `"action"` (`{ "action": "send", … }`). Each action's constraints live
+/// **inside its own variant**: adding a capability is one variant + one match arm, never a new
+/// top-level [`Policy`] field.
+///
+/// Reachability honesty (ADR 0005 §2): the v1 daemon denies anything but `Send`/`Shield`
+/// before `evaluate`, and the one signed `ContractCall` (the shaped relayer-approve) skips
+/// `evaluate` entirely. So `Unshield` and `ContractCall` rules are **forward-compat but not
+/// yet reachable** — a permissive one grants no live authority today.
+///
+/// ## Why hand-rolled serde instead of `#[serde(tag = "action")]`
+///
+/// `Policy` must round-trip byte-stably in **both** JSON (the MCP surface) and CBOR (the
+/// daemon's `PolicyGet` over a Unix socket, via `ciborium`). Serde's internally-tagged enum
+/// derive buffers each variant into a self-describing `Content` to find the tag first — and
+/// `ciborium` is **not** self-describing: it writes `Address`/`U256` as raw byte strings (its
+/// `is_human_readable()` is `false`), but the buffered `Content` re-deserializer reports
+/// `is_human_readable() == true`, so `alloy`'s `Address`/`U256` then demand a hex string and
+/// fail with `"expected a 32 byte hex string"`. So the derive can't be used here. The
+/// [`Serialize`]/[`Deserialize`] impls below produce the **exact same** `{ "action": … }`
+/// map shape while decoding each field through the live format (no `Content` buffering), so
+/// CBOR and JSON both round-trip. Unknown fields inside a rule are rejected, a missing
+/// required field errors, and an unknown action value errors — the strictness the loader
+/// relies on is preserved by hand.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Rule {
+    /// Plain transfer. Carries a per-tx cap (optional) and a recipient allowlist.
+    Send {
+        approval: ApprovalMode,
+        per_tx_cap_wei: Option<U256>,
+        recipients: Allowlist,
+    },
+    /// Railgun deposit to one's own 0zk balance — value moves to self, so no recipient set and
+    /// no per-tx cap.
+    Shield { approval: ApprovalMode },
+    /// Railgun withdraw back to a public balance. Forward-compat; not yet reachable (see the
+    /// type-level note above).
+    Unshield {
+        approval: ApprovalMode,
+        per_tx_cap_wei: Option<U256>,
+    },
+    /// Read by [`evaluate_order`] only — carries the sell+buy token allowlist and nothing
+    /// else (no `approval`/`per_tx_cap`: a well-formed swap is ALWAYS `NeedsApproval`, so those
+    /// would be dead fields that lie to the policy author).
+    Swap { tokens: Allowlist },
+    /// Generic contract write (forward-compat for plugins); not yet reachable. Carries a
+    /// target allowlist.
+    ContractCall {
+        approval: ApprovalMode,
+        targets: Allowlist,
+    },
+}
+
+impl Serialize for Rule {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap;
+        // Each arm emits an `{"action": <tag>, …}` map — the same shape `#[serde(tag =
+        // "action")]` would, but written field-by-field through the live serializer so
+        // `Address`/`U256` use the format's native encoding (no `Content` buffering). The
+        // optional `per_tx_cap_wei` is skipped when `None` (matching the old
+        // `skip_serializing_if = "Option::is_none"`).
+        match self {
+            Rule::Send {
+                approval,
+                per_tx_cap_wei,
+                recipients,
+            } => {
+                // `DenyAll` is the omitted-field default, so we SKIP the field for it (rather
+                // than emit `[]`): that makes every `Allowlist` variant round-trip byte-stably
+                // (`DenyAll` ⇒ omitted ⇒ `DenyAll`), not just `Any`/`Only`.
+                let has_recipients = !recipients.is_deny_all();
+                let len = 2 + usize::from(per_tx_cap_wei.is_some()) + usize::from(has_recipients);
+                let mut map = serializer.serialize_map(Some(len))?;
+                map.serialize_entry("action", "send")?;
+                map.serialize_entry("approval", approval)?;
+                if let Some(cap) = per_tx_cap_wei {
+                    map.serialize_entry("per_tx_cap_wei", cap)?;
+                }
+                if has_recipients {
+                    map.serialize_entry("recipients", recipients)?;
+                }
+                map.end()
+            }
+            Rule::Shield { approval } => {
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("action", "shield")?;
+                map.serialize_entry("approval", approval)?;
+                map.end()
+            }
+            Rule::Unshield {
+                approval,
+                per_tx_cap_wei,
+            } => {
+                let len = 2 + usize::from(per_tx_cap_wei.is_some());
+                let mut map = serializer.serialize_map(Some(len))?;
+                map.serialize_entry("action", "unshield")?;
+                map.serialize_entry("approval", approval)?;
+                if let Some(cap) = per_tx_cap_wei {
+                    map.serialize_entry("per_tx_cap_wei", cap)?;
+                }
+                map.end()
+            }
+            Rule::Swap { tokens } => {
+                let has_tokens = !tokens.is_deny_all();
+                let len = 1 + usize::from(has_tokens);
+                let mut map = serializer.serialize_map(Some(len))?;
+                map.serialize_entry("action", "swap")?;
+                if has_tokens {
+                    map.serialize_entry("tokens", tokens)?;
+                }
+                map.end()
+            }
+            Rule::ContractCall { approval, targets } => {
+                let has_targets = !targets.is_deny_all();
+                let len = 2 + usize::from(has_targets);
+                let mut map = serializer.serialize_map(Some(len))?;
+                map.serialize_entry("action", "contract_call")?;
+                map.serialize_entry("approval", approval)?;
+                if has_targets {
+                    map.serialize_entry("targets", targets)?;
+                }
+                map.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Rule {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        /// The field keys a rule map may carry. Unknown keys are rejected (the by-hand
+        /// equivalent of `deny_unknown_fields`).
+        #[derive(Deserialize)]
+        #[serde(field_identifier, rename_all = "snake_case")]
+        enum Field {
+            Action,
+            Approval,
+            PerTxCapWei,
+            Recipients,
+            Tokens,
+            Targets,
+        }
+
+        struct RuleVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for RuleVisitor {
+            type Value = Rule;
+
+            fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                f.write_str("a rule object with an \"action\" key")
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<Rule, M::Error>
+            where
+                M: serde::de::MapAccess<'de>,
+            {
+                use serde::de::Error as _;
+                let mut action: Option<String> = None;
+                let mut approval: Option<ApprovalMode> = None;
+                let mut per_tx_cap_wei: Option<U256> = None;
+                let mut recipients: Option<Allowlist> = None;
+                let mut tokens: Option<Allowlist> = None;
+                let mut targets: Option<Allowlist> = None;
+
+                // Read every key through the live deserializer — no `Content` buffering, so
+                // `Address`/`U256` decode natively in both JSON and CBOR.
+                while let Some(field) = map.next_key::<Field>()? {
+                    match field {
+                        Field::Action => {
+                            if action.is_some() {
+                                return Err(M::Error::duplicate_field("action"));
+                            }
+                            action = Some(map.next_value()?);
+                        }
+                        Field::Approval => {
+                            if approval.is_some() {
+                                return Err(M::Error::duplicate_field("approval"));
+                            }
+                            approval = Some(map.next_value()?);
+                        }
+                        Field::PerTxCapWei => {
+                            if per_tx_cap_wei.is_some() {
+                                return Err(M::Error::duplicate_field("per_tx_cap_wei"));
+                            }
+                            per_tx_cap_wei = Some(map.next_value()?);
+                        }
+                        Field::Recipients => {
+                            if recipients.is_some() {
+                                return Err(M::Error::duplicate_field("recipients"));
+                            }
+                            recipients = Some(map.next_value()?);
+                        }
+                        Field::Tokens => {
+                            if tokens.is_some() {
+                                return Err(M::Error::duplicate_field("tokens"));
+                            }
+                            tokens = Some(map.next_value()?);
+                        }
+                        Field::Targets => {
+                            if targets.is_some() {
+                                return Err(M::Error::duplicate_field("targets"));
+                            }
+                            targets = Some(map.next_value()?);
+                        }
+                    }
+                }
+
+                let action = action.ok_or_else(|| M::Error::missing_field("action"))?;
+                // Reject a field that belongs to a *different* action, so a `send` carrying
+                // `tokens` (a no-op that would lie to the author) is an error — matching the
+                // strictness of a per-variant `deny_unknown_fields`.
+                let reject = |present: bool, name: &'static str| -> Result<(), M::Error> {
+                    if present {
+                        Err(M::Error::custom(format!(
+                            "field {name:?} is not valid for action {action:?}"
+                        )))
+                    } else {
+                        Ok(())
+                    }
+                };
+                match action.as_str() {
+                    "send" => {
+                        reject(tokens.is_some(), "tokens")?;
+                        reject(targets.is_some(), "targets")?;
+                        Ok(Rule::Send {
+                            approval: approval
+                                .ok_or_else(|| M::Error::missing_field("approval"))?,
+                            per_tx_cap_wei,
+                            recipients: recipients.unwrap_or_default(),
+                        })
+                    }
+                    "shield" => {
+                        reject(per_tx_cap_wei.is_some(), "per_tx_cap_wei")?;
+                        reject(recipients.is_some(), "recipients")?;
+                        reject(tokens.is_some(), "tokens")?;
+                        reject(targets.is_some(), "targets")?;
+                        Ok(Rule::Shield {
+                            approval: approval
+                                .ok_or_else(|| M::Error::missing_field("approval"))?,
+                        })
+                    }
+                    "unshield" => {
+                        reject(recipients.is_some(), "recipients")?;
+                        reject(tokens.is_some(), "tokens")?;
+                        reject(targets.is_some(), "targets")?;
+                        Ok(Rule::Unshield {
+                            approval: approval
+                                .ok_or_else(|| M::Error::missing_field("approval"))?,
+                            per_tx_cap_wei,
+                        })
+                    }
+                    "swap" => {
+                        reject(approval.is_some(), "approval")?;
+                        reject(per_tx_cap_wei.is_some(), "per_tx_cap_wei")?;
+                        reject(recipients.is_some(), "recipients")?;
+                        reject(targets.is_some(), "targets")?;
+                        Ok(Rule::Swap {
+                            tokens: tokens.unwrap_or_default(),
+                        })
+                    }
+                    "contract_call" => {
+                        reject(per_tx_cap_wei.is_some(), "per_tx_cap_wei")?;
+                        reject(recipients.is_some(), "recipients")?;
+                        reject(tokens.is_some(), "tokens")?;
+                        Ok(Rule::ContractCall {
+                            approval: approval
+                                .ok_or_else(|| M::Error::missing_field("approval"))?,
+                            targets: targets.unwrap_or_default(),
+                        })
+                    }
+                    other => Err(M::Error::custom(format!("unknown rule action {other:?}"))),
+                }
+            }
+        }
+
+        deserializer.deserialize_map(RuleVisitor)
+    }
+}
+
+/// A recipient / token / target allowlist as a real lattice — **not** a "empty `Vec` = any"
+/// sentinel. `DenyAll` (⊥) denies everyone; `Any` (⊤) allows everyone; `Only(set)` allows
+/// exactly the listed addresses. The distinction is what makes default-deny ([`Default`] is
+/// `DenyAll`) and a future monotonic grant-narrowing (#33/#48) well-defined.
+///
+/// Custom serde (see [`Serialize`]/[`Deserialize`] impls below): `Any` ↔ the string `"any"`,
+/// `Only(v)` ↔ a JSON array, and `DenyAll` ↔ an **omitted** field (the [`Rule`] serializer skips
+/// the field for it; the decoder's `unwrap_or_default` restores it). So every variant — `DenyAll`
+/// included — round-trips byte-stably in both JSON and CBOR.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Allowlist {
+    /// Deny everyone (⊥). The default — an action whose allowlist is omitted grants nothing.
+    DenyAll,
+    /// Allow everyone (⊤).
+    Any,
+    /// Allow exactly the listed addresses.
+    Only(Vec<Address>),
+}
+
+impl Allowlist {
+    /// `true` for the deny-everyone floor (⊥). The `Rule` serializer skips the allowlist field
+    /// for this variant (omitted ⇒ `DenyAll`), so the wire byte-stably round-trips it.
+    pub fn is_deny_all(&self) -> bool {
+        matches!(self, Allowlist::DenyAll)
+    }
+}
+
+impl Default for Allowlist {
+    /// Default-deny: an omitted allowlist field denies everyone. The rule decoder relies on
+    /// this (ADR 0005 §5).
+    fn default() -> Self {
+        Allowlist::DenyAll
+    }
+}
+
+impl<'de> Deserialize<'de> for Allowlist {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // A hand-rolled visitor (NOT `#[serde(untagged)]`) because the wire carries either a
+        // string (`"any"`) or a sequence of `Address`. An untagged helper buffers the input
+        // into serde's self-describing `Content` and re-deserializes it — but `alloy`'s
+        // `Address` `Deserialize` switches on `is_human_readable()` (hex string in JSON, raw
+        // bytes in CBOR), and the buffered re-deserialization loses the CBOR format flag, so
+        // the byte array fails to decode as a "20 byte hex string". `deserialize_any` lets the
+        // format itself dispatch to `visit_str` / `visit_seq`, decoding `Address` natively in
+        // both JSON and CBOR.
+        struct AllowlistVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for AllowlistVisitor {
+            type Value = Allowlist;
+
+            fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                f.write_str(r#"the string "any" or an array of addresses"#)
+            }
+
+            fn visit_str<E>(self, s: &str) -> Result<Allowlist, E>
+            where
+                E: serde::de::Error,
+            {
+                if s == "any" {
+                    Ok(Allowlist::Any)
+                } else {
+                    Err(E::custom(format!(
+                        "allowlist string must be \"any\", got {s:?}"
+                    )))
+                }
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Allowlist, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let mut v = Vec::new();
+                while let Some(addr) = seq.next_element::<Address>()? {
+                    v.push(addr);
+                }
+                Ok(Allowlist::Only(v))
+            }
+        }
+
+        deserializer.deserialize_any(AllowlistVisitor)
+    }
+}
+
+impl Serialize for Allowlist {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            // ⊤ renders as the tag string the deserializer round-trips.
+            Allowlist::Any => serializer.serialize_str("any"),
+            Allowlist::Only(v) => v.serialize(serializer),
+            // ⊥ has no string form. The `Rule` serializer never reaches here — it SKIPS the
+            // allowlist field for `DenyAll` (omitted ⇒ `DenyAll`), which is what makes the wire
+            // round-trip byte-stable. This arm only fires if an `Allowlist` is serialized
+            // standalone (off the `Rule` path); it renders the same deny-everyone `[]`.
+            Allowlist::DenyAll => Vec::<Address>::new().serialize(serializer),
+        }
+    }
+}
+
+/// The default effect when no rule matches. v1 has exactly one variant: a wallet must not be
+/// allow-by-default, so `"allow"` is intentionally not representable.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Effect {
+    #[default]
+    Deny,
+}
+
+/// When a rule's action raises a native approval card.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ApprovalMode {
     /// Never raise a card. Within cap → allow; over cap → deny (no card to override it).
     Never,
@@ -48,15 +503,146 @@ pub enum ApprovalMode {
     Always,
 }
 
+/// A policy that fails [`Policy::validate`]. Surfaced by the loader, which converts it to a
+/// loud most-restrictive deny-all fallback rather than ever returning a silent verdict.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PolicyError {
+    /// The `version` field is not [`POLICY_VERSION`] (e.g. a legacy v0 file or a future v2).
+    UnsupportedVersion(u32),
+    /// Two rules share the same action — "find the rule for this action" would be ambiguous.
+    /// Carries the action's wire tag (`"send"`, `"shield"`, …).
+    DuplicateAction(&'static str),
+}
+
+impl core::fmt::Display for PolicyError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            PolicyError::UnsupportedVersion(v) => write!(
+                f,
+                "unsupported policy version {v} (this build speaks version {POLICY_VERSION})"
+            ),
+            PolicyError::DuplicateAction(action) => {
+                write!(f, "duplicate rule for action {action:?}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PolicyError {}
+
+impl Rule {
+    /// This rule's action as its wire tag — used for duplicate-detection error messages and
+    /// to match a rule against an [`IntentKind`].
+    fn action_tag(&self) -> &'static str {
+        match self {
+            Rule::Send { .. } => "send",
+            Rule::Shield { .. } => "shield",
+            Rule::Unshield { .. } => "unshield",
+            Rule::Swap { .. } => "swap",
+            Rule::ContractCall { .. } => "contract_call",
+        }
+    }
+
+    /// Does this rule govern `kind`? (There is no `Swap` `IntentKind`; the `Swap` rule is
+    /// reached only via [`evaluate_order`]/[`Policy::swap_tokens`].)
+    fn matches_kind(&self, kind: &IntentKind) -> bool {
+        matches!(
+            (self, kind),
+            (Rule::Send { .. }, IntentKind::Send)
+                | (Rule::Shield { .. }, IntentKind::Shield)
+                | (Rule::Unshield { .. }, IntentKind::Unshield)
+                | (Rule::ContractCall { .. }, IntentKind::ContractCall)
+        )
+    }
+}
+
+impl Policy {
+    /// Validate the loaded policy: the `version` must be [`POLICY_VERSION`] and no two rules
+    /// may share an action. The loader calls this; a failure becomes a loud deny-all fallback,
+    /// never a verdict.
+    pub fn validate(&self) -> Result<(), PolicyError> {
+        if self.version != POLICY_VERSION {
+            return Err(PolicyError::UnsupportedVersion(self.version));
+        }
+        // Reject duplicate actions so `rule_for` is unambiguous. The rule count is tiny (one
+        // per action), so the quadratic scan is irrelevant and needs no allocation.
+        for (i, rule) in self.rules.iter().enumerate() {
+            if self.rules[..i]
+                .iter()
+                .any(|earlier| earlier.action_tag() == rule.action_tag())
+            {
+                return Err(PolicyError::DuplicateAction(rule.action_tag()));
+            }
+        }
+        Ok(())
+    }
+
+    /// The first rule governing `kind`, or `None` (⇒ default-deny). With duplicate actions
+    /// rejected by [`Policy::validate`], "first" is the only matching rule.
+    pub fn rule_for(&self, kind: IntentKind) -> Option<&Rule> {
+        self.rules.iter().find(|rule| rule.matches_kind(&kind))
+    }
+
+    /// The per-tx cap carried by the rule for `kind`, if any. Only `Send`/`Unshield` rules
+    /// carry one; every other action (and a no-rule) yields `None`.
+    pub fn per_tx_cap_for(&self, kind: IntentKind) -> Option<U256> {
+        match self.rule_for(kind)? {
+            Rule::Send { per_tx_cap_wei, .. } | Rule::Unshield { per_tx_cap_wei, .. } => {
+                *per_tx_cap_wei
+            }
+            _ => None,
+        }
+    }
+
+    /// The recipient/target allowlist for `kind`: the `Send` rule's `recipients`, the
+    /// `ContractCall` rule's `targets`, [`ANY`] for `Shield`/`Unshield` (they never gate on a
+    /// recipient set), and the [`DENY_ALL`] floor when no rule matches (default-deny).
+    pub fn recipients_for(&self, kind: IntentKind) -> &Allowlist {
+        match self.rule_for(kind) {
+            Some(Rule::Send { recipients, .. }) => recipients,
+            Some(Rule::ContractCall { targets, .. }) => targets,
+            // Shield/Unshield carry no recipient allowlist — they don't gate on one.
+            Some(Rule::Shield { .. }) | Some(Rule::Unshield { .. }) => &ANY,
+            // A Swap rule (no Swap IntentKind reaches here) or no rule at all → deny-all floor.
+            Some(Rule::Swap { .. }) | None => &DENY_ALL,
+        }
+    }
+
+    /// The approval mode for `kind`, or `None` for `Swap` (a well-formed swap is always
+    /// `NeedsApproval`, so it has no mode) and for a no-rule.
+    pub fn approval_for(&self, kind: IntentKind) -> Option<ApprovalMode> {
+        match self.rule_for(kind)? {
+            Rule::Send { approval, .. }
+            | Rule::Shield { approval }
+            | Rule::Unshield { approval, .. }
+            | Rule::ContractCall { approval, .. } => Some(*approval),
+            Rule::Swap { .. } => None,
+        }
+    }
+
+    /// The `Swap` rule's token allowlist, or the [`DENY_ALL`] floor when there is no `Swap`
+    /// rule (default-deny: no rule ⇒ no swap is allowed, surfaced as `OFF_SWAP_LIST` by
+    /// [`evaluate_order`] to preserve the existing tag).
+    pub fn swap_tokens(&self) -> &Allowlist {
+        self.rules
+            .iter()
+            .find_map(|rule| match rule {
+                Rule::Swap { tokens } => Some(tokens),
+                _ => None,
+            })
+            .unwrap_or(&DENY_ALL)
+    }
+}
+
 /// **The** decision function. A *pure* `(Intent, Policy) -> Decision` with no I/O, no
 /// signing, no state — both [`MockSigner`](crate::MockSigner) and `deckard-signerd` call
 /// it so the verdict can never drift between the mock and the real daemon.
 ///
-/// It owns the policy-level checks (`revoked`, allowlist, calldata shape, the caps × mode
-/// matrix). Process-level pre-checks that the policy can't express — the daemon being
-/// `Locked`, a `chain_id` mismatch, an unsupported `IntentKind` — are the daemon's job and
-/// run *before* this function (the mock has none of those states, so feeding both the same
-/// `(Intent, Policy)` yields identical `Decision`s; this is the parity contract).
+/// It owns the policy-level checks (`revoked`, the matching rule, the allowlist, calldata
+/// shape, the caps × mode matrix). Process-level pre-checks that the policy can't express —
+/// the daemon being `Locked`, a `chain_id` mismatch, an unsupported `IntentKind` — are the
+/// daemon's job and run *before* this function (the mock has none of those states, so feeding
+/// both the same `(Intent, Policy)` yields identical `Decision`s; this is the parity contract).
 ///
 /// For [`Decision::NeedsApproval`] the returned `request_id` is the **placeholder**
 /// [`RequestId::ZERO`](alloy_primitives::B256::ZERO): minting a real, trackable id is the
@@ -69,23 +655,47 @@ pub fn evaluate(intent: &Intent, policy: &Policy) -> Decision {
             reason: deny_reasons::REVOKED.into(),
         };
     }
-    // 2. Allowlist (empty = any address).
-    if !policy.allow_to.is_empty() && !policy.allow_to.contains(&intent.to) {
+    // 2. Default-deny: no rule governs this action ⇒ deny. This is the whole point of v2 —
+    //    an action a policy never mentions grants no authority.
+    let kind = intent.kind.clone();
+    let Some(rule) = policy.rule_for(kind.clone()) else {
         return Decision::Deny {
-            reason: deny_reasons::OFF_ALLOWLIST.into(),
+            reason: deny_reasons::NO_RULE.into(),
         };
-    }
-    // 3. Calldata must be decodable for the kind.
+    };
+    // 3. Calldata must be decodable for the kind (Send empty; Shield/Unshield/ContractCall
+    //    non-empty — closes the "empty Shield degrades into a bare native send" hole).
     if !calldata_ok(intent) {
         return Decision::Deny {
             reason: deny_reasons::UNDECODABLE.into(),
         };
     }
-    // 4. Cap check: spent_today + value vs the per-tx and daily caps.
+    // 4. Allowlist (the lattice — DenyAll or off-`Only` denies). `Send` gates on the rule's
+    //    `recipients`, `ContractCall` on its `targets`; `Shield`/`Unshield` carry none, so
+    //    `recipients_for` returns `Any` for them and this never denies.
+    match policy.recipients_for(kind.clone()) {
+        Allowlist::DenyAll => {
+            return Decision::Deny {
+                reason: deny_reasons::OFF_ALLOWLIST.into(),
+            };
+        }
+        Allowlist::Only(v) if !v.contains(&intent.to) => {
+            return Decision::Deny {
+                reason: deny_reasons::OFF_ALLOWLIST.into(),
+            };
+        }
+        _ => {}
+    }
+    // Cap check: spent_today + value vs the per-tx cap (rule-carried) and the global daily cap.
     let projected = policy.spent_today_wei.saturating_add(intent.value);
-    let over = projected > policy.per_tx_cap_wei || projected > policy.daily_cap_wei;
+    let over_daily = projected > policy.daily_cap_wei;
+    let over_pertx = policy
+        .per_tx_cap_for(kind)
+        .is_some_and(|cap| projected > cap);
+    let over = over_pertx || over_daily;
 
-    match policy.require_approval {
+    // 5. The approval mode × over-cap matrix.
+    match rule_approval(rule) {
         // Never raises no card, so an over-cap write has nothing to authorise it → deny.
         ApprovalMode::Never => {
             if over {
@@ -108,6 +718,20 @@ pub fn evaluate(intent: &Intent, policy: &Policy) -> Decision {
         ApprovalMode::Always => Decision::NeedsApproval {
             request_id: RequestId::ZERO,
         },
+    }
+}
+
+/// The matched rule's approval mode. `evaluate` only ever holds a rule that matched an
+/// `IntentKind`, and the four intent-bearing variants all carry an `approval`; `Swap` is
+/// unreachable here (no `Swap` `IntentKind`) — default it to the most cautious `Always` so a
+/// mis-wiring fails closed (raises a card) rather than auto-allowing.
+fn rule_approval(rule: &Rule) -> ApprovalMode {
+    match rule {
+        Rule::Send { approval, .. }
+        | Rule::Shield { approval }
+        | Rule::Unshield { approval, .. }
+        | Rule::ContractCall { approval, .. } => *approval,
+        Rule::Swap { .. } => ApprovalMode::Always,
     }
 }
 
@@ -138,13 +762,21 @@ pub fn evaluate_order(order: &SwapOrder, policy: &Policy, wallet: Address, now: 
             reason: deny_reasons::ZERO_AMOUNT.into(),
         };
     }
-    if !policy.allow_swap_tokens.is_empty()
-        && (!policy.allow_swap_tokens.contains(&order.sell_token)
-            || !policy.allow_swap_tokens.contains(&order.buy_token))
-    {
-        return Decision::Deny {
-            reason: deny_reasons::OFF_SWAP_LIST.into(),
-        };
+    // The `Swap` rule's token lattice. NO Swap rule ⇒ `swap_tokens()` returns `DenyAll` ⇒
+    // `OFF_SWAP_LIST` (NOT `NO_RULE`): a missing Swap rule reads as "no token is allowed",
+    // preserving the existing parity tag. Both sell+buy must be present for `Only`.
+    match policy.swap_tokens() {
+        Allowlist::DenyAll => {
+            return Decision::Deny {
+                reason: deny_reasons::OFF_SWAP_LIST.into(),
+            };
+        }
+        Allowlist::Only(v) if !v.contains(&order.sell_token) || !v.contains(&order.buy_token) => {
+            return Decision::Deny {
+                reason: deny_reasons::OFF_SWAP_LIST.into(),
+            };
+        }
+        _ => {}
     }
     if order.valid_to as u64 > now.saturating_add(86_400) {
         return Decision::Deny {
@@ -228,18 +860,30 @@ mod evaluate_order_tests {
         Address::repeat_byte(WALLET_BYTE)
     }
 
-    /// A base policy: not revoked, empty swap allowlist (any token allowed). The other
-    /// caps are irrelevant to `evaluate_order` (it never inspects them).
+    /// A base v1 policy: not revoked, `Swap` tokens = `Any` (any token allowed). It also
+    /// carries `Send`/`Shield` rules so it reads as a realistic full policy, but
+    /// `evaluate_order` only ever inspects the `Swap` rule's `tokens`.
     fn base_policy() -> Policy {
         Policy {
-            per_tx_cap_wei: U256::from(50u64),
-            daily_cap_wei: U256::from(1000u64),
-            spent_today_wei: U256::ZERO,
-            allow_to: vec![],
-            auto_shield_min_wei: U256::from(10u64),
-            require_approval: ApprovalMode::OverCap,
+            version: POLICY_VERSION,
+            default_effect: Effect::Deny,
             revoked: false,
-            allow_swap_tokens: vec![],
+            daily_cap_wei: U256::from(1000u64),
+            auto_shield_min_wei: U256::from(10u64),
+            spent_today_wei: U256::ZERO,
+            rules: vec![
+                Rule::Swap {
+                    tokens: Allowlist::Any,
+                },
+                Rule::Send {
+                    approval: ApprovalMode::OverCap,
+                    per_tx_cap_wei: Some(U256::from(50u64)),
+                    recipients: Allowlist::Any,
+                },
+                Rule::Shield {
+                    approval: ApprovalMode::OverCap,
+                },
+            ],
         }
     }
 
@@ -257,6 +901,18 @@ mod evaluate_order_tests {
             valid_to: (NOW + 3600) as u32,
             app_data: B256::repeat_byte(0xCD),
         }
+    }
+
+    /// Replace the policy's `Swap` rule's token allowlist (the only field `evaluate_order`
+    /// reads), preserving the other rules so the fixture stays a realistic full policy.
+    fn with_swap_tokens(mut p: Policy, tokens: Allowlist) -> Policy {
+        for rule in &mut p.rules {
+            if let Rule::Swap { tokens: t } = rule {
+                *t = tokens;
+                return p;
+            }
+        }
+        p
     }
 
     #[test]
@@ -315,7 +971,8 @@ mod evaluate_order_tests {
 
     #[test]
     fn empty_swap_list_allows_any_token() {
-        // Empty allowlist = any token: a well-formed order needs approval, never denied.
+        // `Swap` tokens = `Any` (the base policy): a well-formed order needs approval, never
+        // denied. (The "empty" name is historical — the v2 lattice spells "any" explicitly.)
         assert!(matches!(
             evaluate_order(&base_order(), &base_policy(), wallet(), NOW),
             Decision::NeedsApproval { .. }
@@ -324,9 +981,11 @@ mod evaluate_order_tests {
 
     #[test]
     fn sell_off_list_denies() {
-        let mut p = base_policy();
         // buy_token present, sell_token absent.
-        p.allow_swap_tokens = vec![Address::repeat_byte(0xB2)];
+        let p = with_swap_tokens(
+            base_policy(),
+            Allowlist::Only(vec![Address::repeat_byte(0xB2)]),
+        );
         assert_eq!(
             evaluate_order(&base_order(), &p, wallet(), NOW),
             Decision::Deny {
@@ -337,9 +996,11 @@ mod evaluate_order_tests {
 
     #[test]
     fn buy_off_list_denies() {
-        let mut p = base_policy();
         // sell_token present, buy_token absent.
-        p.allow_swap_tokens = vec![Address::repeat_byte(0xA1)];
+        let p = with_swap_tokens(
+            base_policy(),
+            Allowlist::Only(vec![Address::repeat_byte(0xA1)]),
+        );
         assert_eq!(
             evaluate_order(&base_order(), &p, wallet(), NOW),
             Decision::Deny {
@@ -350,8 +1011,10 @@ mod evaluate_order_tests {
 
     #[test]
     fn both_off_list_denies() {
-        let mut p = base_policy();
-        p.allow_swap_tokens = vec![Address::repeat_byte(0xEE)];
+        let p = with_swap_tokens(
+            base_policy(),
+            Allowlist::Only(vec![Address::repeat_byte(0xEE)]),
+        );
         assert_eq!(
             evaluate_order(&base_order(), &p, wallet(), NOW),
             Decision::Deny {
@@ -362,8 +1025,10 @@ mod evaluate_order_tests {
 
     #[test]
     fn both_on_list_needs_approval() {
-        let mut p = base_policy();
-        p.allow_swap_tokens = vec![Address::repeat_byte(0xA1), Address::repeat_byte(0xB2)];
+        let p = with_swap_tokens(
+            base_policy(),
+            Allowlist::Only(vec![Address::repeat_byte(0xA1), Address::repeat_byte(0xB2)]),
+        );
         assert!(matches!(
             evaluate_order(&base_order(), &p, wallet(), NOW),
             Decision::NeedsApproval { .. }
@@ -399,6 +1064,24 @@ mod evaluate_order_tests {
     }
 
     #[test]
+    fn no_swap_rule_denies_off_swap_list() {
+        // Default-deny: a policy with NO Swap rule has `swap_tokens() == DenyAll`, so a
+        // well-formed order is `OFF_SWAP_LIST` (NOT `no_rule`) — preserving the swap parity tag.
+        let p = Policy {
+            rules: vec![Rule::Shield {
+                approval: ApprovalMode::Never,
+            }],
+            ..base_policy()
+        };
+        assert_eq!(
+            evaluate_order(&base_order(), &p, wallet(), NOW),
+            Decision::Deny {
+                reason: deny_reasons::OFF_SWAP_LIST.into()
+            }
+        );
+    }
+
+    #[test]
     fn well_formed_order_needs_approval_with_zero_placeholder() {
         // A valid order never auto-allows: it is ALWAYS NeedsApproval, and the pure fn
         // returns the ZERO placeholder id (the stateful caller mints the real one).
@@ -423,16 +1106,19 @@ mod message_signing_tests {
         Address::repeat_byte(0x11)
     }
 
+    /// A base v1 policy. `evaluate_message` only reads `revoked`, so the rules are immaterial
+    /// here; a single `Shield` rule keeps the fixture minimal and valid.
     fn base_policy() -> Policy {
         Policy {
-            per_tx_cap_wei: U256::from(50u64),
-            daily_cap_wei: U256::from(1000u64),
-            spent_today_wei: U256::ZERO,
-            allow_to: vec![],
-            auto_shield_min_wei: U256::from(10u64),
-            require_approval: ApprovalMode::Never,
+            version: POLICY_VERSION,
+            default_effect: Effect::Deny,
             revoked: false,
-            allow_swap_tokens: vec![],
+            daily_cap_wei: U256::from(1000u64),
+            auto_shield_min_wei: U256::from(10u64),
+            spent_today_wei: U256::ZERO,
+            rules: vec![Rule::Shield {
+                approval: ApprovalMode::Never,
+            }],
         }
     }
 
@@ -516,5 +1202,346 @@ mod message_signing_tests {
                 reason: deny_reasons::DELEGATION_REFUSED.into()
             }
         );
+    }
+}
+
+#[cfg(test)]
+mod policy_v2_tests {
+    //! Tests specific to the v2 rule-list shape: default-deny on a missing rule, the
+    //! `validate` gate (version + duplicate action), and the per-action accessors.
+    use super::*;
+    use crate::intent::IntentKind;
+    use alloy_primitives::Bytes;
+
+    fn send_intent(to: Address, value: u64) -> Intent {
+        Intent {
+            chain_id: 1,
+            to,
+            token: None,
+            value: U256::from(value),
+            calldata: Bytes::new(),
+            kind: IntentKind::Send,
+        }
+    }
+
+    fn policy_with(rules: Vec<Rule>) -> Policy {
+        Policy {
+            version: POLICY_VERSION,
+            default_effect: Effect::Deny,
+            revoked: false,
+            daily_cap_wei: U256::from(1000u64),
+            auto_shield_min_wei: U256::from(10u64),
+            spent_today_wei: U256::ZERO,
+            rules,
+        }
+    }
+
+    #[test]
+    fn no_matching_rule_denies_no_rule() {
+        // A policy with only a Shield rule denies a Send with the NEW default-deny tag.
+        let p = policy_with(vec![Rule::Shield {
+            approval: ApprovalMode::Never,
+        }]);
+        assert_eq!(
+            evaluate(&send_intent(Address::repeat_byte(0x22), 10), &p),
+            Decision::Deny {
+                reason: deny_reasons::NO_RULE.into()
+            }
+        );
+    }
+
+    #[test]
+    fn empty_rules_denies_everything() {
+        let p = policy_with(vec![]);
+        assert_eq!(
+            evaluate(&send_intent(Address::repeat_byte(0x22), 10), &p),
+            Decision::Deny {
+                reason: deny_reasons::NO_RULE.into()
+            }
+        );
+    }
+
+    #[test]
+    fn validate_rejects_wrong_version() {
+        let p = Policy {
+            version: 2,
+            ..policy_with(vec![])
+        };
+        assert_eq!(p.validate(), Err(PolicyError::UnsupportedVersion(2)));
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_action() {
+        let p = policy_with(vec![
+            Rule::Send {
+                approval: ApprovalMode::Never,
+                per_tx_cap_wei: None,
+                recipients: Allowlist::Any,
+            },
+            Rule::Send {
+                approval: ApprovalMode::Always,
+                per_tx_cap_wei: None,
+                recipients: Allowlist::DenyAll,
+            },
+        ]);
+        assert_eq!(p.validate(), Err(PolicyError::DuplicateAction("send")));
+    }
+
+    #[test]
+    fn validate_accepts_a_clean_v1_policy() {
+        let p = policy_with(vec![
+            Rule::Send {
+                approval: ApprovalMode::OverCap,
+                per_tx_cap_wei: Some(U256::from(50u64)),
+                recipients: Allowlist::Any,
+            },
+            Rule::Shield {
+                approval: ApprovalMode::Never,
+            },
+            Rule::Swap {
+                tokens: Allowlist::Any,
+            },
+        ]);
+        assert_eq!(p.validate(), Ok(()));
+    }
+
+    #[test]
+    fn deny_all_recipients_denies_send() {
+        // An explicit `DenyAll` recipient set denies every recipient (the lattice ⊥).
+        let p = policy_with(vec![Rule::Send {
+            approval: ApprovalMode::OverCap,
+            per_tx_cap_wei: None,
+            recipients: Allowlist::DenyAll,
+        }]);
+        assert_eq!(
+            evaluate(&send_intent(Address::repeat_byte(0x22), 10), &p),
+            Decision::Deny {
+                reason: deny_reasons::OFF_ALLOWLIST.into()
+            }
+        );
+    }
+
+    #[test]
+    fn accessors_read_the_matching_rule() {
+        let p = policy_with(vec![
+            Rule::Send {
+                approval: ApprovalMode::OverCap,
+                per_tx_cap_wei: Some(U256::from(50u64)),
+                recipients: Allowlist::Only(vec![Address::repeat_byte(0xAA)]),
+            },
+            Rule::Shield {
+                approval: ApprovalMode::Never,
+            },
+            Rule::Swap {
+                tokens: Allowlist::Only(vec![Address::repeat_byte(0xCC)]),
+            },
+        ]);
+        // per_tx_cap_for: Some for Send, None for Shield (no cap) and a no-rule action.
+        assert_eq!(p.per_tx_cap_for(IntentKind::Send), Some(U256::from(50u64)));
+        assert_eq!(p.per_tx_cap_for(IntentKind::Shield), None);
+        assert_eq!(p.per_tx_cap_for(IntentKind::Unshield), None);
+        // approval_for: Some for the intent kinds, None for a no-rule action.
+        assert_eq!(
+            p.approval_for(IntentKind::Send),
+            Some(ApprovalMode::OverCap)
+        );
+        assert_eq!(
+            p.approval_for(IntentKind::Shield),
+            Some(ApprovalMode::Never)
+        );
+        assert_eq!(p.approval_for(IntentKind::ContractCall), None);
+        // recipients_for: Send's set, Any for Shield, DenyAll floor for a no-rule action.
+        assert_eq!(
+            p.recipients_for(IntentKind::Send),
+            &Allowlist::Only(vec![Address::repeat_byte(0xAA)])
+        );
+        assert_eq!(p.recipients_for(IntentKind::Shield), &Allowlist::Any);
+        assert_eq!(
+            p.recipients_for(IntentKind::ContractCall),
+            &Allowlist::DenyAll
+        );
+        // swap_tokens: the Swap rule's set.
+        assert_eq!(
+            p.swap_tokens(),
+            &Allowlist::Only(vec![Address::repeat_byte(0xCC)])
+        );
+    }
+
+    #[test]
+    fn swap_tokens_floor_is_deny_all_with_no_swap_rule() {
+        let p = policy_with(vec![Rule::Shield {
+            approval: ApprovalMode::Never,
+        }]);
+        assert_eq!(p.swap_tokens(), &Allowlist::DenyAll);
+    }
+}
+
+#[cfg(test)]
+mod rule_serde_tests {
+    //! Locks in the by-hand `Rule` serde: the exact internally-tagged JSON shape, strict
+    //! field handling (unknown key / wrong-action key / missing required field), the
+    //! omitted-allowlist default, and a CBOR round-trip (the reason the serde is hand-rolled
+    //! at all — `#[serde(tag)]` + `ciborium` + `alloy` breaks, see the `Rule` type doc).
+    use super::*;
+
+    #[test]
+    fn send_rule_json_shape_is_internally_tagged() {
+        let rule = Rule::Send {
+            approval: ApprovalMode::OverCap,
+            per_tx_cap_wei: Some(U256::from(5u64)),
+            recipients: Allowlist::Any,
+        };
+        let json: serde_json::Value = serde_json::to_value(&rule).unwrap();
+        assert_eq!(json["action"], "send");
+        assert_eq!(json["approval"], "over_cap");
+        assert_eq!(json["recipients"], "any");
+        // per_tx_cap_wei is present (Some) and encoded as a 0x-hex string.
+        assert_eq!(json["per_tx_cap_wei"], "0x5");
+    }
+
+    #[test]
+    fn none_per_tx_cap_is_omitted() {
+        let rule = Rule::Send {
+            approval: ApprovalMode::Always,
+            per_tx_cap_wei: None,
+            recipients: Allowlist::Any,
+        };
+        let json: serde_json::Value = serde_json::to_value(&rule).unwrap();
+        assert!(
+            json.get("per_tx_cap_wei").is_none(),
+            "a None per_tx_cap_wei must be omitted, got {json}"
+        );
+    }
+
+    #[test]
+    fn omitted_recipients_decodes_to_deny_all() {
+        // The default-deny floor: an omitted allowlist field is `DenyAll`, never "any".
+        let rule: Rule =
+            serde_json::from_str(r#"{"action":"send","approval":"over_cap"}"#).unwrap();
+        assert_eq!(
+            rule,
+            Rule::Send {
+                approval: ApprovalMode::OverCap,
+                per_tx_cap_wei: None,
+                recipients: Allowlist::DenyAll,
+            }
+        );
+    }
+
+    #[test]
+    fn recipients_any_and_array_decode() {
+        let any: Rule =
+            serde_json::from_str(r#"{"action":"send","approval":"over_cap","recipients":"any"}"#)
+                .unwrap();
+        assert!(matches!(
+            any,
+            Rule::Send {
+                recipients: Allowlist::Any,
+                ..
+            }
+        ));
+        let only: Rule = serde_json::from_str(
+            r#"{"action":"send","approval":"over_cap","recipients":["0xAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAa"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            only,
+            Rule::Send {
+                approval: ApprovalMode::OverCap,
+                per_tx_cap_wei: None,
+                recipients: Allowlist::Only(vec![Address::repeat_byte(0xAA)]),
+            }
+        );
+    }
+
+    #[test]
+    fn unknown_field_in_rule_is_rejected() {
+        let bad: Result<Rule, _> =
+            serde_json::from_str(r#"{"action":"send","approval":"over_cap","bogus":1}"#);
+        assert!(
+            bad.is_err(),
+            "an unknown field inside a rule must be rejected"
+        );
+    }
+
+    #[test]
+    fn wrong_action_field_is_rejected() {
+        // `tokens` belongs to `swap`, not `send` — a no-op field that would lie to the author.
+        let bad: Result<Rule, _> =
+            serde_json::from_str(r#"{"action":"send","approval":"over_cap","tokens":"any"}"#);
+        assert!(
+            bad.is_err(),
+            "a field belonging to a different action must be rejected"
+        );
+    }
+
+    #[test]
+    fn missing_required_field_and_unknown_action_error() {
+        let missing: Result<Rule, _> = serde_json::from_str(r#"{"action":"send"}"#);
+        assert!(missing.is_err(), "a missing required field must error");
+        let unknown: Result<Rule, _> =
+            serde_json::from_str(r#"{"action":"teleport","approval":"never"}"#);
+        assert!(unknown.is_err(), "an unknown action must error");
+    }
+
+    #[test]
+    fn non_any_allowlist_string_is_rejected() {
+        let bad: Result<Rule, _> =
+            serde_json::from_str(r#"{"action":"send","approval":"over_cap","recipients":"all"}"#);
+        assert!(bad.is_err(), "a non-\"any\" allowlist string must error");
+    }
+
+    #[test]
+    fn rule_cbor_roundtrips() {
+        // The reason the serde is hand-rolled: an internally-tagged derive breaks CBOR with
+        // alloy types. Each variant must survive a ciborium round-trip.
+        for rule in [
+            Rule::Send {
+                approval: ApprovalMode::OverCap,
+                per_tx_cap_wei: Some(U256::from(2u64)),
+                recipients: Allowlist::Only(vec![Address::repeat_byte(0xAA)]),
+            },
+            Rule::Shield {
+                approval: ApprovalMode::Never,
+            },
+            Rule::Unshield {
+                approval: ApprovalMode::Always,
+                per_tx_cap_wei: None,
+            },
+            Rule::Swap {
+                tokens: Allowlist::Any,
+            },
+            Rule::ContractCall {
+                approval: ApprovalMode::OverCap,
+                targets: Allowlist::Only(vec![Address::repeat_byte(0xCC)]),
+            },
+        ] {
+            let mut cbor = Vec::new();
+            ciborium::into_writer(&rule, &mut cbor).expect("cbor encode");
+            let back: Rule = ciborium::from_reader(&cbor[..]).expect("cbor decode");
+            assert_eq!(back, rule, "rule did not survive a CBOR round-trip");
+        }
+    }
+}
+
+#[cfg(test)]
+mod demo_shape_check {
+    use super::*;
+    #[test]
+    fn demo_json_from_the_plan_decodes_and_validates() {
+        // The exact policy.demo.json shape PR1 specifies (plan §policy.demo.json).
+        let json = r#"{ "version":1, "default":"deny",
+            "daily_cap_wei":"500000000000000000", "auto_shield_min_wei":"10000000000000000",
+            "rules":[ {"action":"shield","approval":"over_cap"},
+                      {"action":"send","approval":"over_cap","per_tx_cap_wei":"100000000000000000","recipients":"any"},
+                      {"action":"swap","tokens":"any"} ] }"#;
+        let p: Policy = serde_json::from_str(json).expect("demo policy decodes");
+        assert!(p.validate().is_ok(), "demo policy validates");
+        assert_eq!(
+            p.approval_for(IntentKind::Send),
+            Some(ApprovalMode::OverCap)
+        );
+        assert_eq!(p.recipients_for(IntentKind::Send), &Allowlist::Any);
+        assert_eq!(p.swap_tokens(), &Allowlist::Any);
     }
 }

@@ -21,9 +21,9 @@ use zeroize::Zeroizing;
 
 use deckard_contract::{
     deny_reasons, evaluate, evaluate_message, evaluate_order, ActivityLifecycle, ActivityRecord,
-    ApprovalRisk, ApprovalStatus, BalanceReport, BreachedLimit, Decision, ExecuteResult, Intent,
-    IntentKind, PendingPayloadView, PendingRecord, Policy, ProposalOrigin, ReadStatus, RequestId,
-    SignMessage, SignMessageKind, SignMessageResult, SignOrderResult, SignerRequest,
+    Allowlist, ApprovalRisk, ApprovalStatus, BalanceReport, BreachedLimit, Decision, ExecuteResult,
+    Intent, IntentKind, PendingPayloadView, PendingRecord, Policy, ProposalOrigin, ReadStatus,
+    RequestId, SignMessage, SignMessageKind, SignMessageResult, SignOrderResult, SignerRequest,
     SignerResponse, StatusView, SwapOrder, UnlockOutcome,
 };
 // Only the `shield`-gated view-grant handler constructs this; an unconditional import would
@@ -681,8 +681,8 @@ impl Daemon {
         // Cite the breached fence for the feed (display-only; recomputed off the verdict path).
         // `None` for a within-cap auto-allow or a guardrail-downgraded hold. The shaped-approve
         // card (`always_needs_card`) cites NO cap: its `intent.to` is the ERC-20 token, which the
-        // value-transfer `allow_to` does not gate, so running `breach_for` on it would mis-cite
-        // OffAllowlist — match the swap order record, which also stores `None`.
+        // value-transfer `Send` recipient allowlist does not gate, so running `breach_for` on it
+        // would mis-cite OffAllowlist — match the swap order record, which also stores `None`.
         let breached = if always_needs_card {
             BreachedLimit::None
         } else {
@@ -1787,11 +1787,18 @@ fn now_ms() -> u64 {
 /// verdict. Returns [`BreachedLimit::None`] for a within-cap intent (an auto-allow, or a
 /// guardrail-downgraded hold) and for the value-0 shaped-approve card.
 fn breach_for(intent: &Intent, policy: &Policy) -> BreachedLimit {
-    if !policy.allow_to.is_empty() && !policy.allow_to.contains(&intent.to) {
-        return BreachedLimit::OffAllowlist;
+    // The allowlist lattice (matching `evaluate`): `DenyAll` or an off-`Only` recipient is the
+    // allowlist breach. `Any` (and the `Shield`/`Unshield` no-recipient `Any`) never trips it.
+    match policy.recipients_for(intent.kind.clone()) {
+        Allowlist::DenyAll => return BreachedLimit::OffAllowlist,
+        Allowlist::Only(v) if !v.contains(&intent.to) => return BreachedLimit::OffAllowlist,
+        _ => {}
     }
     let projected = policy.spent_today_wei.saturating_add(intent.value);
-    if projected > policy.per_tx_cap_wei {
+    if policy
+        .per_tx_cap_for(intent.kind.clone())
+        .is_some_and(|cap| projected > cap)
+    {
         BreachedLimit::PerTxCap
     } else if projected > policy.daily_cap_wei {
         BreachedLimit::DailyCap

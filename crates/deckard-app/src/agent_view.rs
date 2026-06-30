@@ -40,11 +40,13 @@ impl Shell {
         let amber = theme::amber(is_dark);
 
         // Derive the per-tx cap (ETH) for the plain-language autonomy line — never
-        // invented; the same number the fence shows. `None` until the first fetch.
+        // invented; the same number the fence shows. `None` until the first fetch, or
+        // when the live policy carries no Send per-tx cap.
         let per_tx_eth = self
             .agent_policy
             .as_ref()
-            .map(|p| deckard_core::format_amount(p.per_tx_cap_wei, 18, 6));
+            .and_then(|p| p.per_tx_cap_for(deckard_contract::IntentKind::Send))
+            .map(|cap| deckard_core::format_amount(cap, 18, 6));
 
         // The STOP brake reuses the feed's deliberate two-step arming so the
         // irreversible key-zeroize is never a single click: a first click arms it

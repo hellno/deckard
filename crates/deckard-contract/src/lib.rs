@@ -46,7 +46,10 @@ pub use message_signing::{
     MessageSigningRisk, PermitReview, SignMessage, SignMessageKind, TypedDataReview,
 };
 pub use mock::MockSigner;
-pub use policy::{evaluate, evaluate_message, evaluate_order, ApprovalMode, Policy};
+pub use policy::{
+    evaluate, evaluate_message, evaluate_order, Allowlist, ApprovalMode, Effect, Policy,
+    PolicyError, Rule, POLICY_VERSION,
+};
 pub use read_status::ReadStatus;
 pub use rpc::{
     ActivityLifecycle, ActivityRecord, ApprovalRisk, ApprovalStatus, BalanceReport, BreachedLimit,
@@ -104,15 +107,34 @@ mod roundtrip_tests {
 
     fn sample_policy() -> Policy {
         Policy {
-            per_tx_cap_wei: U256::from(50_000_000_000_000_000_u64),
-            daily_cap_wei: U256::from(1_000_000_000_000_000_000_u64),
-            spent_today_wei: U256::from(7_u64),
-            allow_to: vec![Address::repeat_byte(0xAA), Address::repeat_byte(0xBB)],
-            auto_shield_min_wei: U256::from(10_000_000_000_000_000_u64),
-            require_approval: ApprovalMode::OverCap,
+            version: POLICY_VERSION,
+            default_effect: Effect::Deny,
+            // `revoked` and `spent_today_wei` are `#[serde(default)]` runtime state: they DO
+            // round-trip on the wire (the `PolicyGet` RPC needs them), so any value survives —
+            // kept at their defaults here only to keep the fixture's intent (a fresh policy).
             revoked: false,
-            // Non-empty so the new field's serde coverage isn't all defaults.
-            allow_swap_tokens: vec![Address::repeat_byte(0xCC)],
+            daily_cap_wei: U256::from(1_000_000_000_000_000_000_u64),
+            auto_shield_min_wei: U256::from(10_000_000_000_000_000_u64),
+            spent_today_wei: U256::ZERO,
+            // Non-trivial allowlists (`Only(non-empty)` / `Any`) so the custom `Allowlist`
+            // serde gets real coverage. (`DenyAll` round-trips too — the serializer omits the
+            // field for it — exercised separately in `deny_all_allowlist_roundtrips`.)
+            rules: vec![
+                Rule::Send {
+                    approval: ApprovalMode::OverCap,
+                    per_tx_cap_wei: Some(U256::from(50_000_000_000_000_000_u64)),
+                    recipients: Allowlist::Only(vec![
+                        Address::repeat_byte(0xAA),
+                        Address::repeat_byte(0xBB),
+                    ]),
+                },
+                Rule::Shield {
+                    approval: ApprovalMode::Never,
+                },
+                Rule::Swap {
+                    tokens: Allowlist::Only(vec![Address::repeat_byte(0xCC)]),
+                },
+            ],
         }
     }
 
@@ -192,14 +214,138 @@ mod roundtrip_tests {
             roundtrip(&mode);
         }
         roundtrip(&sample_policy());
-        // empty allowlist + revoked variant + empty swap allowlist (the #[serde(default)]
-        // path: an existing policy.json with no allow_swap_tokens decodes to vec![]).
+        // A second fixture exercising the `Any` (⊤) allowlist on both the `Send` recipients
+        // and the `Swap` tokens — `Any` round-trips byte-stably (it serializes to "any").
+        // (A bare `DenyAll` must NOT appear in a round-trip fixture: it serializes to `[]` and
+        // decodes back as `Only(vec![])`, so `assert_eq` would fail. The omitted-field →
+        // `DenyAll` path is covered by `recipients_omitted_field_decodes_to_deny_all` below.)
         roundtrip(&Policy {
-            allow_to: vec![],
-            revoked: true,
-            allow_swap_tokens: vec![],
+            rules: vec![
+                Rule::Send {
+                    approval: ApprovalMode::Always,
+                    per_tx_cap_wei: None,
+                    recipients: Allowlist::Any,
+                },
+                Rule::Shield {
+                    approval: ApprovalMode::OverCap,
+                },
+                Rule::Swap {
+                    tokens: Allowlist::Any,
+                },
+            ],
             ..sample_policy()
         });
+    }
+
+    #[test]
+    fn recipients_omitted_field_decodes_to_deny_all() {
+        // The `#[serde(default)]` path: a `send` rule that OMITS `recipients` decodes to the
+        // default-deny floor (`DenyAll`) — NOT "any". This is the trust-relevant default.
+        let omitted: Policy = serde_json::from_str(
+            r#"{"version":1,"default":"deny","daily_cap_wei":"0x1","auto_shield_min_wei":"0x0",
+                "rules":[{"action":"send","approval":"over_cap"}]}"#,
+        )
+        .expect("decode policy with omitted recipients");
+        assert_eq!(
+            omitted.recipients_for(IntentKind::Send),
+            &Allowlist::DenyAll,
+            "an omitted recipients field must default to DenyAll, never any"
+        );
+
+        // `"recipients":"any"` decodes to the `Any` (⊤) lattice value.
+        let any: Policy = serde_json::from_str(
+            r#"{"version":1,"default":"deny","daily_cap_wei":"0x1","auto_shield_min_wei":"0x0",
+                "rules":[{"action":"send","approval":"over_cap","recipients":"any"}]}"#,
+        )
+        .expect("decode policy with recipients: any");
+        assert_eq!(any.recipients_for(IntentKind::Send), &Allowlist::Any);
+
+        // An explicit address array decodes to `Only(..)`.
+        let only: Policy = serde_json::from_str(
+            r#"{"version":1,"default":"deny","daily_cap_wei":"0x1","auto_shield_min_wei":"0x0",
+                "rules":[{"action":"send","approval":"over_cap",
+                          "recipients":["0xAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAa"]}]}"#,
+        )
+        .expect("decode policy with recipients array");
+        assert_eq!(
+            only.recipients_for(IntentKind::Send),
+            &Allowlist::Only(vec![Address::repeat_byte(0xAA)])
+        );
+
+        // A non-"any" recipients string is a hard error (not silently treated as a tag).
+        let bad: Result<Policy, _> = serde_json::from_str(
+            r#"{"version":1,"default":"deny","daily_cap_wei":"0x1","auto_shield_min_wei":"0x0",
+                "rules":[{"action":"send","approval":"over_cap","recipients":"all"}]}"#,
+        );
+        assert!(
+            bad.is_err(),
+            "a non-\"any\" allowlist string must be rejected"
+        );
+    }
+
+    #[test]
+    fn deny_all_allowlist_roundtrips() {
+        // The serializer SKIPS the allowlist field for `DenyAll` (omitted ⇒ `DenyAll`), so a
+        // rule carrying the deny-everyone floor round-trips byte-stably in BOTH JSON and CBOR —
+        // closing the old "DenyAll re-encodes to `[]` → `Only(vec![])`" gap.
+        let policy = Policy {
+            version: POLICY_VERSION,
+            default_effect: Effect::Deny,
+            revoked: false,
+            daily_cap_wei: U256::from(1_000u64),
+            auto_shield_min_wei: U256::ZERO,
+            spent_today_wei: U256::ZERO,
+            rules: vec![
+                Rule::Send {
+                    approval: ApprovalMode::Always,
+                    per_tx_cap_wei: None,
+                    recipients: Allowlist::DenyAll,
+                },
+                Rule::Swap {
+                    tokens: Allowlist::DenyAll,
+                },
+                Rule::ContractCall {
+                    approval: ApprovalMode::Always,
+                    targets: Allowlist::DenyAll,
+                },
+            ],
+        };
+        roundtrip(&policy);
+        // And the omitted field is genuinely gone from the JSON (not emitted as `[]`).
+        let json = serde_json::to_string(&policy).unwrap();
+        assert!(
+            !json.contains("recipients") && !json.contains("tokens") && !json.contains("targets"),
+            "DenyAll must omit the allowlist field, got: {json}"
+        );
+    }
+
+    #[test]
+    fn runtime_fields_cross_the_policy_get_wire() {
+        // `revoked`/`spent_today_wei` are `#[serde(default)]`, NOT `#[serde(skip)]`: the daemon
+        // returns the WHOLE `Policy` over the `PolicyGet` RPC, so the app's spend gauge and the
+        // agent's spent view must read the daemon's LIVE values, not a silent zero/false. A
+        // non-default round-trip proves they stay on the wire (a `skip` would reset them on
+        // decode and fail this `assert_eq`). The loader's force-reset (a file can't inject a
+        // spend) is a separate path, covered in `policy_store`.
+        let live = Policy {
+            version: POLICY_VERSION,
+            default_effect: Effect::Deny,
+            revoked: true,
+            daily_cap_wei: U256::from(500u64),
+            auto_shield_min_wei: U256::ZERO,
+            spent_today_wei: U256::from(321u64),
+            rules: vec![Rule::Shield {
+                approval: ApprovalMode::Never,
+            }],
+        };
+        roundtrip(&live);
+        let back: Policy = serde_json::from_slice(&serde_json::to_vec(&live).unwrap()).unwrap();
+        assert_eq!(
+            back.spent_today_wei,
+            U256::from(321u64),
+            "spend lost on the wire"
+        );
+        assert!(back.revoked, "revoked lost on the wire");
     }
 
     #[test]

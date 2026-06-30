@@ -119,12 +119,19 @@ demo:
     #    so run 2 can never render run 1's stale balance. We never fabricate this dir.
     rm -rf "${DEMO_DIR}/railgun" "${DEMO_DIR}/railgun-cache" 2>/dev/null || true
 
-    # 4. Install the demo policy IF ABSENT (re-runs never clobber your edits at the
-    #    installed path). The committed root policy.demo.json is the template.
+    # 4. Install the demo policy IF ABSENT; UPGRADE a legacy v0 file (ADR 0005 §5). A v1 or
+    #    user-edited file is left as-is (re-runs never clobber your edits). The committed root
+    #    policy.demo.json is the template; every valid v1 file carries a "version" key, so its
+    #    absence is a reliable v0 marker — and a v0 file now triggers the daemon's deny-all
+    #    fallback, silently stopping auto-shield, so we upgrade it instead of leaving it broken.
     mkdir -p "${DEMO_DIR}"
     if [[ ! -f "${DEMO_DIR}/policy.json" ]]; then
         cp "{{justfile_directory()}}/policy.demo.json" "${DEMO_DIR}/policy.json"
         echo "→ installed demo policy at ${DEMO_DIR}/policy.json"
+    elif ! grep -q '"version"' "${DEMO_DIR}/policy.json"; then
+        cp "${DEMO_DIR}/policy.json" "${DEMO_DIR}/policy.json.v0.bak"
+        cp "{{justfile_directory()}}/policy.demo.json" "${DEMO_DIR}/policy.json"
+        echo "→ upgraded a legacy v0 demo policy to v1 at ${DEMO_DIR}/policy.json (old one saved as policy.json.v0.bak)"
     else
         echo "→ demo policy already present at ${DEMO_DIR}/policy.json (left as-is)"
     fi
@@ -455,8 +462,10 @@ demo-check:
     )" ; PROBE_RC=$?
     if [[ ${PROBE_RC} -eq 0 ]] && echo "${ADDR_PROBE}" | jq -e '.address' >/dev/null 2>&1; then
         ok "demo daemon reachable, unlocked, on the right chain ($(echo "${ADDR_PROBE}" | jq -r '.address'))"
-        # 6. Policy drift: diff the LIVE policy (PolicyGet) vs the intended demo values. The MCP
-        #    CLI renders ApprovalMode::OverCap as the snake_case string "over_cap" (sidecar.rs).
+        # 6. Policy drift: diff the LIVE policy (PolicyGet) vs the intended demo values. The
+        #    per_tx_cap_wei + require_approval below come from the demo's SEND rule; daily_cap_wei
+        #    is the global daily wall. PolicyGet surfaces these top-level for convenience and renders
+        #    the send rule's approval as the snake_case string "over_cap" (sidecar.rs).
         POLICY_JSON="$(
             DECKARD_CONFIG_DIR="${DEMO_DIR}" \
             DECKARD_SOCKET_PATH="{{demo_socket}}" \
@@ -470,9 +479,9 @@ demo-check:
         echo
         echo "─── current demo state ───────────────────────────────────"
         echo "  chain:           11155111 (Sepolia fork) — mainnet guardrail INACTIVE"
-        echo "  per_tx_cap_wei:  ${GOT_PER_TX}"
-        echo "  daily_cap_wei:   ${GOT_DAILY}"
-        echo "  require_approval:${GOT_MODE}  (within-cap auto-allows; over-cap -> NeedsApproval)"
+        echo "  per_tx_cap_wei:  ${GOT_PER_TX}  (send rule's per-tx cap — 0.1 ETH)"
+        echo "  daily_cap_wei:   ${GOT_DAILY}  (global daily wall — 0.5 ETH)"
+        echo "  require_approval:${GOT_MODE}  (send rule: within-cap auto-allows; a send over 0.1 ETH -> NeedsApproval)"
         echo "  auto-allow:      ON for within-cap writes (Sepolia; no mainnet guardrail)"
         echo "──────────────────────────────────────────────────────────"
         if [[ "${GOT_PER_TX}" != "100000000000000000" || "${GOT_DAILY}" != "500000000000000000" || "${GOT_MODE}" != "over_cap" ]]; then

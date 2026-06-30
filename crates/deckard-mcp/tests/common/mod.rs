@@ -21,9 +21,10 @@ use tokio::net::UnixListener;
 use tokio::process::{Child, ChildStdin, Command};
 
 use deckard_contract::{
-    evaluate, ActivityLifecycle, ApprovalMode, ApprovalStatus, Decision, ExecuteResult, Intent,
-    Policy, RailgunViewGrant, ReadStatus, RequestId, SignMessageResult, SignOrderResult,
-    SignerRequest, SignerResponse, StatusView, UnlockOutcome,
+    evaluate, ActivityLifecycle, Allowlist, ApprovalMode, ApprovalStatus, Decision, Effect,
+    ExecuteResult, Intent, Policy, RailgunViewGrant, ReadStatus, RequestId, Rule,
+    SignMessageResult, SignOrderResult, SignerRequest, SignerResponse, StatusView, UnlockOutcome,
+    POLICY_VERSION,
 };
 use deckard_signerd::{frame, request_id_for};
 
@@ -97,15 +98,35 @@ struct MockReq {
 }
 
 pub fn demo_policy() -> Policy {
+    // Policy v2 (ADR 0005): a versioned default-deny rule list. The acceptance suite derives
+    // `per_tx_cap_eth == "0.05"` / `require_approval == "over_cap"` from the Send rule, so its
+    // cap is `PER_TX_CAP_WEI` (0.05 ETH) and its mode is `OverCap`.
+    //
+    // The acceptance scenarios drive `deckard_shield`, and a v2 `Shield` rule carries NO per-tx
+    // cap (only `Send`/`Unshield` do) — so the global daily cap is the one fence a shield is
+    // gated against. It is `PER_TX_CAP_WEI` (0.05 ETH) so the suite's invariants hold under the
+    // OverCap mode exactly as they did under v1's flat per-tx cap: a 0.02/0.01 ETH shield is
+    // within the fence (Allow), a 0.2 ETH shield is over it (NeedsApproval).
     Policy {
-        per_tx_cap_wei: U256::from(PER_TX_CAP_WEI),
-        daily_cap_wei: U256::from(200_000_000_000_000_000u128),
-        spent_today_wei: U256::ZERO,
-        allow_to: vec![],
-        auto_shield_min_wei: U256::from(10_000_000_000_000_000u128),
-        require_approval: ApprovalMode::OverCap,
+        version: POLICY_VERSION,
+        default_effect: Effect::Deny,
         revoked: false,
-        allow_swap_tokens: vec![], // empty = any token; swap tools land in the MCP child (#26)
+        daily_cap_wei: U256::from(PER_TX_CAP_WEI), // 0.05 ETH — the shield fence (see above)
+        auto_shield_min_wei: U256::from(10_000_000_000_000_000u128), // 0.01 ETH
+        spent_today_wei: U256::ZERO,
+        rules: vec![
+            Rule::Send {
+                approval: ApprovalMode::OverCap,
+                per_tx_cap_wei: Some(U256::from(PER_TX_CAP_WEI)),
+                recipients: Allowlist::Any,
+            },
+            Rule::Shield {
+                approval: ApprovalMode::OverCap,
+            },
+            Rule::Swap {
+                tokens: Allowlist::Any, // any token; swap tools land in the MCP child (#26)
+            },
+        ],
     }
 }
 

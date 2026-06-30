@@ -7,8 +7,9 @@ mod common;
 
 use alloy_primitives::{Address, Bytes, U256};
 use deckard_contract::{
-    ActivityLifecycle, ApprovalMode, ApprovalStatus, BreachedLimit, Decision, ExecuteResult,
-    Intent, IntentKind, Policy, ProposalOrigin, SignerRequest, SignerResponse, SwapOrder,
+    ActivityLifecycle, Allowlist, ApprovalMode, ApprovalStatus, BreachedLimit, Decision, Effect,
+    ExecuteResult, Intent, IntentKind, Policy, ProposalOrigin, Rule, SignerRequest, SignerResponse,
+    SwapOrder, POLICY_VERSION,
 };
 use deckard_signerd::SignerClient;
 
@@ -144,20 +145,19 @@ async fn daily_cap_enforced_at_execute() {
     // Tight policy: per-tx 0.05, daily 0.05. 0.04 + 0.039 each pass at propose, but together
     // exceed the 0.05 daily cap.
     let policy = Policy {
-        per_tx_cap_wei: U256::from(50_000_000_000_000_000u128),
-        daily_cap_wei: U256::from(50_000_000_000_000_000u128),
-        spent_today_wei: U256::ZERO,
-        allow_to: vec![],
-        auto_shield_min_wei: U256::from(10_000_000_000_000_000u128),
-        require_approval: ApprovalMode::OverCap,
+        version: POLICY_VERSION,
+        default_effect: Effect::Deny,
         revoked: false,
-        allow_swap_tokens: vec![],
+        daily_cap_wei: U256::from(50_000_000_000_000_000u128),
+        auto_shield_min_wei: U256::from(10_000_000_000_000_000u128),
+        spent_today_wei: U256::ZERO,
+        rules: vec![Rule::Send {
+            approval: ApprovalMode::OverCap,
+            per_tx_cap_wei: Some(U256::from(50_000_000_000_000_000u128)),
+            recipients: Allowlist::Any,
+        }],
     };
-    std::fs::write(
-        dir.path().join("policy.json"),
-        serde_json::to_vec(&policy).unwrap(),
-    )
-    .unwrap();
+    write_policy(dir.path(), &policy);
 
     let d = spawn_daemon(dir.path(), &anvil.url(), CHAIN, &[]);
     let client = SignerClient::new(d.socket_path.clone());

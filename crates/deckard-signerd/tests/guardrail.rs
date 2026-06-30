@@ -13,8 +13,8 @@ mod common;
 
 use alloy_primitives::{Address, Bytes, U256};
 use deckard_contract::{
-    ApprovalMode, ApprovalStatus, Decision, ExecuteResult, Intent, IntentKind, Policy,
-    ProposalOrigin, SignerRequest, SignerResponse,
+    Allowlist, ApprovalMode, ApprovalStatus, Decision, Effect, ExecuteResult, Intent, IntentKind,
+    Policy, ProposalOrigin, Rule, SignerRequest, SignerResponse, POLICY_VERSION,
 };
 use deckard_signerd::SignerClient;
 
@@ -48,22 +48,24 @@ fn send(chain_id: u64, to: Address, value: u64) -> Intent {
     }
 }
 
-fn write_policy(dir: &std::path::Path, mode: ApprovalMode) {
+fn write_mode_policy(dir: &std::path::Path, mode: ApprovalMode) {
     let policy = Policy {
-        per_tx_cap_wei: U256::from(PER_TX_CAP),
-        daily_cap_wei: U256::from(200_000_000_000_000_000u64),
-        spent_today_wei: U256::ZERO,
-        allow_to: vec![],
-        auto_shield_min_wei: U256::from(10_000_000_000_000_000u64),
-        require_approval: mode,
+        version: POLICY_VERSION,
+        default_effect: Effect::Deny,
         revoked: false,
-        allow_swap_tokens: vec![],
+        daily_cap_wei: U256::from(200_000_000_000_000_000u64),
+        auto_shield_min_wei: U256::from(10_000_000_000_000_000u64),
+        spent_today_wei: U256::ZERO,
+        rules: vec![
+            Rule::Send {
+                approval: mode,
+                per_tx_cap_wei: Some(U256::from(PER_TX_CAP)),
+                recipients: Allowlist::Any,
+            },
+            Rule::Shield { approval: mode },
+        ],
     };
-    std::fs::write(
-        dir.join("policy.json"),
-        serde_json::to_vec(&policy).unwrap(),
-    )
-    .unwrap();
+    write_policy(dir, &policy);
 }
 
 /// One matrix cell: spawn a daemon on `chain` with `mode` (+ optional override), unlock,
@@ -71,7 +73,7 @@ fn write_policy(dir: &std::path::Path, mode: ApprovalMode) {
 async fn classify(mode: ApprovalMode, chain: u64, override_on: bool) -> (Decision, Decision) {
     let dir = TempDir::new("guardrail");
     let (_wallet, to) = seal_account0(dir.path());
-    write_policy(dir.path(), mode);
+    write_mode_policy(dir.path(), mode);
     // ALWAYS pin the override var (to "1" or a non-"1" value) so a developer shell that
     // happens to export it can't flip the matrix.
     let var = override_var();
@@ -201,7 +203,7 @@ async fn guardrail_blocks_execute_on_real_chain() {
     // just the classification label.
     let dir = TempDir::new("guardrail-base-exec");
     let (_wallet, to) = seal_account0(dir.path());
-    write_policy(dir.path(), ApprovalMode::OverCap);
+    write_mode_policy(dir.path(), ApprovalMode::OverCap);
     let var = override_var();
     let d = spawn_daemon(dir.path(), DUMMY_RPC, BASE, &[(var.as_str(), "0")]);
     let client = SignerClient::new(d.socket_path.clone());
@@ -230,7 +232,7 @@ async fn guardrail_needs_approval_resolves_then_executes() {
     // with `broadcast_failed`, NOT an approval-gate deny).
     let dir = TempDir::new("guardrail-resolve");
     let (_wallet, to) = seal_account0(dir.path());
-    write_policy(dir.path(), ApprovalMode::OverCap);
+    write_mode_policy(dir.path(), ApprovalMode::OverCap);
     let var = override_var();
     let d = spawn_daemon(dir.path(), DUMMY_RPC, 1, &[(var.as_str(), "0")]);
     let client = SignerClient::new(d.socket_path.clone());
@@ -291,7 +293,7 @@ async fn broadcast_error_reasons_are_redacted() {
 
     let dir = TempDir::new("redact-canary");
     let (_wallet, to) = seal_account0(dir.path());
-    write_policy(dir.path(), ApprovalMode::OverCap);
+    write_mode_policy(dir.path(), ApprovalMode::OverCap);
     let d = spawn_daemon(dir.path(), &rpc, SEPOLIA, &[]);
     let client = SignerClient::new(d.socket_path.clone());
     client.unlock(PASS).await.unwrap();

@@ -10,8 +10,8 @@ mod common;
 
 use alloy_primitives::{Address, Bytes, U256};
 use deckard_contract::{
-    ApprovalMode, Decision, ExecuteResult, Intent, IntentKind, Policy, ProposalOrigin,
-    SignerRequest, SignerResponse,
+    Allowlist, ApprovalMode, Decision, Effect, ExecuteResult, Intent, IntentKind, Policy,
+    ProposalOrigin, Rule, POLICY_VERSION,
 };
 use deckard_signerd::SignerClient;
 
@@ -30,11 +30,39 @@ fn send(to: Address, value: u128) -> Intent {
     }
 }
 
-/// Read the daemon's live policy (carries the running `spent_today_wei`).
-async fn spent_today(client: &SignerClient) -> U256 {
-    match client.request(&SignerRequest::PolicyGet).await.unwrap() {
-        SignerResponse::Policy(p) => p.spent_today_wei,
-        other => panic!("expected Policy, got {other:?}"),
+/// A tight v1 policy: per-tx `cap`, daily `cap`, any recipient, approval over cap. With per-tx
+/// == daily, two within-per-tx sends that together exceed the daily cap let a test OBSERVE the
+/// recovered spend behaviorally (the post-restart send is held, not auto-allowed).
+fn tight_policy(cap: u128) -> Policy {
+    Policy {
+        version: POLICY_VERSION,
+        default_effect: Effect::Deny,
+        revoked: false,
+        daily_cap_wei: U256::from(cap),
+        auto_shield_min_wei: U256::from(10_000_000_000_000_000u128),
+        spent_today_wei: U256::ZERO,
+        rules: vec![Rule::Send {
+            approval: ApprovalMode::OverCap,
+            per_tx_cap_wei: Some(U256::from(cap)),
+            recipients: Allowlist::Any,
+        }],
+    }
+}
+
+/// Whether a within-per-tx send is HELD (the recovered spend ate the daily headroom) vs
+/// auto-ALLOWED (headroom available). We observe the recovered durable spend through this
+/// cap-enforcement decision — the actual security property (a recovered spend must gate
+/// signing) — which is stronger than reading the `spent_today_wei` number off the wire. (That
+/// number does cross `PolicyGet`; its wire fidelity is covered by a contract-crate round-trip.)
+async fn send_is_held(client: &SignerClient, recipient: Address, value: u128) -> bool {
+    match client
+        .propose(&send(recipient, value), ProposalOrigin::App)
+        .await
+        .unwrap()
+    {
+        Decision::Allow => false,
+        Decision::NeedsApproval { .. } => true,
+        other => panic!("expected Allow or NeedsApproval, got {other:?}"),
     }
 }
 
@@ -58,9 +86,14 @@ async fn honest_restart_recovers_the_daily_spend() {
 
     let dir = TempDir::new("durable-honest");
     let (_wallet, recipient) = seal_account0(dir.path());
+    // Tight policy (per-tx == daily == 0.05) so the recovered spend is OBSERVABLE: pre-restart a
+    // second 0.04 send is within both caps and auto-allows; once the first 0.04 is committed,
+    // 0.04 + 0.04 exceeds the 0.05 daily cap, so it must be HELD.
+    let cap: u128 = 50_000_000_000_000_000;
+    write_policy(dir.path(), &tight_policy(cap));
 
-    // Spend 0.01 ETH (within the default caps) → broadcast → committed to spend.json.
-    let value: u128 = 10_000_000_000_000_000;
+    // Spend 0.04 ETH (within both caps) → broadcast → committed to spend.json.
+    let value: u128 = 40_000_000_000_000_000;
     let d = spawn_daemon(dir.path(), &anvil.url(), CHAIN, &[]);
     let client = SignerClient::new(d.socket_path.clone());
     client.unlock(PASS).await.unwrap();
@@ -75,11 +108,6 @@ async fn honest_restart_recovers_the_daily_spend() {
         other => panic!("expected Broadcast, got {other:?}"),
     };
     wait_receipt(&anvil.url(), tx).await.expect("receipt");
-    assert_eq!(
-        spent_today(&client).await,
-        U256::from(value),
-        "spend recorded"
-    );
     assert!(
         dir.path().join("spend.json").exists(),
         "the durable counter file was written"
@@ -89,10 +117,11 @@ async fn honest_restart_recovers_the_daily_spend() {
     let d2 = restart(d, dir.path(), &anvil.url());
     let client2 = SignerClient::new(d2.socket_path.clone());
     client2.unlock(PASS).await.unwrap();
-    assert_eq!(
-        spent_today(&client2).await,
-        U256::from(value),
-        "the day's spend is recovered across restart (was 0 before #108)"
+    // The day's 0.04 spend is recovered across the restart (was 0 before #108): a second 0.04
+    // send no longer fits the 0.05 daily cap, so it is HELD for approval rather than auto-allowed.
+    assert!(
+        send_is_held(&client2, recipient, value).await,
+        "the recovered spend must hold a second 0.04 send (would Allow if the cap had reset)"
     );
 }
 
@@ -112,21 +141,7 @@ async fn restart_does_not_reset_the_cap() {
     let (_wallet, recipient) = seal_account0(dir.path());
     // Tight policy: per-tx 0.05, daily 0.05. 0.04 then 0.03 each fit per-tx, but together exceed
     // the 0.05 daily cap.
-    let policy = Policy {
-        per_tx_cap_wei: U256::from(50_000_000_000_000_000u128),
-        daily_cap_wei: U256::from(50_000_000_000_000_000u128),
-        spent_today_wei: U256::ZERO,
-        allow_to: vec![],
-        auto_shield_min_wei: U256::from(10_000_000_000_000_000u128),
-        require_approval: ApprovalMode::OverCap,
-        revoked: false,
-        allow_swap_tokens: vec![],
-    };
-    std::fs::write(
-        dir.path().join("policy.json"),
-        serde_json::to_vec(&policy).unwrap(),
-    )
-    .unwrap();
+    write_policy(dir.path(), &tight_policy(50_000_000_000_000_000u128));
 
     // Spend 0.04 ETH (within both caps) and broadcast it.
     let d = spawn_daemon(dir.path(), &anvil.url(), CHAIN, &[]);
@@ -151,20 +166,13 @@ async fn restart_does_not_reset_the_cap() {
     let d2 = restart(d, dir.path(), &anvil.url());
     let client2 = SignerClient::new(d2.socket_path.clone());
     client2.unlock(PASS).await.unwrap();
-    assert_eq!(
-        spent_today(&client2).await,
-        U256::from(40_000_000_000_000_000u128),
-        "the 0.04 spend persisted across the restart"
-    );
 
     // A 0.03 ETH send fits per-tx (0.05) and would auto-allow IF the cap had reset — but the
     // recovered 0.04 + 0.03 exceeds the 0.05 daily cap, so it is HELD for approval, not drained.
-    let second = send(recipient, 30_000_000_000_000_000);
+    // (The recovered spend is observed through this cap decision — the security property —
+    // not by reading the `spent_today_wei` wire number, whose fidelity is covered separately.)
     assert!(
-        matches!(
-            client2.propose(&second, ProposalOrigin::App).await.unwrap(),
-            Decision::NeedsApproval { .. }
-        ),
+        send_is_held(&client2, recipient, 30_000_000_000_000_000).await,
         "the durable cap blocks the post-restart drain (would be Allow if the cap had reset)"
     );
 }

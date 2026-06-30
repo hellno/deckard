@@ -484,24 +484,66 @@ fn deny_pending(reqs: &mut Requests) {
 mod tests {
     use super::*;
     use crate::intent::IntentKind;
-    use crate::policy::ApprovalMode;
+    use crate::policy::{Allowlist, ApprovalMode, Effect, Rule, POLICY_VERSION};
     use alloy_primitives::Bytes;
 
     // --- builders -------------------------------------------------------------------
 
-    /// A policy with an empty allowlist and `auto_shield_min_wei = 10`. The swap allowlist is
-    /// empty too (any token allowed) — swap tests that need a non-empty list set it directly.
+    /// A v1 policy whose `Send`/`Shield`/`Swap` rules all share the approval `mode`, with the
+    /// `Send` per-tx cap = `per_tx`, recipients = `Any`, and swap tokens = `Any`. Tests that
+    /// need a restricted recipient/token set rewrite the relevant rule via the helpers below.
     fn policy(per_tx: u64, daily: u64, spent: u64, mode: ApprovalMode) -> Policy {
         Policy {
-            per_tx_cap_wei: U256::from(per_tx),
-            daily_cap_wei: U256::from(daily),
-            spent_today_wei: U256::from(spent),
-            allow_to: vec![],
-            auto_shield_min_wei: U256::from(10u64),
-            require_approval: mode,
+            version: POLICY_VERSION,
+            default_effect: Effect::Deny,
             revoked: false,
-            allow_swap_tokens: vec![],
+            daily_cap_wei: U256::from(daily),
+            auto_shield_min_wei: U256::from(10u64),
+            spent_today_wei: U256::from(spent),
+            rules: vec![
+                Rule::Send {
+                    approval: mode,
+                    per_tx_cap_wei: Some(U256::from(per_tx)),
+                    recipients: Allowlist::Any,
+                },
+                Rule::Shield { approval: mode },
+                Rule::Swap {
+                    tokens: Allowlist::Any,
+                },
+                // A ContractCall rule so a proposed ContractCall reaches the calldata-shape
+                // check (the `undecodable_calldata_denies` test); without it, default-deny
+                // would short-circuit to NO_RULE before the calldata check. `targets: Any`
+                // keeps the old "any address" semantics.
+                Rule::ContractCall {
+                    approval: mode,
+                    targets: Allowlist::Any,
+                },
+            ],
         }
+    }
+
+    /// Replace the `Send` rule's `recipients` allowlist (the v2 equivalent of the old
+    /// `p.allow_to = vec![..]`). Leaves the other rules untouched.
+    fn with_send_recipients(mut p: Policy, recipients: Allowlist) -> Policy {
+        for rule in &mut p.rules {
+            if let Rule::Send { recipients: r, .. } = rule {
+                *r = recipients;
+                return p;
+            }
+        }
+        p
+    }
+
+    /// Replace the `Swap` rule's `tokens` allowlist (the v2 equivalent of the old
+    /// `p.allow_swap_tokens = vec![..]`). Leaves the other rules untouched.
+    fn with_swap_tokens(mut p: Policy, tokens: Allowlist) -> Policy {
+        for rule in &mut p.rules {
+            if let Rule::Swap { tokens: t } = rule {
+                *t = tokens;
+                return p;
+            }
+        }
+        p
     }
 
     fn send(value: u64) -> Intent {
@@ -564,8 +606,11 @@ mod tests {
 
     #[test]
     fn off_allowlist_denies() {
-        let mut p = policy(50, 1000, 0, ApprovalMode::OverCap);
-        p.allow_to = vec![Address::repeat_byte(0x33)]; // send() targets 0x22
+        // send() targets 0x22; restrict the Send rule's recipients to 0x33.
+        let p = with_send_recipients(
+            policy(50, 1000, 0, ApprovalMode::OverCap),
+            Allowlist::Only(vec![Address::repeat_byte(0x33)]),
+        );
         let s = MockSigner::new(p);
         assert_eq!(
             s.propose(&send(20)),
@@ -577,8 +622,11 @@ mod tests {
 
     #[test]
     fn on_allowlist_allows() {
-        let mut p = policy(50, 1000, 0, ApprovalMode::OverCap);
-        p.allow_to = vec![Address::repeat_byte(0x22)]; // matches send()'s target
+        // Recipients = {0x22}, matching send()'s target.
+        let p = with_send_recipients(
+            policy(50, 1000, 0, ApprovalMode::OverCap),
+            Allowlist::Only(vec![Address::repeat_byte(0x22)]),
+        );
         let s = MockSigner::new(p);
         assert_eq!(s.propose(&send(20)), Decision::Allow);
     }
@@ -963,9 +1011,11 @@ mod tests {
 
     #[test]
     fn propose_order_off_swap_list_denied() {
-        let mut p = policy(50, 1000, 0, ApprovalMode::OverCap);
         // Only the buy token is listed; the sell token is off-list.
-        p.allow_swap_tokens = vec![Address::repeat_byte(0xB2)];
+        let p = with_swap_tokens(
+            policy(50, 1000, 0, ApprovalMode::OverCap),
+            Allowlist::Only(vec![Address::repeat_byte(0xB2)]),
+        );
         let s = MockSigner::new(p);
         assert_eq!(
             s.propose_order(&order()),

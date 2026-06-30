@@ -10,8 +10,8 @@ use std::os::unix::fs::PermissionsExt;
 
 use alloy_primitives::{Address, Bytes, U256};
 use deckard_contract::{
-    ApprovalMode, ApprovalStatus, Decision, ExecuteResult, Intent, IntentKind, Policy,
-    ProposalOrigin, SignerRequest, SignerResponse, UnlockOutcome,
+    Allowlist, ApprovalMode, ApprovalStatus, Decision, Effect, ExecuteResult, Intent, IntentKind,
+    Policy, ProposalOrigin, Rule, SignerRequest, SignerResponse, UnlockOutcome, POLICY_VERSION,
 };
 use deckard_signerd::SignerClient;
 
@@ -202,22 +202,21 @@ async fn locked_wrong_chain_denies_chain_mismatch_not_locked() {
 async fn off_allowlist_denies() {
     let dir = TempDir::new("allowlist");
     let (_wallet, to) = seal_account0(dir.path());
-    // A policy whose allowlist excludes `to`.
+    // A policy whose Send recipient allowlist excludes `to` (an explicit `Only` set).
     let policy = Policy {
-        per_tx_cap_wei: U256::from(PER_TX_CAP),
-        daily_cap_wei: U256::from(200_000_000_000_000_000u64),
-        spent_today_wei: U256::ZERO,
-        allow_to: vec![Address::repeat_byte(0x99)],
-        auto_shield_min_wei: U256::from(10_000_000_000_000_000u64),
-        require_approval: ApprovalMode::OverCap,
+        version: POLICY_VERSION,
+        default_effect: Effect::Deny,
         revoked: false,
-        allow_swap_tokens: vec![],
+        daily_cap_wei: U256::from(200_000_000_000_000_000u64),
+        auto_shield_min_wei: U256::from(10_000_000_000_000_000u64),
+        spent_today_wei: U256::ZERO,
+        rules: vec![Rule::Send {
+            approval: ApprovalMode::OverCap,
+            per_tx_cap_wei: Some(U256::from(PER_TX_CAP)),
+            recipients: Allowlist::Only(vec![Address::repeat_byte(0x99)]),
+        }],
     };
-    std::fs::write(
-        dir.path().join("policy.json"),
-        serde_json::to_vec(&policy).unwrap(),
-    )
-    .unwrap();
+    write_policy(dir.path(), &policy);
 
     let d = spawn_daemon(dir.path(), DUMMY_RPC, CHAIN, &[]);
     let client = SignerClient::new(d.socket_path.clone());
