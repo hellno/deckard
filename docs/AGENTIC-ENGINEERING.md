@@ -253,6 +253,15 @@ that lets an agent honestly believe it's done.
 **Tradeoff.** Slightly longer CI; the macOS runner is 10× billed on *private* repos (we're public,
 so free) — hence formatting/deny run only on Linux.
 
+**Branch protection — the jobs above are now *required* (#123).** Adding a CI job only matters if it
+blocks merge. `main` now requires the full DoD set — `quick`, `linux`, and `macos`, plus the two
+`cargo-deny` jobs — with `enforce_admins` on, so a PR cannot merge with the build red, tests failing,
+or clippy warnings, and an admin cannot click-merge through a red required check. (Before this, only
+the two cargo-deny checks were required.) `scripts/branch-protection.sh` is the reproducible source of
+truth: run it to apply the exact protection, or `scripts/branch-protection.sh --verify` to audit for
+drift. `strict=false` (don't force a branch up to date before merge) is deliberate — it keeps the
+solo auto-merge flow fast; the script documents how to flip it on.
+
 ### 6. Unsafe policy — forbid the core, deny the app
 
 **What.**
