@@ -1,6 +1,6 @@
 # ADR 0005 — Policy and authorization model
 
-- **Status:** Proposed (2026-06-23)
+- **Status:** Accepted (2026-07-01)
 - **Deciders:** @hellno (maintainer)
 - **Context inputs:** [`crates/deckard-contract/src/policy.rs`](../../crates/deckard-contract/src/policy.rs)
   (the flat `Policy` + the pure `evaluate` / `evaluate_order` functions),
@@ -273,8 +273,9 @@ frozen — only `Policy` changes shape. Concretely:
 
 ## Status / next step
 
-**Proposed.** The executable work ships as **one** issue (the policy-model v2 foundation + agent-send
-over MCP + named variants + the cap-reservation verification), not a scatter of sub-issues. `#29`
-retargets to this schema; `#31` is reframed and deferred; `#33`/`#48` are annotated to adopt this
-vocabulary while keeping distinct enforcers. Promote to Accepted once the foundation merges with
-`evaluate`/`evaluate_order` parity green.
+**Accepted.** The executable work shipped as **one** issue (#135): the policy-model v2 foundation
+(PR1, #160) + agent-send over MCP (PR2, #161) + the named starter presets (PR4, #162) + the
+cap-reservation verification, with `evaluate`/`evaluate_order` mock⇄daemon parity green. `#29`
+retargets to this schema — in-app authoring / a `SetPolicy` RPC is the next step (presets are
+launch-time only today). `#31` is reframed and deferred; `#33`/`#48` are annotated to adopt this
+vocabulary while keeping distinct enforcers.
