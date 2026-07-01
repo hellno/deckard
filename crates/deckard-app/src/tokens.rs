@@ -35,6 +35,10 @@ pub const RADIUS_INPUT: Pixels = px(4.0);
 pub const RADIUS_ROW: Pixels = px(6.0);
 pub const RADIUS_MODAL: Pixels = px(10.0);
 
+// ── Stroke ──
+/// Dividers, input outlines, the focus ring — the one hairline width.
+pub const STROKE_HAIRLINE: Pixels = px(1.0);
+
 // ── Chrome dimensions ──
 pub const SIDEBAR_W: Pixels = px(248.0);
 pub const STATUS_H: Pixels = px(25.0);

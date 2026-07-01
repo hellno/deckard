@@ -2,7 +2,7 @@
 //! Every control writes straight back into `self.settings` and calls `.save()`,
 //! and theme changes apply live. This is the template for your own settings.
 
-use gpui::{div, px, AnyElement, Context, FontWeight, IntoElement, ParentElement, Styled, Window};
+use gpui::{div, px, AnyElement, Context, IntoElement, ParentElement, Styled, Window};
 use gpui_component::{
     button::{Button, ButtonVariants},
     h_flex,
@@ -13,6 +13,7 @@ use gpui_component::{
 
 use crate::settings::{Settings, ThemeModePref};
 use crate::shell::Shell;
+use crate::widgets::{divider, section_label};
 
 impl Shell {
     pub fn render_settings(
@@ -170,16 +171,4 @@ impl Shell {
                 ))),
         )
     }
-}
-
-fn section_label(title: &str, color: gpui::Hsla) -> impl IntoElement {
-    div()
-        .text_xs()
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(color)
-        .child(title.to_uppercase())
-}
-
-fn divider(color: gpui::Hsla) -> impl IntoElement {
-    div().h(px(1.0)).w_full().bg(color)
 }
