@@ -339,9 +339,7 @@ impl Shell {
         // The quiet supporting facts (Shield's Railgun fee + net), demoted between two hairlines.
         // Empty for a public send, where there is nothing to demote.
         let facts = (!view.extra_rows.is_empty()).then(|| {
-            let mut col = v_flex()
-                .w_full()
-                .child(div().w_full().h(px(1.0)).bg(border));
+            let mut col = v_flex().w_full().child(crate::widgets::divider(border));
             for row in view.extra_rows {
                 col = col.child(kv_money_row(
                     row.label,
@@ -351,7 +349,7 @@ impl Shell {
                     muted,
                 ));
             }
-            col.child(div().w_full().h(px(1.0)).bg(border))
+            col.child(crate::widgets::divider(border))
         });
 
         self.commit_shell(

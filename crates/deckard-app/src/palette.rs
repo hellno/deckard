@@ -177,7 +177,7 @@ impl Shell {
                     .child(query_row)
                     .child(context_line)
                     // Hairline under the query/context header.
-                    .child(div().h(px(1.0)).w_full().bg(border))
+                    .child(crate::widgets::divider(border))
                     .child(
                         div()
                             .id("palette-scroll")

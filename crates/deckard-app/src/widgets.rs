@@ -81,6 +81,17 @@ pub(crate) fn section_label(text: &str, muted: Hsla) -> AnyElement {
         .into_any_element()
 }
 
+/// The ONE full-width hairline rule (DESIGN §Visual language: a single hairline only where a list
+/// needs row separation). Replaces the inline `div().h(px(1.)).w_full().bg(..)` copies and the
+/// per-file local `divider` in `settings_view`.
+pub(crate) fn divider(color: Hsla) -> AnyElement {
+    div()
+        .w_full()
+        .h(crate::tokens::STROKE_HAIRLINE)
+        .bg(color)
+        .into_any_element()
+}
+
 /// A project / wallet **identity mark** with a deterministic monogram (DESIGN
 /// §Actor model: shape is the accessibility backup; never a blank fill). Square
 /// (rounded) for projects/wallets; pass `radius = size / 2` for the round human
