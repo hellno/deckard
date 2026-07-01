@@ -1,7 +1,7 @@
 //! `PendingList` snapshot tests for the agent-approval inbox (Lane A). These pin the two NEW
 //! `PendingRecord` fields the GUI inbox reads — `origin` (who proposed) and `remaining_ms` (the
 //! TTL countdown, a daemon-computed snapshot) — and the expire-BEFORE-list guarantee: the list
-//! never surfaces a `Pending` row past its 120s TTL.
+//! never surfaces a `Pending` row past its approval TTL.
 //!
 //! No chain is needed (nothing is broadcast — every assertion is about the inbox snapshot, not
 //! signing), so these run under plain `cargo test`.
@@ -21,8 +21,8 @@ const CHAIN: u64 = 31337;
 /// Nothing is broadcast here, so the RPC is never contacted.
 const DUMMY_RPC: &str = "http://127.0.0.1:1";
 const PER_TX_CAP: u64 = 50_000_000_000_000_000; // 0.05 ETH (the default policy cap)
-/// The frozen 120s approval TTL ceiling — a fresh `remaining_ms` can never exceed it.
-const APPROVAL_TTL_MS: u64 = 120_000;
+/// The default approval-TTL ceiling — a fresh `remaining_ms` can never exceed it.
+const APPROVAL_TTL_MS: u64 = 1_800_000; // 30 min — the daemon's default APPROVAL_TTL
 
 fn send(to: Address, value: u64) -> Intent {
     Intent {
@@ -49,7 +49,7 @@ async fn pending_id(
 }
 
 /// A1: an over-cap App send is surfaced in the inbox as a `Pending` record tagged `App`, with a
-/// live `remaining_ms` inside the frozen TTL window (`0 < remaining_ms <= 120_000`).
+/// live `remaining_ms` inside the default TTL window (`0 < remaining_ms <= APPROVAL_TTL_MS`).
 #[tokio::test]
 async fn pending_list_reports_app_origin_and_live_remaining() {
     let dir = TempDir::new("pending-list-app");
@@ -78,7 +78,7 @@ async fn pending_list_reports_app_origin_and_live_remaining() {
     );
     assert!(
         rec.remaining_ms > 0 && rec.remaining_ms <= APPROVAL_TTL_MS,
-        "a live Pending row must carry 0 < remaining_ms <= 120_000, got {}",
+        "a live Pending row must carry 0 < remaining_ms <= APPROVAL_TTL_MS, got {}",
         rec.remaining_ms
     );
 }

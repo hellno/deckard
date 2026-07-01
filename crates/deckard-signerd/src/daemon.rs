@@ -38,9 +38,10 @@ use crate::request_id::{request_id_for, request_id_for_message, request_id_for_o
 use crate::signing;
 use crate::spend_store::SpendStore;
 
-/// Default lifetime of a `NeedsApproval` before `status`/`execute` report `Expired`.
-/// Overridable via `DECKARD_APPROVAL_TTL_SECS` (used by tests to exercise expiry quickly).
-const APPROVAL_TTL: Duration = Duration::from_secs(120);
+/// Default lifetime of a `NeedsApproval` before `status`/`execute` report `Expired` — 30 minutes,
+/// long enough for a human to step away and still return to approve. Overridable via
+/// `DECKARD_APPROVAL_TTL_SECS` (used by tests to exercise expiry quickly).
+const APPROVAL_TTL: Duration = Duration::from_secs(30 * 60);
 
 /// Resolve the approval TTL: `DECKARD_APPROVAL_TTL_SECS` if set + parseable, else the default.
 fn approval_ttl() -> Duration {
@@ -1486,7 +1487,7 @@ impl Daemon {
     /// regardless of lock state — statuses already reflect `revoked`, and order/intent fields
     /// are not secret (no key, passphrase, or viewing key crosses here).
     fn pending_list(&mut self) -> Vec<PendingRecord> {
-        // Expire FIRST so a Pending row past its 120s TTL is never surfaced as still-pending —
+        // Expire FIRST so a Pending row past its approval TTL is never surfaced as still-pending —
         // the inbox sees `Expired` (with `remaining_ms == 0`), matching `status`/`execute`.
         self.expire_stale();
         let now = Instant::now();
@@ -1711,7 +1712,7 @@ impl Daemon {
 /// zeroized.
 ///
 /// It gates on the order's REAL `valid_to`, NEVER the daemon's local approval-TTL
-/// `ApprovalStatus::Expired`. Those are different clocks: a signed order whose 120s approval
+/// `ApprovalStatus::Expired`. Those are different clocks: a signed order whose approval-TTL
 /// record has lapsed is still settleable by a solver until `valid_to` (up to 24h), so STOP must
 /// still cancel it. (Skipping locally-`Expired` orders was a STOP-integrity hole — they could
 /// settle after the kill switch.) Unsigned orders (never submitted), already-cancelled/broadcast
