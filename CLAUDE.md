@@ -14,8 +14,10 @@ Do not deviate without explicit user approval. In QA/review, flag anything that 
 
 Ground all design work in **real reference screenshots** (Linear, Conductor, Splits, Superhuman,
 Stripe), never in remembered descriptions — that is how the first drafts went wrong. The
-interactive, dogfooded reference lives at
-`~/.gstack/projects/hellno-deckard/designs/deckard-foundation-preview.html`.
+pixel ground-truth is versioned in-repo: `designs/deckard-editorial-v3.html` (home, send/swap,
+activity) and `designs/deckard-agent-v4.html` (agent surface + transaction-as-hero confirm). See
+`designs/README.md`. (The old `~/.gstack/.../deckard-foundation-preview.html` predates the 2026-06-20
+editorial overhaul and is superseded — do not build against it.)
 
 ## Engineering & verification
 The full rationale (what we enforce and *why*, plus deliberately-rejected rules) is in
