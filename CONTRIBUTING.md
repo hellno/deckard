@@ -167,12 +167,23 @@ is the odd one out — it's anvil's upstream fork source, read only by `just dem
 | `DECKARD_DEMO_FORK_BLOCK` | core (app/daemon) | unset (live, unpinned) | No |
 | `DECKARD_ALLOW_SCREEN_CAPTURE` | app (capture block) | off (block honored per setting) | No |
 | `DECKARD_SIGNERD_BIN` | app (daemon resolution) — **`dev-signerd-bin` feature only** | verified bundled sibling (release) | No |
+| `DECKARD_POLICY_PRESET` | daemon (policy loader) | unset → friendly built-in default policy | No |
 | `RPC_URL_SEPOLIA` | `just demo` / `just demo-check` only (anvil `--fork-url`) | unset (required for demo) | **Yes** — archive RPC, may carry an API key |
 
 > Demo block (set by `just demo`, emitted by `deckard-mcp install --demo`):
 > `DECKARD_CONFIG_DIR=~/.deckard/demo`, `DECKARD_SOCKET_PATH=~/.deckard/demo/signerd.sock`,
 > `DECKARD_CHAIN_ID=11155111`, `DECKARD_RPC_URL=http://127.0.0.1:8545`. `just demo` also
 > sets `DECKARD_VERIFIED_READS=0` (Helios is mainnet-only) and `DECKARD_DEMO_FORK_BLOCK=10822990`.
+
+> **Rules presets.** `DECKARD_POLICY_PRESET` picks one of four starter rulebooks: `shield-only`
+> (only *shielding* — moving funds into your own private balance — auto-allows under the daily cap;
+> send and swap denied), `ask-me-everything` (shield, send, and swap all raise a human-approval card;
+> nothing auto-signs), `locked` (no rules — every action denied), and `default` (unset — the friendly
+> first-run: shield auto-allows, send and swap always card, 0.2 ETH daily cap). The preset applies
+> **only when there is no `policy.json` yet** (a fresh run); an authored `policy.json` always wins, and
+> an unknown value warns and falls back to the friendly default. Example: `DECKARD_POLICY_PRESET=shield-only just qa`
+> works because the qa vault has no `policy.json`. `just demo` installs `policy.demo.json`, so a preset
+> is ignored there (the file wins). Live in-app switching is deferred to a later authoring feature (#29).
 
 > **Daemon launch provenance (finding C1 / #106).** The app spawns `deckard-signerd` with a
 > **cleared environment** (`env_clear()`), then sets back only the control vars

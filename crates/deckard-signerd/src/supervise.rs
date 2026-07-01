@@ -462,8 +462,9 @@ fn resolve_config_dir() -> PathBuf {
 /// The Deckard-namespace env vars the daemon (or `deckard-core` running inside it) reads that the
 /// supervisor does NOT compute itself — forwarded from the app's environment IFF present, so an
 /// operator toggle / `just demo` setting still reaches the daemon after [`apply_child_env`] clears
-/// the inherited environment. Each is parsed by the daemon as a bool/int/path-block and carries no
-/// loader capability; the dangerous loader vars (`LD_PRELOAD`/`LD_AUDIT`/`DYLD_INSERT_LIBRARIES`/…)
+/// the inherited environment. Each is parsed by the daemon as a bool/int/preset-name and carries no
+/// loader capability nor any way to ESCALATE the agent's authority (the preset can only narrow it);
+/// the dangerous loader vars (`LD_PRELOAD`/`LD_AUDIT`/`DYLD_INSERT_LIBRARIES`/…)
 /// and `$PATH` are deliberately absent. The control vars + `DECKARD_RESOLVE_FD` are set explicitly
 /// (not via this list). `DECKARD_SIGNERD_BIN` is deliberately NOT here — it is the binary-
 /// substitution vector (finding C1) and the daemon never reads it anyway.
@@ -485,6 +486,13 @@ const FORWARDED_ENV_ALLOWLIST: &[&str] = &[
     // Auto-approval guardrail override (human operator; documented only in THREAT-MODEL.md). Kept
     // for status-quo parity — see the rationale on this const's doc comment (#76 reconsiders it).
     "DECKARD_I_KNOW_THIS_IS_MAINNET",
+    // Starter-policy preset (#135 PR4): names a built-in [`policy_store::Preset`] the loader
+    // installs ONLY when there is no `policy.json` (a fresh config dir). Cannot ESCALATE authority
+    // — every preset is same-or-more-restrictive than the built-in default the daemon would use
+    // anyway (`locked`/`shield-only` deny more; `ask-me-everything` cards more; `default` is the
+    // baseline), and an authored `policy.json` always wins over it — so forwarding it from a
+    // possibly-poisoned app env can only ever LOCK the agent DOWN, never widen it.
+    "DECKARD_POLICY_PRESET",
 ];
 
 /// Build the daemon child's MINIMAL, audited process environment on `cmd` (finding C1).
@@ -798,12 +806,13 @@ mod tests {
             return;
         };
         let parent: std::collections::HashMap<&str, OsString> = [
-            ("DECKARD_VERIFIED_READS", "0"),         // allowlisted → forwarded
-            ("DECKARD_I_KNOW_THIS_IS_MAINNET", "1"), // allowlisted → forwarded
-            ("DECKARD_APPROVAL_TTL_SECS", "5"),      // NOT allowlisted → dropped
+            ("DECKARD_VERIFIED_READS", "0"),          // allowlisted → forwarded
+            ("DECKARD_I_KNOW_THIS_IS_MAINNET", "1"),  // allowlisted → forwarded
+            ("DECKARD_POLICY_PRESET", "shield-only"), // allowlisted → forwarded (#135 PR4)
+            ("DECKARD_APPROVAL_TTL_SECS", "5"),       // NOT allowlisted → dropped
             ("DECKARD_SIGNERD_BIN", "/tmp/fake-signerd"), // must NOT be forwarded
-            ("LD_PRELOAD", "/tmp/evil.so"),          // must NOT be forwarded
-            ("SOME_UNRELATED_SECRET", "leak-me"),    // must NOT be forwarded
+            ("LD_PRELOAD", "/tmp/evil.so"),           // must NOT be forwarded
+            ("SOME_UNRELATED_SECRET", "leak-me"),     // must NOT be forwarded
         ]
         .into_iter()
         .map(|(k, v)| (k, OsString::from(v)))
@@ -824,6 +833,10 @@ mod tests {
         assert!(
             printed.contains("DECKARD_I_KNOW_THIS_IS_MAINNET=1"),
             "got:\n{printed}"
+        );
+        assert!(
+            printed.contains("DECKARD_POLICY_PRESET=shield-only"),
+            "the starter-policy preset must reach the daemon:\n{printed}"
         );
         // The un-allowlisted TTL knob, the binary-substitution override, and unrelated/loader vars
         // are all dropped — a poisoned app env can't reach the daemon through them.

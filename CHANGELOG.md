@@ -14,6 +14,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Starter policy presets, chosen at launch** ([#135]). Set `DECKARD_POLICY_PRESET=<name>` to seed
+  the agent's rulebook with one of three named starting points, all default-deny on the v1 policy
+  schema: **shield-only** auto-allows shielding (shield — move funds into your own private balance)
+  under the daily cap and denies send and swap, so the agent can only move funds into your private
+  balance and never send to a third party or trade; **ask-me-everything** raises a human-approval
+  card for every shield, send, and swap, so nothing auto-signs; and **locked** has no rules at all,
+  so every action is denied (a frozen rulebook, distinct from the runtime STOP an operator flips in
+  an emergency). The preset applies only on a first run with no `policy.json` yet — an authored
+  `policy.json` always wins — and an unknown name logs a warning and falls back to the friendly
+  default (shield auto-allowed, send and swap always carded, under the 0.2 ETH daily cap), which is
+  also selectable explicitly as `default` (the same rulebook you get with no preset set). Live
+  in-app switching between presets is not in this release.
+
 ### Changed
 
 - **Policy is now versioned and default-deny** ([#135]). The `policy.json` file changed shape.
