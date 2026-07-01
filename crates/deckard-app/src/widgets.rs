@@ -74,7 +74,7 @@ pub(crate) fn error_line(danger: Hsla, msg: impl Into<SharedString>) -> AnyEleme
 /// + muted carry the treatment until it is.)
 pub(crate) fn section_label(text: &str, muted: Hsla) -> AnyElement {
     div()
-        .text_size(px(10.0))
+        .text_size(crate::tokens::TEXT_LABEL)
         .font_weight(FontWeight::MEDIUM)
         .text_color(muted)
         .child(SharedString::from(text.to_uppercase()))

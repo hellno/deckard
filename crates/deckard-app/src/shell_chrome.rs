@@ -122,7 +122,7 @@ impl Shell {
         };
 
         v_flex()
-            .w(px(248.0))
+            .w(crate::tokens::SIDEBAR_W)
             .flex_shrink_0()
             .h_full()
             .bg(theme.sidebar)
@@ -472,7 +472,7 @@ impl Shell {
         });
 
         h_flex()
-            .h(px(25.0))
+            .h(crate::tokens::STATUS_H)
             .flex_shrink_0()
             .w_full()
             .px_3()

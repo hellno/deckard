@@ -99,7 +99,7 @@ impl Shell {
                             .flex_shrink_0()
                             .px_3()
                             .py_1p5()
-                            .rounded(px(6.0))
+                            .rounded(crate::tokens::RADIUS_ROW)
                             .border_1()
                             .border_color(danger)
                             .text_color(danger)
@@ -140,7 +140,7 @@ impl Shell {
                         col.child(
                             div()
                                 .max_w(px(560.0))
-                                .text_size(px(15.0))
+                                .text_sm()
                                 .text_color(secondary_text)
                                 .child(autonomy),
                         )

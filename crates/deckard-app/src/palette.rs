@@ -167,7 +167,7 @@ impl Shell {
                     .bg(popover)
                     .border_1()
                     .border_color(border)
-                    .rounded(px(10.0))
+                    .rounded(crate::tokens::RADIUS_MODAL)
                     .shadow_lg()
                     .track_focus(&self.palette_focus)
                     .key_context("CommandPalette")
@@ -206,14 +206,29 @@ impl Shell {
                 } else {
                     addr
                 };
-                row.child(div().size(px(14.0)).rounded(px(4.0)).bg(id_square))
-                    .child(div().font_family(mono).text_color(muted).child(label))
+                row.child(
+                    div()
+                        .size(px(14.0))
+                        .rounded(crate::tokens::RADIUS_INPUT)
+                        .bg(id_square),
+                )
+                .child(div().font_family(mono).text_color(muted).child(label))
             }
             Selection::Project => row
-                .child(div().size(px(14.0)).rounded(px(4.0)).bg(id_square))
+                .child(
+                    div()
+                        .size(px(14.0))
+                        .rounded(crate::tokens::RADIUS_INPUT)
+                        .bg(id_square),
+                )
                 .child(div().text_color(muted).child("Personal")),
             Selection::Agent => row
-                .child(div().size(px(14.0)).rounded(px(4.0)).bg(id_square))
+                .child(
+                    div()
+                        .size(px(14.0))
+                        .rounded(crate::tokens::RADIUS_INPUT)
+                        .bg(id_square),
+                )
                 .child(div().text_color(muted).child("Atlas")),
         }
     }

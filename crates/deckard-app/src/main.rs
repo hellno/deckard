@@ -27,6 +27,7 @@ mod signer;
 mod swap;
 mod swap_view;
 mod theme;
+mod tokens;
 #[cfg(feature = "tray")]
 mod tray;
 mod wallet;
