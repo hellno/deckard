@@ -61,6 +61,11 @@ qa-vault:
 
 # Launch the app against the QA vault, pointed at a local anvil (start `anvil` first
 # for live balances / send / shield). Run `just qa-vault` once before this.
+# Starter policy: /tmp/deckard-qa has no policy.json, so DECKARD_POLICY_PRESET=<name> picks the
+# launch posture — shield-only (shield only, everything else denied), ask-me-everything (every
+# action asks), locked (everything denied), or default (unset; the friendly first-run policy).
+# E.g. `DECKARD_POLICY_PRESET=shield-only just qa`. An authored policy.json always wins, so
+# `just demo` (which installs policy.demo.json) ignores the preset.
 qa:
     cargo build -p deckard-signerd
     DECKARD_CONFIG_DIR="{{qa_dir}}" \
