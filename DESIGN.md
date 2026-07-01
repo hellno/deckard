@@ -4,15 +4,22 @@
 > v2 (2026-06-20): re-grounded the visual language (editorial, not card-heavy), made the
 > foundation **enforceable** (bundled fonts + a shared widget vocabulary + a visual definition
 > of done), redesigned the trust-critical confirm, and defined the agent interaction model.
+> v3 (2026-07-01): closed the doc-vs-code enforcement gap. Named every scale as a **token**
+> (spacing, type, radii, motion, elevation, opacity, stroke, icon) so the code can carry a const
+> instead of a magic number; gave the semantic roles their own names (the one warm light still
+> serves them all, but on purpose now); promoted the light theme to a full token table; and
+> versioned the golden references in-repo. The token names below are the contract the crate's
+> `theme.rs` / `tokens` module implement — a view that hardcodes a value the token layer already
+> names is a review failure.
 >
-> **Golden references (the pixel ground-truth agents build against):**
-> - `~/.gstack/projects/hellno-deckard/designs/deckard-editorial-v3.html` — home, send confirm,
->   swap compose, swap review, activity (the editorial language, light + dark).
-> - `~/.gstack/projects/hellno-deckard/designs/deckard-agent-v4.html` — the agent surface, the
->   compact agent presence on the home, and the redesigned transaction-as-hero confirm (this
->   confirm supersedes the v3 send confirm).
+> **Golden references (the pixel ground-truth agents build against), versioned in-repo under `designs/`:**
+> - `designs/deckard-editorial-v3.html` — home, send confirm, swap compose, swap review, activity
+>   (the editorial language, light + dark).
+> - `designs/deckard-agent-v4.html` — the agent surface, the compact agent presence on the home, and
+>   the redesigned transaction-as-hero confirm (this confirm supersedes the v3 send confirm).
 > When this doc and a reference disagree, the doc wins on rules and the reference wins on pixels;
-> fix whichever is stale.
+> fix whichever is stale. (These were unversioned under `~/.gstack/...` through v2; v3 checked them
+> into the repo so the "matches golden reference" definition-of-done item is actually verifiable.)
 
 ## The memorable thing
 **Your money on autopilot, and you can see and stop everything.** Calm sovereign control plus total
@@ -75,6 +82,10 @@ A primitive bakes in the correct DESIGN values so a screen **cannot** drift.
 | `key_hint_chip(keys)` | a bordered key-cap | shortcuts live in chips/menus, never as on-canvas filler rows |
 | `status_glyph(state)` | circular check/x-ring/clock-ring/minus | one status vocabulary across feed + chips |
 | `nav_row(...)` | sidebar/footer row: rest/hover/selected lift, one resting color | one row anatomy, one resting treatment |
+| `page_header(mark, title, subtitle)` *(v3)* | mark/glyph + H1 at `text-h1` + muted one-line subtitle | one page-header anatomy at **one** title size (kills the 6 hand-rolled copies at 3 sizes) |
+| `divider()` *(v3)* | a 1px `border.hairline` full-width rule | one hairline (kills the 6 inline `div().h(px(1.))` copies) |
+| `skeleton_row(shape)` *(v3)* | a money-/row-shaped loading placeholder | one loading vocabulary (never a spinner, never a bare `—`) |
+| `stop_brake(state)` *(v3)* | the STOP control: amber-idle → danger-armed, `⌘↵` to fire | one kill-switch treatment across Activity + the agent surface |
 
 ### 3. A visual definition of done (see the checklist at the end)
 QA and `/code-review` enforce it. A GUI PR that fails any item is not done.
@@ -90,8 +101,8 @@ AI-coded-design tell, and we reject it.
   grouping; a single hairline only where a list needs row separation. At most **one faint frame**
   for a genuine contained object, and never an elevation/shadow stack of cards.
 - **The hero is the largest object on screen.** The balance (and, on a confirm, the transaction
-  amount) is the biggest thing: ~64-72px mono on the wallet home, ~44px on a confirm. Money is the
-  load-bearing object; make it unmistakable.
+  amount) is the biggest thing: `text-hero` (64) mono on the wallet home, `text-tx-hero` (44) on a
+  confirm. Money is the load-bearing object; make it unmistakable.
 - **Cockpit layout.** Main surfaces are **left-anchored, full-bleed, hairline-ruled columns** with a
   **right-edge metadata rail** (Linear's row anatomy: lead glyph · subject · object on the left,
   signed-amount · status-glyph · time pinned right). Every row clamps: left cluster `min_w_0` +
@@ -159,11 +170,33 @@ agent?" in under a second. A **two-signal axis plus shape**, never a rainbow:
 | `success` | `#4FB463` · `error` | `#E5565B` (tint `rgba(229,86,91,.12)`) |
 | `identity` slate | `#3A4250` | desaturated identity-mark fill (off amber + success) |
 | `shield` slate | `#33424C` | private/shielded tone (off the actor axis) |
+| `bg.overlay` | `rgba(0,0,0,.5)` | the one dimming scrim under a modal/palette/slide-over; no shadow stacks |
+| `border.focus` | = `accent` | the 1px focus ring — the sole amber-colored border on the app |
 
 ### Light (first-class equal, refined; must not wash out)
-`bg.base #F6F5F1` · `rail #EEEDE6` · `raise #FFFFFF` · `hover #ECEBE4` · `hairline #DDDBD2` ·
-`border.strong #CFCCC2` · `text.primary #17191E` · `text.secondary #52585F` · `text.muted #6B7280`
-(>=4.5:1 on base) · `accent #A8650C` · `agent #0C7E75` · `success #2F8F47` · `error #C23B40`.
+Same token names, same roles — only the values change. Light has **one fewer surface level**:
+`raise` and `raise2` collapse to `#FFFFFF` (there is no second lift on a white surface), so a
+primary button reads as a hairline-framed white, not a darker fill.
+
+| token | hex | use |
+|---|---|---|
+| `bg.base` | `#F6F5F1` | app canvas |
+| `bg.rail` | `#EEEDE6` | sidebar / status strip / top bar |
+| `bg.raise` | `#FFFFFF` | active/selected lift, the rare surface, inputs |
+| `bg.raise2` | `#FFFFFF` | primary-button fill, popovers, palette (collapses to `raise` in light) |
+| `bg.hover` | `#ECEBE4` | hover lift |
+| `border.hairline` | `#DDDBD2` | dividers |
+| `border.strong` | `#CFCCC2` | input outlines, key-caps |
+| `text.primary` | `#17191E` | headings, values |
+| `text.secondary` | `#52585F` | labels, body |
+| `text.muted` | `#6B7280` | metadata, addresses (≥4.5:1 on base) |
+| `accent` (amber) | `#A8650C` | deepened for AA on light; tint `rgba(168,101,12,.14)` |
+| `agent` (cyan) | `#0C7E75` | tint `rgba(12,126,117,.12)` |
+| `success` | `#2F8F47` | · `error` `#C23B40` (tint `.12`) |
+| `identity` slate | `#A7AEBA` | identity-mark fill |
+| `shield` slate | `#94A2AC` | private/shielded tone |
+| `bg.overlay` | `rgba(0,0,0,.45)` | scrim (a touch lighter than dark's `.5`) |
+| `border.focus` | = `accent` | the amber focus ring |
 
 ### Color discipline
 1. **Amber is the one warm light, <1% of pixels.** It means only: the human acting, "where you are"
@@ -183,6 +216,27 @@ agent?" in under a second. A **two-signal axis plus shape**, never a rainbow:
 9. **Verified vs unverified is a real signal**: a verified mainnet read reads `success`; the
    downgrade reads the loud `NOT VERIFIED` amber tag (§Per-chain trust tiers). Never fake verified.
 
+### Semantic roles (what each color *means*, not just its hex)
+The base palette above is the raw material; these are the **roles** a view actually reaches for. The
+point of naming them: the single warm light (`accent`) does five jobs, and that overload is a
+**deliberate** decision (one warm light, <1% of pixels) — not an accident to be "cleaned up" by
+tinting each role differently. Naming the roles makes the overload visible and lets exactly one of
+them peel off to its own token if it ever must, without touching the other four.
+
+| role | token today | meaning |
+|---|---|---|
+| `signal.human` | `accent` (amber) | the human acting / "where you are" / the active step / "awaiting you" |
+| `signal.agent` | `agent` (cyan) | the agent class — squircle + agent status only |
+| `state.caution` | `accent` (amber) | a recoverable risk (first-time recipient, slippage) — via `caution_line` |
+| `state.danger` | `error` (red) | irreversible / loss-bearing (public+permanent, unlimited approval, over-cap) |
+| `state.success` | `success` (green) | verified read, confirmed tx |
+| `focus.ring` | `border.focus` = `accent` | the 1px focus-visible ring |
+| `armed.confirm` | `accent` (amber) | the `⌘↵` key-caps once armed |
+| `overlay.scrim` | `bg.overlay` | the dimming layer under a modal/palette |
+
+Rule: a view names the **role**, never re-derives the hex. `state.danger` may equal `error` today,
+but a screen asks for "danger," so a future palette change moves one token, not fifty call sites.
+
 ---
 
 ## Typography
@@ -191,8 +245,28 @@ agent?" in under a second. A **two-signal axis plus shape**, never a rainbow:
   alone, which read flat).
 - **Money / numbers / addresses / hashes:** **JetBrains Mono** (bundled), tabular figures, full
   precision, never abbreviated in a ledger.
-- **Scale (px):** balance hero 64-72 mono (home) / transaction hero 44 mono (confirm) · screen-title
-  H1 20-22/600 · section 14/600 · body 13/400 · label 10-11 uppercase +0.07em tracking.
+- **Type scale (named tokens — one value each, no ranges):**
+
+  | token | px | weight | use |
+  |---|---|---|---|
+  | `text-hero` | 64 | 500 | balance hero (wallet home) |
+  | `text-tx-hero` | 44 | 500 | **transaction hero** on every confirm — Send / Swap / Shield / Approve (one size; supersedes the old 40/32 split) |
+  | `text-h1` | 20 | 600 | screen title |
+  | `text-section` | 14 | 600 | section heading |
+  | `text-body` | 13 | 400 | body / values |
+  | `text-label` | 10 | 500 | tiny uppercase group label, `tracking-label` |
+
+  The old spec gave ranges (hero 64-72, confirm 44, H1 20-22, label 10-11); v3 collapses each to one
+  value so a screen carries a token, not a judgement call. The balance hero (`text-hero`, home) and
+  the transaction hero (`text-tx-hero`, confirm) are the only two display sizes and are distinct on
+  purpose — a confirm is not the home.
+- **Leading:** `leading-tight` 1.15 (hero + headings) · `leading-normal` 1.4 (body + labels) ·
+  `leading-mono` 1.0 (money / addresses / hashes — tabular figures set tight so columns align).
+- **Tracking:** `tracking-label` +0.07em is the **only** non-zero tracking (the tiny uppercase
+  label). Everything else is 0 — Schibsted Grotesk is drawn for editorial text at its natural spacing.
+- **Fallback stacks** (GPUI silently drops to the system font if a family isn't registered, so name
+  the fallback explicitly): UI = `Schibsted Grotesk, system-ui, sans-serif`; mono =
+  `JetBrains Mono, ui-monospace, monospace`.
 - **Weights:** 400 / 500 / 600. Never heavier than 600.
 - **Mono-for-money rules** (all via `money.rs`): dimmed decimals (integer `primary`, decimals+ticker
   `muted`, **color only**, no size step); every USD figure carries `$` or a `… USD` column header;
@@ -201,17 +275,78 @@ agent?" in under a second. A **two-signal axis plus shape**, never a rainbow:
 
 ---
 
-## Spacing, radii, motion
-- **Spacing:** 4px grid. Scale 2 · 4 · 8 · 12 · 16 · 20 · 24 · 32 · 48. Hoist named mark sizes
-  (16 / 20 / 30 px, radius 4-7) so squares never drift; 34px is off-grid, use 32.
-- **Grouping:** tiny uppercase section labels + **whitespace**, not a hairline between every row.
-  Default to no surface; see §Visual language.
-- **Borders:** always a 6-12% step from the background; never harsh.
-- **Radii:** 4px inputs/buttons · 6-7px rows/marks/chips (no fully-rounded pills) · 9-11px confirm
-  buttons / modals / palette · full only for the round human identicon.
-- **Motion:** minimal-functional, 120 / 160 / 220ms, ease-out enter / ease-in exit. The **one**
-  ambient motion is a slow ~1.6s breathing pulse on an agent **currently acting**. No spinners, no
-  skeleton confetti, no celebratory animation on money movement.
+## Spacing, sizing, radii, motion — the token layer
+Everything here is a **named token**; a view carries the name and the crate's `tokens` module (see
+§Build notes) carries the `Pixels` / `Duration` const behind it. A raw `px(...)` in a view that
+duplicates a token below is a review failure — that is the enforceable half of "the 4px grid."
+
+### Spacing (the 4px grid — governs gaps, padding, margins)
+`space-2` 2 · `space-4` 4 · `space-8` 8 · `space-12` 12 · `space-16` 16 · `space-20` 20 ·
+`space-24` 24 · `space-32` 32 · `space-48` 48. `space-2` is the sole sub-grid half-step (for
+hairline-adjacent gaps); every other value is a 4px multiple. Off-scale spacing is a bug: 34 → 32.
+**Grouping** still comes from whitespace + a tiny section label, not a hairline between every row
+(see §Visual language) — the scale is what that whitespace is *made of*.
+
+### Object sizes (a SEPARATE ladder — marks, gauges, chrome)
+Object sizes are tuned to glyph legibility and chrome ergonomics, **not** to the spacing grid, so
+they get their own named ladder. This is the fix for the old "polices 34 but bakes in 30" tension:
+object sizes are allowed off the grid, on purpose, and named — the grid governs *space between*
+things, this ladder governs *the size of* things.
+| token | px | use |
+|---|---|---|
+| `mark-sm` | 16 | inline identity mark (rows, chips) |
+| `mark-md` | 20 | sidebar / breadcrumb mark |
+| `mark-lg` | 30 | page-header mark |
+| `track` | 4 | budget / utilization gauge thickness |
+| `sidebar-w` | 248 | the sidebar column |
+| `breadcrumb-h` | 44 | the top breadcrumb bar |
+| `status-h` | 25 | the bottom status strip |
+| `content-max-w` | 760 | the reading column on a main surface |
+| `confirm-w` | 460 | the centered clear-signing / confirm card |
+
+(Control heights — button / input / row — are not yet one token; standardizing them is a code-side
+follow-up. Until then compose from the spacing scale, e.g. `space-8` vertical padding on `text-body`.)
+
+### Radii
+`radius-input` 4 (inputs, buttons, key-caps) · `radius-row` 6 (rows, marks, chips — never a
+fully-rounded pill) · `radius-modal` 10 (confirm buttons, modals, palette, slide-over) ·
+`radius-full` (the round human identicon only). Borders are always a 6-12% step from their
+background; never harsh.
+
+### Stroke widths
+`stroke-hairline` 1 (dividers, input outlines, the focus ring) · `stroke-track` 4 (the gauge). There
+are no other stroke widths.
+
+### Elevation / layering (brightness + one scrim, never a shadow stack)
+The editorial language rejects shadow-stacked cards, so elevation is **not** a shadow scale — it is
+(1) background brightness (`bg.base` < `bg.hover` < `bg.raise` < `bg.raise2`) and (2) exactly one
+dimming `bg.overlay` scrim under a floating surface. Stacking order, low → high:
+`canvas → content → popover/menu → ⌘K palette → slide-over → modal (+ scrim) → toast`. A surface
+higher in this order dims what's below it with the scrim; it does not cast a shadow onto it.
+
+### Opacity / tint alpha
+One alpha ladder, so tints stop being one-off rgba literals:
+`alpha-hairline` .06 (faint fills) · `alpha-tint` .12 (the standard signal tint — cyan, red) ·
+`alpha-tint-warm` .14 (amber only — it reads weaker at equal alpha, so it gets a hair more) ·
+`alpha-scrim` .5 dark / .45 light (`bg.overlay`) · `alpha-disabled` .4 (a disabled control where the
+`text.muted` step-down alone isn't enough).
+
+### Icons
+**Lucide**, hairline-weight, monochrome, inheriting `currentColor` — never a second accent, never a
+filled/duotone style. Sizes: `icon-sm` 14 (inline in a `caution_line`) · `icon-md` 16 (status glyphs,
+row leads) · `icon-lg` 20 (page-header glyph).
+
+### Motion
+`motion-fast` 120ms · `motion-base` 160ms · `motion-slow` 220ms; ease-out on enter, ease-in on exit.
+Two fixed timings beyond those: `arm-delay` 500ms (the confirm's inert window, formerly "400-600ms")
+and `pulse` 1600ms (the one ambient motion — a slow breathing pulse on an agent **currently
+acting**, formerly "~1.6s"). No spinners, no skeleton confetti, no celebratory animation on money.
+
+### Contrast targets (AA)
+Text tokens meet WCAG AA on their background: `text.primary` / `text.secondary` and `text.muted`
+≥ 4.5:1 (already noted for light `text.muted` on base). The signal colors are **graphical** objects
+(marks, rings, glyphs), held to ≥ 3:1 against their background — amber and cyan clear this on both
+themes. Never drop a text token below AA to fit a layout.
 
 ---
 
@@ -228,8 +363,8 @@ amber ring; disabled = a step below base, `text.muted`, no hover.
 - **Breadcrumb top bar** — `[identity mark] Project › current`, where `current` names the selected
   entity (the wallet/agent name, never the literal word "Wallet"). Right: network pill, ⌘K, theme,
   mask toggle. Network name appears once (not also restated in the status strip).
-- **Page header** — one anatomy: identity mark/glyph + H1 (`text.primary`, 20-22/600) + a muted
-  one-line subtitle.
+- **Page header** — one anatomy via `page_header`: identity mark/glyph + H1 (`text.primary`,
+  `text-h1` 20/600) + a muted one-line subtitle.
 - **Balance hero + allocation** — big mono balance (dimmed decimals) + a meta line
   (USD · synced · verified). Below it a thin tonal allocation bar (no amber) + a small legend.
   Loading shows a money-shaped skeleton bar, never a bare `—`.
@@ -251,8 +386,8 @@ key-cap affordance** (like Linear/Raycast "Create ↵"), made spam-proof by tier
 - **Irreversible money moves** (Send, Swap, Shield, Approve an agent proposal, Revoke): the primary
   shows the **`⌘↵` chord** (a chord can't be fat-fingered like Enter). The key-caps render amber when
   armed.
-- **Arm-delay:** the confirm is inert for ~400-600ms after the screen opens (key-caps dimmed), so a
-  queued or held keypress from the previous screen can't carry through and fire. A one-line note
+- **Arm-delay:** the confirm is inert for `arm-delay` (500ms) after the screen opens (key-caps
+  dimmed), so a queued or held keypress from the previous screen can't carry through and fire. A one-line note
   states this: "Press ⌘↵ to send. It arms a moment after this screen opens, so a stray keypress
   can't approve it."
 - **Highest-risk** (fresh address over a threshold, unlimited approval, agent over-cap): the first
@@ -393,10 +528,19 @@ Amber only on the active step, the caution, and the focus ring; primary CTAs neu
   motion; the `⌘↵` key-cap confirm as the signature trust gesture.
 
 ## Build notes (GPUI)
-Everything here is expressible in `theme.rs` (token override, light + dark) + gpui-component +
-`widgets.rs`. Fonts bundle via GPUI assets (`add_fonts` in `main.rs`); no web-font CDN. The two
-signal colors are app-level helpers (`theme::amber`/`agent`). `div()` is `display:block` in GPUI, so
-a child's `flex_1`/`justify_center` is inert unless the parent is `v_flex`/`h_flex`.
+The token names above map to Rust consts, not prose:
+- **Color** lives in `theme.rs` — `refine()` overrides the gpui-component `ThemeConfig` slots (light +
+  dark). The two signal colors + their tints and the identity/shield neutrals resolve through the
+  theme (`amber`/`agent`/`amber_tint`/`agent_tint`/`identity_square`/`shield`), so a widget reads them
+  from `cx.theme()` rather than taking them as arguments.
+- **Spacing / type / radii / stroke / motion** live in a `tokens` module as `const Pixels` /
+  `Duration` (`space_8`, `text_body`, `radius_modal`, `motion_base`, …). A view uses the const; a raw
+  `px(...)` that duplicates a named token is a review failure and the magic-number lint flags it.
+- **Fonts** bundle via GPUI assets (`add_fonts` in `main.rs`); no web-font CDN. Name the fallback
+  stacks (§Typography) — GPUI silently drops to the system font if a family isn't registered.
+- `div()` is `display:block` in GPUI, so a child's `flex_1`/`justify_center` is inert unless the
+  parent is `v_flex`/`h_flex`. GPUI's `Styled` has no letter-spacing setter, so `tracking-label` is
+  approximated with size + uppercase on the tiny label (the only tracked text).
 
 ---
 
@@ -405,7 +549,9 @@ A GUI change is not done until ALL hold (paste screenshots as evidence):
 - [ ] Renders in **Schibsted Grotesk + JetBrains Mono** (fonts actually bundled), not the system font.
 - [ ] Money + addresses are **mono**, dimmed-decimals, via `money.rs`; addresses via `short_addr`
       (6+4) + identicon.
-- [ ] No raw hex colors in the view; only `theme.*` + `theme::amber/agent`.
+- [ ] No raw hex colors in the view; only `theme.*` + the theme's `amber`/`agent`.
+- [ ] No magic-number `px()` for a value the token layer names — spacing via `space-*`, type/object
+      sizes via their tokens, radii via `radius-*`, motion via `motion-*` (the lint flags raw dupes).
 - [ ] **No card unless purposeful**; grouping is whitespace + hairlines + section labels.
 - [ ] **No `⚠` emoji** anywhere; caution/danger via `caution_line` (icon, no box).
 - [ ] Confirm is the `⌘↵` key-cap (or `↵` for routine), **never hold-to-confirm**; arm-delay present.
@@ -416,7 +562,8 @@ A GUI change is not done until ALL hold (paste screenshots as evidence):
 - [ ] Every new action has a ⌘K `Command`.
 - [ ] No leftover starter slop (keyboard-hint rows, "Welcome to Deckard", dead settings, leaked
       build-flag or provider strings, orphan `—`).
-- [ ] Matches the golden-reference HTML in layout and hierarchy.
+- [ ] Matches the golden-reference HTML (`designs/deckard-editorial-v3.html` /
+      `designs/deckard-agent-v4.html`) in layout and hierarchy.
 
 ## Decisions log
 | Date | Decision | Rationale |
@@ -434,3 +581,4 @@ A GUI change is not done until ALL hold (paste screenshots as evidence):
 | 2026-06-20 | **Agent interaction model.** Agents first-class standalone in the sidebar; a dedicated agent surface owns editable policy + controls + its own activity; the home shows a compact agent presence; expandability contract (agent = policy + activity, UX renders from data). | The read-only policy dump on the home was awkward; an agent that spends your money deserves a first-class surface; lean for one agent, expandable to N and to model-2 without redesign. |
 | 2026-06-20 | **Activity lean now = audit log + STOP**; triage inbox / keyboard nav / drill-in receipts / filtering deferred and documented. | Build the see-and-stop log first; layer the inbox interactions once the loop is real. |
 | 2026-06-20 | **UI/display face: General Sans → Schibsted Grotesk** (JetBrains Mono unchanged). | General Sans is Fontshare/ITF proprietary — its EULA forbids redistributing the raw files / public-server hosting, which the public repo violated once #114 committed them. Schibsted Grotesk is OFL-1.1, a structural drop-in (same 400/500/600 weights), and built for editorial publishing — it fits the locked Editorial direction. Chosen over Hanken Grotesk (safer/quieter) and IBM Plex Sans (more recognizable) via /design-consultation. |
+| 2026-07-01 | **v3 token layer + versioned references.** Named every scale (spacing, object sizes, type, radii, stroke, elevation, opacity, icon, motion) as a token → Rust const; gave the semantic roles their own names over the single warm light (deliberate overload, not accidental); promoted light to a full token table; added elevation/opacity/AA sub-specs; unified the transaction hero to one `text-tx-hero` (was 40/32); declared object sizes a separate ladder (resolving the 30px-off-grid tension); checked the golden HTML references into `designs/`. | A design-system audit found the doctrine strong but enforcement partial: color + fonts were centralized, but everything below (127 raw `px()` across ~43 values, 11 scattered `text_size(px())`, duplicated leaf widgets) was hand-rolled, and "matches golden reference" pointed at an out-of-repo, unversioned, stale file. Prose can't enforce a spacing grid; a `const` the compiler + a lint check can. |
