@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deckard — Design System</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    /* v3 dark tokens (DESIGN.md §Color) */
+    --bg-base:#0A0B0D; --bg-rail:#0B0C0F; --bg-raise:#121419; --bg-raise2:#161922; --bg-hover:#14161B;
+    --hairline:#1B1E25; --strong:#262A33;
+    --text-primary:#E7E9EC; --text-secondary:#9298A2; --text-muted:#646A73;
+    --amber:#F2A43B; --amber-hover:#FFB454; --agent:#3CC9BC; --success:#4FB463; --error:#E5565B;
+    --identity:#3A4250; --shield:#33424C; --overlay:rgba(0,0,0,.5);
+    --sans:"Schibsted Grotesk",system-ui,sans-serif; --mono:"JetBrains Mono",ui-monospace,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg-base);color:var(--text-primary);font-family:var(--sans);
+    font-size:13px;line-height:1.5;-webkit-font-smoothing:antialiased}
+  a{color:inherit}
+  .wrap{max-width:980px;margin:0 auto;padding:48px 32px 96px}
+  .label{font-size:10px;font-weight:500;letter-spacing:.07em;text-transform:uppercase;color:var(--text-muted)}
+  header h1{font-size:44px;font-weight:600;margin:8px 0 4px;letter-spacing:-.01em}
+  header p{color:var(--text-secondary);max-width:60ch;margin:0}
+  section{margin-top:56px;border-top:1px solid var(--hairline);padding-top:28px}
+  section > h2{font-size:20px;font-weight:600;margin:0 0 4px}
+  section > .sub{color:var(--text-muted);margin:0 0 20px;font-size:13px}
+  .mockups{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .mockup{display:block;border:1px solid var(--hairline);border-radius:10px;padding:20px;
+    background:var(--bg-raise);text-decoration:none;transition:background .16s ease-out}
+  .mockup:hover{background:var(--bg-hover)}
+  .mockup h3{margin:0 0 6px;font-size:14px;font-weight:600}
+  .mockup p{margin:0;color:var(--text-muted);font-size:12px}
+  .mockup .open{margin-top:12px;font-size:12px;color:var(--amber)}
+  .swatches{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px}
+  .sw{display:flex;align-items:center;gap:12px;padding:8px;border:1px solid var(--hairline);border-radius:6px}
+  .chip{width:34px;height:34px;border-radius:6px;flex:none;border:1px solid var(--hairline)}
+  .sw .n{font-size:12px}
+  .sw .hex{font-family:var(--mono);font-size:11px;color:var(--text-muted)}
+  .sw .use{font-size:11px;color:var(--text-muted)}
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:32px}
+  .panel{background:var(--bg-raise);border:1px solid var(--hairline);border-radius:10px;padding:20px}
+  .panel.light{background:#F6F5F1;color:#17191E;border-color:#DDDBD2}
+  .type-row{display:flex;align-items:baseline;gap:16px;padding:10px 0;border-bottom:1px solid var(--hairline)}
+  .type-row:last-child{border-bottom:0}
+  .type-row .meta{font-family:var(--mono);font-size:11px;color:var(--text-muted);width:150px;flex:none}
+  .mono{font-family:var(--mono)}
+  .scale{display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap}
+  .scale .bar{background:var(--amber);opacity:.85;border-radius:2px}
+  .scale .u{text-align:center}
+  .scale .u span{display:block;font-family:var(--mono);font-size:10px;color:var(--text-muted);margin-top:6px}
+  .radii{display:flex;gap:16px;flex-wrap:wrap}
+  .radii .r{width:72px;height:72px;background:var(--bg-raise2);border:1px solid var(--strong);
+    display:flex;align-items:flex-end;justify-content:center;padding:6px;font-family:var(--mono);font-size:10px;color:var(--text-muted)}
+  .kvs{width:100%;border-collapse:collapse}
+  .kvs td{padding:7px 0;border-bottom:1px solid var(--hairline);vertical-align:top;font-size:12px}
+  .kvs td:first-child{font-family:var(--mono);color:var(--text-primary);width:190px;white-space:nowrap}
+  .kvs td:last-child{color:var(--text-secondary)}
+  .actors{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+  .actor{border:1px solid var(--hairline);border-radius:10px;padding:20px;text-align:center;background:var(--bg-raise)}
+  .mark{width:44px;height:44px;margin:0 auto 12px;display:flex;align-items:center;justify-content:center;
+    font-weight:600;font-size:15px}
+  .mark.human{border-radius:50%;background:rgba(242,164,59,.14);color:var(--amber)}
+  .mark.agent{border-radius:12px;background:rgba(60,201,188,.12);color:var(--agent)}
+  .mark.wallet{border-radius:8px;background:var(--identity);color:var(--text-primary)}
+  .actor .t{font-weight:600;font-size:13px}
+  .actor .d{color:var(--text-muted);font-size:11px;margin-top:4px}
+  .motion{display:flex;gap:10px;flex-wrap:wrap}
+  .motion .m{font-family:var(--mono);font-size:11px;border:1px solid var(--hairline);border-radius:6px;
+    padding:6px 10px;color:var(--text-secondary)}
+  .foot{margin-top:64px;color:var(--text-muted);font-size:11px;border-top:1px solid var(--hairline);padding-top:16px}
+  code{font-family:var(--mono);background:var(--bg-raise2);border:1px solid var(--hairline);
+    border-radius:4px;padding:1px 5px;font-size:11px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="label">Deckard · Design System · v3</div>
+    <h1>Your money on autopilot, and you can see and stop everything.</h1>
+    <p>The rules-and-tokens reference for the native Rust&nbsp;+&nbsp;GPUI wallet. Calm sovereign control,
+    total auditability — Linear's precision, a terminal's honesty, a thin Blade&nbsp;Runner edge:
+    warm light for the human, cold light for the machine. The source of truth for rules is
+    <code>DESIGN.md</code>; the pixel ground-truth is the two mockups below.</p>
+  </header>
+
+  <section>
+    <h2>Golden references</h2>
+    <p class="sub">The intended look, screen by screen. Open in a new tab.</p>
+    <div class="mockups">
+      <a class="mockup" href="deckard-editorial-v3.html" target="_blank" rel="noopener">
+        <h3>Editorial — v3</h3>
+        <p>Wallet home, send confirm, swap compose + review, activity. Light&nbsp;+&nbsp;dark.</p>
+        <div class="open">Open →</div>
+      </a>
+      <a class="mockup" href="deckard-agent-v4.html" target="_blank" rel="noopener">
+        <h3>Agent — v4</h3>
+        <p>The agent surface, the compact agent presence on the home, and the transaction-as-hero confirm.</p>
+        <div class="open">Open →</div>
+      </a>
+    </div>
+  </section>
+
+  <section>
+    <h2>Color — dark (primary)</h2>
+    <p class="sub">~95% grayscale. Two signal colors spent sparingly; semantics kept distinct from both.</p>
+    <div class="swatches" id="dark-swatches"></div>
+  </section>
+
+  <section>
+    <h2>Color — light (first-class equal)</h2>
+    <p class="sub">Same token names, same roles — only the values change. <code>raise</code> and <code>raise2</code> collapse to white.</p>
+    <div class="panel light"><div class="swatches" id="light-swatches"></div></div>
+  </section>
+
+  <section>
+    <h2>The actor model</h2>
+    <p class="sub">A two-signal axis plus shape, never a rainbow. Survives grayscale.</p>
+    <div class="actors">
+      <div class="actor"><div class="mark human">You</div><div class="t">Human — amber</div><div class="d">round identicon · "where you are" · caution · focus ring · armed confirm</div></div>
+      <div class="actor"><div class="mark agent">A</div><div class="t">Agent — cyan</div><div class="d">squircle · agent identity + status only · never a title/link</div></div>
+      <div class="actor"><div class="mark wallet">P</div><div class="t">Wallet — slate</div><div class="d">rounded square · desaturated, off the actor axis</div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Typography</h2>
+    <p class="sub">Schibsted Grotesk (UI) · JetBrains Mono (money / addresses, tabular). Hierarchy from weight + size + color.</p>
+    <div id="type"></div>
+  </section>
+
+  <section>
+    <h2>Spacing — the 4px grid</h2>
+    <p class="sub">Gaps, padding, margins. <code>space-2</code> is the sole sub-grid half-step.</p>
+    <div class="scale" id="space"></div>
+  </section>
+
+  <section>
+    <h2>Radii &amp; stroke</h2>
+    <p class="sub">No fully-rounded pills except the round human identicon. One hairline stroke.</p>
+    <div class="radii">
+      <div class="r" style="border-radius:4px">radius-input · 4</div>
+      <div class="r" style="border-radius:6px">radius-row · 6</div>
+      <div class="r" style="border-radius:10px">radius-modal · 10</div>
+      <div class="r" style="border-radius:50%">radius-full</div>
+    </div>
+    <p class="sub" style="margin-top:16px">stroke-hairline <span class="mono">1px</span> (dividers, outlines, focus ring) · stroke-track <span class="mono">4px</span> (budget gauge)</p>
+  </section>
+
+  <section>
+    <h2>Motion</h2>
+    <p class="sub">Minimal-functional; ease-out enter, ease-in exit. The one ambient motion is the acting-pulse.</p>
+    <div class="motion">
+      <div class="m">motion-fast · 120ms</div>
+      <div class="m">motion-base · 160ms</div>
+      <div class="m">motion-slow · 220ms</div>
+      <div class="m">arm-delay · 450ms</div>
+      <div class="m">pulse · 1600ms</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Widget vocabulary</h2>
+    <p class="sub">Every view composes from these (<code>crate::widgets</code> + <code>money.rs</code> + <code>shell_chrome.rs</code>). Re-rolling one inline is a review failure.</p>
+    <table class="kvs" id="widgets"></table>
+  </section>
+
+  <div class="foot">
+    Deckard Design System v3 (2026-07-01). Rules: <code>DESIGN.md</code>. Tokens: <code>crates/deckard-app/src/tokens.rs</code> + <code>theme.rs</code>.
+    AGPL-3.0. Generated hub — grounded in the v3 token layer, not remembered descriptions.
+  </div>
+
+</div>
+
+<script>
+  const DARK=[
+    ["bg.base","#0A0B0D","app canvas"],["bg.rail","#0B0C0F","sidebar / strips"],
+    ["bg.raise","#121419","selected lift, inputs"],["bg.raise2","#161922","primary fill, popovers"],
+    ["bg.hover","#14161B","hover lift"],["border.hairline","#1B1E25","dividers"],
+    ["border.strong","#262A33","input outlines, key-caps"],["text.primary","#E7E9EC","headings, values"],
+    ["text.secondary","#9298A2","labels, body"],["text.muted","#646A73","metadata, addresses"],
+    ["accent (amber)","#F2A43B","human · caution · focus · armed"],["agent (cyan)","#3CC9BC","agent class only"],
+    ["success","#4FB463","verified, confirmed"],["error","#E5565B","danger, irreversible"],
+    ["identity","#3A4250","wallet mark fill"],["shield","#33424C","private / shielded"],
+  ];
+  const LIGHT=[
+    ["bg.base","#F6F5F1","app canvas"],["bg.rail","#EEEDE6","sidebar / strips"],
+    ["bg.raise","#FFFFFF","selected lift, inputs"],["bg.hover","#ECEBE4","hover lift"],
+    ["border.hairline","#DDDBD2","dividers"],["border.strong","#CFCCC2","input outlines"],
+    ["text.primary","#17191E","headings, values"],["text.secondary","#52585F","labels, body"],
+    ["text.muted","#6B7280","metadata (≥4.5:1)"],["accent (amber)","#A8650C","human · caution · focus"],
+    ["agent (cyan)","#0C7E75","agent class only"],["success","#2F8F47","verified"],
+    ["error","#C23B40","danger"],["identity","#A7AEBA","wallet mark fill"],["shield","#94A2AC","private"],
+  ];
+  function swatches(el,rows,lightText){
+    document.getElementById(el).innerHTML = rows.map(([n,hex,use])=>`
+      <div class="sw" ${lightText?'style="border-color:#DDDBD2"':''}>
+        <div class="chip" style="background:${hex}"></div>
+        <div><div class="n">${n}</div><div class="hex">${hex}</div><div class="use">${use}</div></div>
+      </div>`).join("");
+  }
+  swatches("dark-swatches",DARK,false);
+  swatches("light-swatches",LIGHT,true);
+
+  const TYPE=[
+    ["text-hero","64 / 500","Balance",'font:600 64px/1.05 var(--sans)'],
+    ["text-tx-hero","44 / 500","0.5 ETH",'font:600 44px/1.1 var(--mono)'],
+    ["text-h1","20 / 600","Screen title",'font:600 20px var(--sans)'],
+    ["text-section","14 / 600","Section heading",'font:600 14px var(--sans)'],
+    ["text-body","13 / 400","Body and values",'font:400 13px var(--sans)'],
+    ["text-label","10 / 500","SECTION LABEL",'font:500 10px var(--sans);letter-spacing:.07em;text-transform:uppercase'],
+  ];
+  document.getElementById("type").innerHTML = TYPE.map(([t,m,sample,css])=>`
+    <div class="type-row"><div class="meta">${t}<br>${m}</div><div style="${css}">${sample}</div></div>`).join("");
+
+  const SPACE=[2,4,8,12,16,20,24,32,48];
+  document.getElementById("space").innerHTML = SPACE.map(v=>`
+    <div class="u"><div class="bar" style="width:${v}px;height:${Math.max(v,8)}px"></div><span>${v}</span></div>`).join("");
+
+  const WIDGETS=[
+    ["identity_mark","deterministic monogram — round=human, square=wallet, squircle=agent"],
+    ["agent_squircle","the cyan agent glyph; static, pulse only when acting"],
+    ["section_label","10px uppercase tracked muted label — one treatment everywhere"],
+    ["short_addr","middle-truncate first-6 + last-4 — one rule"],
+    ["truncated_address","identicon + short_addr + ENS + self-send warning"],
+    ["caution_line","amber TriangleAlert + inline text, no box"],
+    ["kv_row","label-left muted / mono-value-right, clamped"],
+    ["money / usd","mono dimmed-decimals; integer primary, decimals muted by color"],
+    ["amount_field","mono input + asset chip + USD-equiv + Max + over-balance gate"],
+    ["budget_gauge","thin 4px track; neutral → amber ≥90% → red ≥100%"],
+    ["confirm_button","the ⌘↵ key-cap confirm with arm-delay; no hold-to-confirm"],
+    ["key_hint_chip","a bordered key-cap"],
+    ["status_glyph","circular check / x-ring / clock-ring / minus"],
+    ["nav_row","sidebar/footer row — rest/hover/selected lift, one resting color"],
+    ["divider","the one full-width hairline rule"],
+    ["page_header *","mark + H1 + muted subtitle (planned — issue #167)"],
+    ["skeleton_row *","money-/row-shaped loading placeholder (planned — #167)"],
+    ["stop_brake *","STOP: amber-idle → danger-armed, ⌘↵ (planned — #167)"],
+  ];
+  document.getElementById("widgets").innerHTML = WIDGETS.map(([n,d])=>`<tr><td>${n}</td><td>${d}</td></tr>`).join("");
+</script>
+</body>
+</html>

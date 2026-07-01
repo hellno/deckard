@@ -1,4 +1,17 @@
-# Golden references
+# Design references
+
+## The hub — `index.html`
+
+`index.html` is the **one-page design-system hub**: open it in a browser for the color tokens
+(dark + light), the type scale, spacing/radii/motion, the actor model, and the widget vocabulary —
+all generated from the v3 token layer (`DESIGN.md` + `crates/deckard-app/src/tokens.rs`). It links out
+to the two golden-reference mockups below. No server, no build: `open designs/index.html`.
+
+The same three files are also pushed to a **claude.ai/design** project ("Deckard Design System") so the
+system is browsable there too — a hand-authored, viewable reference (Deckard has no React component
+library for the design agent to compose from). Re-push with the `/design-sync` skill.
+
+## Golden references
 
 These HTML files are the **pixel ground-truth** the Deckard UI is built against. `DESIGN.md` holds
 the rules; these hold the pixels. When the two disagree, the doc wins on rules and the reference wins
