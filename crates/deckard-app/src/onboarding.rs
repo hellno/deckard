@@ -71,7 +71,7 @@ impl Shell {
             _ => None,
         };
         let column = v_flex()
-            .w(px(460.0))
+            .w(crate::tokens::CONFIRM_W)
             .gap_6()
             .when_some(active_step, |c, step| {
                 c.child(self.auth_step_rail(step, cx))
@@ -96,12 +96,12 @@ impl Shell {
         let mut row = h_flex().w_full().items_center().gap_2();
         for (i, label) in labels.iter().enumerate() {
             if i > 0 {
-                row = row.child(div().text_size(px(12.0)).text_color(muted).child("·"));
+                row = row.child(div().text_xs().text_color(muted).child("·"));
             }
             let is_active = i == active;
             row = row.child(
                 div()
-                    .text_size(px(12.0))
+                    .text_xs()
                     .when(is_active, |d| d.font_weight(FontWeight::MEDIUM))
                     .text_color(if is_active { amber } else { muted })
                     .child(*label),
@@ -558,20 +558,21 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
-        // The locked scale (DESIGN §Typography): screen-title H1 22/600, body/subtitle 13/400 —
-        // not gpui's text_2xl (24) / text_sm (14), which ran a touch large.
+        // The locked scale (DESIGN §Typography): screen-title H1 = `.text_xl` (20, the size every
+        // other screen title uses), body/subtitle = `tokens::TEXT_BODY` (13). Onboarding was the
+        // lone 22px outlier; v3 aligns it with the rest.
         v_flex()
             .gap_2()
             .child(
                 div()
-                    .text_size(px(22.0))
+                    .text_xl()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.foreground)
                     .child(title.to_string()),
             )
             .child(
                 div()
-                    .text_size(px(13.0))
+                    .text_size(crate::tokens::TEXT_BODY)
                     .text_color(theme.muted_foreground)
                     .child(subtitle.to_string()),
             )

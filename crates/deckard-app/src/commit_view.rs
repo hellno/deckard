@@ -291,7 +291,7 @@ impl Shell {
             .child(crate::widgets::section_label(noun, muted))
             .child(
                 div()
-                    .text_size(px(40.0))
+                    .text_size(crate::tokens::TEXT_TX_HERO)
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(money(
                         gross,
@@ -529,7 +529,7 @@ impl Shell {
                 .min_w(px(24.0))
                 .h(px(24.0))
                 .px_1()
-                .rounded(px(6.0))
+                .rounded(crate::tokens::RADIUS_ROW)
                 .bg(base)
                 .border_1()
                 .border_color(keycap_color)
@@ -546,7 +546,7 @@ impl Shell {
             .id(view.hold_id)
             .w_full()
             .h(px(48.0))
-            .rounded(px(10.0))
+            .rounded(crate::tokens::RADIUS_MODAL)
             .border_1()
             .border_color(border)
             .bg(fill)
@@ -582,7 +582,12 @@ impl Shell {
             .items_center()
             .justify_center()
             .p_8()
-            .child(v_flex().w(px(460.0)).items_start().child(inner))
+            .child(
+                v_flex()
+                    .w(crate::tokens::CONFIRM_W)
+                    .items_start()
+                    .child(inner),
+            )
     }
 
     /// The commit heading: a neutral low-chroma glyph + H1 + muted subtitle. The glyph is
@@ -608,7 +613,7 @@ impl Shell {
             .child(
                 div()
                     .size(px(28.0))
-                    .rounded(px(6.0))
+                    .rounded(crate::tokens::RADIUS_ROW)
                     .bg(glyph_tone)
                     .flex_shrink_0(),
             )

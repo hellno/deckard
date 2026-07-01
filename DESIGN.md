@@ -250,7 +250,7 @@ but a screen asks for "danger," so a future palette change moves one token, not 
   | token | px | weight | use |
   |---|---|---|---|
   | `text-hero` | 64 | 500 | balance hero (wallet home) |
-  | `text-tx-hero` | 44 | 500 | **transaction hero** on every confirm — Send / Swap / Shield / Approve (one size; supersedes the old 40/32 split) |
+  | `text-tx-hero` | 44 | 500 | **transaction hero** — the oversized amount on a clear-signing confirm (Send / Shield / Approve). Was a 40px send hero |
   | `text-h1` | 20 | 600 | screen title |
   | `text-section` | 14 | 600 | section heading |
   | `text-body` | 13 | 400 | body / values |
@@ -259,7 +259,10 @@ but a screen asks for "danger," so a future palette change moves one token, not 
   The old spec gave ranges (hero 64-72, confirm 44, H1 20-22, label 10-11); v3 collapses each to one
   value so a screen carries a token, not a judgement call. The balance hero (`text-hero`, home) and
   the transaction hero (`text-tx-hero`, confirm) are the only two display sizes and are distinct on
-  purpose — a confirm is not the home.
+  purpose — a confirm is not the home. In code: `text-hero` / `text-tx-hero` / `text-body` /
+  `text-label` are `tokens::TEXT_*` consts (gpui has no utility at those sizes); `text-h1` and
+  `text-section` are gpui's `.text_xl` (20) and `.text_sm` (14), a compact 12px size is `.text_xs`,
+  and a swap **compose** amount (a step below the confirm hero) is `.text_3xl` (30).
 - **Leading:** `leading-tight` 1.15 (hero + headings) · `leading-normal` 1.4 (body + labels) ·
   `leading-mono` 1.0 (money / addresses / hashes — tabular figures set tight so columns align).
 - **Tracking:** `tracking-label` +0.07em is the **only** non-zero tracking (the tiny uppercase
@@ -276,9 +279,18 @@ but a screen asks for "danger," so a future palette change moves one token, not 
 ---
 
 ## Spacing, sizing, radii, motion — the token layer
-Everything here is a **named token**; a view carries the name and the crate's `tokens` module (see
-§Build notes) carries the `Pixels` / `Duration` const behind it. A raw `px(...)` in a view that
-duplicates a token below is a review failure — that is the enforceable half of "the 4px grid."
+Everything here is a **named value**, and a view carries the name — never a raw `px(...)` that
+duplicates one. Two naming vehicles, by design:
+- **gpui's own utilities** already name two of the scales, so they stay the idiom: **spacing** is
+  `.gap_N` / `.p_N` / `.m_N` (gpui's 4px grid — `N` units = `N×4`px), and the **h1 / section / small**
+  type steps are `.text_xl` (20) / `.text_sm` (14) / `.text_xs` (12).
+- **the `tokens` module** (`crates/deckard-app/src/tokens.rs`, see §Build notes) carries a
+  `Pixels` / `Duration` const for everything gpui can't name — the display type sizes, 13px body,
+  10px label, the exact radii, the object-size ladder, the chrome dimensions, and the arm-delay.
+
+A raw `text_size(px(..))` is always a review failure (the `no_raw_text_size_px` test fails the
+build); a raw `px(..)` elsewhere that duplicates a named value below is one too. Bespoke one-off
+layout dimensions with no token (a specific column width) stay a literal — they name nothing.
 
 ### Spacing (the 4px grid — governs gaps, padding, margins)
 `space-2` 2 · `space-4` 4 · `space-8` 8 · `space-12` 12 · `space-16` 16 · `space-20` 20 ·
@@ -338,7 +350,7 @@ row leads) · `icon-lg` 20 (page-header glyph).
 
 ### Motion
 `motion-fast` 120ms · `motion-base` 160ms · `motion-slow` 220ms; ease-out on enter, ease-in on exit.
-Two fixed timings beyond those: `arm-delay` 500ms (the confirm's inert window, formerly "400-600ms")
+Two fixed timings beyond those: `arm-delay` 450ms (the confirm's inert window, formerly "400-600ms")
 and `pulse` 1600ms (the one ambient motion — a slow breathing pulse on an agent **currently
 acting**, formerly "~1.6s"). No spinners, no skeleton confetti, no celebratory animation on money.
 
@@ -386,7 +398,7 @@ key-cap affordance** (like Linear/Raycast "Create ↵"), made spam-proof by tier
 - **Irreversible money moves** (Send, Swap, Shield, Approve an agent proposal, Revoke): the primary
   shows the **`⌘↵` chord** (a chord can't be fat-fingered like Enter). The key-caps render amber when
   armed.
-- **Arm-delay:** the confirm is inert for `arm-delay` (500ms) after the screen opens (key-caps
+- **Arm-delay:** the confirm is inert for `arm-delay` (450ms) after the screen opens (key-caps
   dimmed), so a queued or held keypress from the previous screen can't carry through and fire. A one-line note
   states this: "Press ⌘↵ to send. It arms a moment after this screen opens, so a stray keypress
   can't approve it."

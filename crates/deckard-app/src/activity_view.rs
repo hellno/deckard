@@ -390,7 +390,7 @@ impl Shell {
             // cluster (the STOP control, tx hashes, times) is never clipped off the edge.
             v_flex()
                 .w_full()
-                .max_w(px(760.0))
+                .max_w(crate::tokens::CONTENT_MAX_W)
                 .h_full()
                 .min_h_0()
                 .items_start()
@@ -462,7 +462,7 @@ impl Shell {
                 .flex_shrink_0()
                 .px_3()
                 .py_1p5()
-                .rounded(px(6.0))
+                .rounded(crate::tokens::RADIUS_ROW)
                 .border_1()
                 .border_color(danger)
                 .text_color(danger)
@@ -477,7 +477,7 @@ impl Shell {
                 .flex_shrink_0()
                 .px_3()
                 .py_1p5()
-                .rounded(px(6.0))
+                .rounded(crate::tokens::RADIUS_ROW)
                 .border_1()
                 .border_color(amber)
                 .text_color(amber)
@@ -514,7 +514,7 @@ impl Shell {
             .gap_2()
             .child(
                 div()
-                    .text_size(px(10.0))
+                    .text_size(crate::tokens::TEXT_LABEL)
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(amber)
                     .child(gpui::SharedString::from("NEEDS YOU")),
@@ -601,7 +601,7 @@ impl Shell {
         } else {
             div()
                 .size(px(20.0))
-                .rounded(px(6.0))
+                .rounded(crate::tokens::RADIUS_ROW)
                 .bg(theme::identity_square(is_dark))
                 .into_any_element()
         };
@@ -711,7 +711,7 @@ impl Shell {
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _, _, cx| this.review_activity_row(id, cx)));
             if selected {
-                row = row.bg(lift).rounded(px(6.0));
+                row = row.bg(lift).rounded(crate::tokens::RADIUS_ROW);
             }
         }
         row
@@ -1394,7 +1394,11 @@ fn kv_mono_row(
 
 /// One loading skeleton row (DESIGN §Required states — never a spinner).
 fn skeleton_row(raise: gpui::Hsla) -> impl IntoElement {
-    div().w_full().h(px(40.0)).rounded(px(6.0)).bg(raise)
+    div()
+        .w_full()
+        .h(px(40.0))
+        .rounded(crate::tokens::RADIUS_ROW)
+        .bg(raise)
 }
 
 /// The review card's heading block (H1 + muted subtitle).
@@ -1430,7 +1434,7 @@ fn activity_shell(inner: gpui::AnyElement) -> impl IntoElement {
         .child(
             v_flex()
                 .w_full()
-                .max_w(px(760.0))
+                .max_w(crate::tokens::CONTENT_MAX_W)
                 .items_start()
                 .child(inner),
         )

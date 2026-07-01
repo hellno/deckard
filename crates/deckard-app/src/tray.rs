@@ -22,10 +22,6 @@ use tray_icon::{
     Icon, TrayIcon, TrayIconBuilder,
 };
 
-/// The fixed brand color for the tray icon (locked amber, `#F2A43B`). The 6-accent
-/// picker is gone — there is one brand color.
-const BRAND: u32 = 0x00F2_A43B;
-
 /// Holds the live tray icon so it stays alive for the whole process. Stored as a
 /// GPUI global.
 struct TrayState {
@@ -104,8 +100,14 @@ fn hide_dock_icon() {}
 /// tints it to match the menu bar automatically.
 fn brand_icon() -> Icon {
     const SIZE: u32 = 32;
-    let hex = BRAND;
-    let (r, g, b) = ((hex >> 16) as u8, (hex >> 8) as u8, hex as u8);
+    // The one locked brand color IS the human/amber signal — derive it from
+    // `theme::amber` so the native tray icon can never drift from the app palette.
+    let c = crate::theme::amber(true).to_rgb();
+    let (r, g, b) = (
+        (c.r * 255.0).round() as u8,
+        (c.g * 255.0).round() as u8,
+        (c.b * 255.0).round() as u8,
+    );
     let mut rgba = vec![0u8; (SIZE * SIZE * 4) as usize];
     for y in 0..SIZE {
         for x in 0..SIZE {

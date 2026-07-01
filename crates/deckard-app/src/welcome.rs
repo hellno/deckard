@@ -402,7 +402,7 @@ impl Shell {
         let hero = div()
             .id("balance-hero")
             .cursor_pointer()
-            .text_size(px(64.0))
+            .text_size(crate::tokens::TEXT_HERO)
             .font_weight(FontWeight::SEMIBOLD)
             .map(|el| match total {
                 Some(wei) => el.child(money(
@@ -865,7 +865,7 @@ fn render_row(
                         .size(px(34.0))
                         // DESIGN §Radii: a desaturated token SQUARE (6px), not a
                         // round identicon (round is reserved for the human principal).
-                        .rounded(px(6.0))
+                        .rounded(crate::tokens::RADIUS_ROW)
                         .bg(mark_bg)
                         .flex()
                         .items_center()

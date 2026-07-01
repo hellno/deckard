@@ -45,7 +45,7 @@ const BALANCE_POLL_SECS: u64 = 20;
 /// The confirm arm-delay: a clear-signing review must be on screen this long before ⌘↵ / a
 /// click can confirm, so a keypress or click carried over from the previous screen can't approve
 /// a money move (DESIGN §confirm pattern). The ⌘↵ chord plus this delay replace the old hold.
-const COMMIT_ARM_DELAY: Duration = Duration::from_millis(450);
+const COMMIT_ARM_DELAY: Duration = crate::tokens::ARM_DELAY;
 
 /// How long the recovery phrase stays visible on a single hold-to-reveal before it auto-hides
 /// (DESIGN §Seed reveal: "auto-hides after a few seconds"). A defence against walking away with

@@ -195,7 +195,7 @@ impl Shell {
                     deckard_core::DEFAULT_SLIPPAGE_BPS,
                 );
                 div()
-                    .text_size(px(32.0))
+                    .text_3xl()
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(money(
                         min_receive,
@@ -212,7 +212,7 @@ impl Shell {
             .unwrap_or_else(|| {
                 div()
                     .font_family(mono.clone())
-                    .text_size(px(32.0))
+                    .text_3xl()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(muted)
                     .child("—")
@@ -722,7 +722,7 @@ impl Shell {
 fn token_swatch(tone: Hsla) -> impl IntoElement {
     div()
         .size(px(16.0))
-        .rounded(px(4.0))
+        .rounded(crate::tokens::RADIUS_INPUT)
         .bg(tone)
         .flex_shrink_0()
 }
