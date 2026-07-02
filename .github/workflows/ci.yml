@@ -36,6 +36,10 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # One-shot CI never rebuilds, so incremental artifacts are pure disk cost. Off keeps the Linux
+  # `target/` dir from outgrowing the freed disk across the workspace build + tray build + tests +
+  # three clippy passes (the linux job kept OOMing the runner on "No space left on device").
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   # Fail-fast gate: formatting is OS-independent, so check it once, fast, before the heavy builds.
@@ -55,13 +59,17 @@ jobs:
       - uses: actions/checkout@v4
       # The dep tree (gpui + Helios/revm/bls + the Railgun ZK tree) overflows the stock ubuntu
       # runner's ~14 GB and OOMs the build / cache-save — and the rust-cache RESTORE below extracts a
-      # multi-GB target dir that can itself exhaust the disk before anything builds. Reclaim ~20 GB of
+      # multi-GB target dir that can itself exhaust the disk before anything builds. Reclaim ~30 GB of
       # preinstalled toolchains we never use FIRST, before the cache restore, so neither the restore
-      # nor the build runs out of space. (macOS runners have the headroom, so this is Linux-only.)
+      # nor the build runs out of space. This job uses rustup + Foundry, NOT any hosted-toolcache
+      # runtime (python/node/go), so the whole cache is dead weight here. (macOS has the headroom, so
+      # this is Linux-only.) Paired with CARGO_INCREMENTAL=0 above, which caps target/ growth.
       - name: Free up disk space
         run: |
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
-            /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
+            /opt/hostedtoolcache /usr/local/share/boost \
+            /usr/local/lib/node_modules /usr/local/share/powershell \
+            /usr/local/share/chromium /usr/lib/google-cloud-sdk || true
           sudo docker image prune --all --force >/dev/null 2>&1 || true
           df -h /
       - uses: Swatinem/rust-cache@v2
