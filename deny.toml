@@ -59,19 +59,17 @@ ignore = [
     { id = "RUSTSEC-2024-0418", reason = "gtk-rs GTK3 binding unmaintained; optional `tray` feature only (libappindicator→gtk3), no GTK4 tray path yet" },
     { id = "RUSTSEC-2024-0419", reason = "gtk-rs GTK3 binding unmaintained; optional `tray` feature only (libappindicator→gtk3), no GTK4 tray path yet" },
     { id = "RUSTSEC-2024-0420", reason = "gtk-rs GTK3 binding unmaintained; optional `tray` feature only (libappindicator→gtk3), no GTK4 tray path yet" },
-    # ── quick-xml 0.39.4 — two DoS advisories in the D-Bus introspection-XML parser. LINUX-ONLY and
-    #    transitive: the only active consumer is gpui's Linux AT-SPI accessibility stack
-    #    (gpui_linux → accesskit_unix → atspi → zbus-lockstep → zbus_xml → quick-xml); it does not
-    #    compile into the shipped macOS binary (`cargo tree` on the mac host resolves 0 copies).
-    #    Liveness (CPU / memory exhaustion), not a custody or confidentiality risk. No in-tree fix
-    #    YET: the latest PUBLISHED `zbus_xml` (5.1.1) pins `quick-xml ^0.39`, so the fixed `>=0.41.0`
-    #    is unselectable. The upgrade is already MERGED on z-galaxy/zbus main (commit c38bb96,
-    #    2026-06-29) but UNRELEASED. Real trigger is a new `zbus_xml` RELEASE — NOT a gpui bump:
-    #    every consumer here accepts `zbus_xml ^5.0.2`, so once a 5.x carrying quick-xml 0.41 ships,
-    #    `cargo update -p zbus_xml` cascades quick-xml → 0.41.0 and these two entries drop (no gpui
-    #    bump). Caveat: a `zbus_xml` 6.0 instead would widen the fix to zbus-lockstep/atspi/accesskit.
-    { id = "RUSTSEC-2026-0194", reason = "quick-xml quadratic duplicate-attribute-name DoS; Linux-only, transitive via gpui AT-SPI (not in the macOS binary); liveness-only; drop when a zbus_xml 5.x release carries quick-xml 0.41 (fix merged on z-galaxy/zbus main, unreleased) → cargo update -p zbus_xml" },
-    { id = "RUSTSEC-2026-0195", reason = "quick-xml unbounded namespace-declaration allocation memory-exhaustion DoS; Linux-only, transitive via gpui AT-SPI (not in the macOS binary); liveness-only; drop when a zbus_xml 5.x release carries quick-xml 0.41 (fix merged on z-galaxy/zbus main, unreleased) → cargo update -p zbus_xml" },
+    # ── quick-xml — two liveness-only DoS advisories (0194 quadratic dup-attr, 0195 unbounded
+    #    namespace alloc), Linux-only. The advisories have no lower bound, so BOTH sub-0.41 copies in
+    #    the tree match (cargo-deny collapses the report to one node): 0.39.4 (runtime, gpui Linux
+    #    AT-SPI: gpui_linux → accesskit_unix → atspi → zbus_xml; not in the macOS binary) and 0.30.0
+    #    (build-dep of xcb 1.7.0 parsing its trusted X11 protocol XML; no runtime surface, and no
+    #    released xcb uses quick-xml >=0.41). The 0.39.4 half clears when a new zbus_xml 5.x ships on
+    #    quick-xml 0.41 (merged on z-galaxy/zbus main c38bb96, unreleased; release nudge is
+    #    z-galaxy/zbus#1837): then `cargo update -p zbus_xml` (no gpui bump) and NARROW these two to
+    #    xcb's 0.30.0 build-dep — do not delete them.
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml quadratic dup-attribute-name DoS; Linux-only, liveness-only; two sources — zbus_xml 0.39.4 (gpui AT-SPI runtime; clears on a zbus_xml 5.x carrying quick-xml 0.41) + xcb 1.7.0's 0.30.0 build-dep (trusted X11 protocol XML, no upstream fix)" },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml unbounded namespace-declaration allocation DoS; Linux-only, liveness-only; two sources — zbus_xml 0.39.4 (gpui AT-SPI runtime; clears on a zbus_xml 5.x carrying quick-xml 0.41) + xcb 1.7.0's 0.30.0 build-dep (trusted X11 protocol XML, no upstream fix)" },
 ]
 
 [licenses]
