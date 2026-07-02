@@ -1,0 +1,663 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Deckard — v4 IA (golden reference)</title>
+<link href="https://api.fontshare.com/v2/css?f[]=general-sans@400,500,600&display=swap" rel="stylesheet" />
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+/* ===== tokens — copied verbatim from deckard-editorial-v3.html / deckard-agent-v4.html ===== */
+:root{--sans:"General Sans",-apple-system,sans-serif;--mono:"JetBrains Mono",ui-monospace,monospace;}
+html[data-theme="dark"]{
+  --bg-base:#0A0B0D;--bg-rail:#0B0C0F;--bg-raise:#121419;--bg-raise2:#161922;--bg-hover:#14161B;
+  --hairline:#1B1E25;--border-strong:#262A33;--text-primary:#E7E9EC;--text-secondary:#9298A2;--text-muted:#646A73;
+  --amber:#F2A43B;--amber-tint:rgba(242,164,59,.14);--cyan:#3CC9BC;--cyan-tint:rgba(60,201,188,.12);
+  --success:#4FB463;--error:#E5565B;--id-slate:#3A4250;--shield:#33424C;}
+html[data-theme="light"]{
+  --bg-base:#F6F5F1;--bg-rail:#EEEDE6;--bg-raise:#FFFFFF;--bg-raise2:#FFFFFF;--bg-hover:#ECEBE4;
+  --hairline:#DDDBD2;--border-strong:#CFCCC2;--text-primary:#17191E;--text-secondary:#52585F;--text-muted:#6B7280;
+  --amber:#A8650C;--amber-tint:rgba(168,101,12,.12);--cyan:#0C7E75;--cyan-tint:rgba(12,126,117,.10);
+  --success:#2F8F47;--error:#C23B40;--id-slate:#A7AEBA;--shield:#94A2AC;}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#000;font-family:var(--sans);color:var(--text-primary);-webkit-font-smoothing:antialiased;padding:24px}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+
+/* ===== control bar (matches the golden files) ===== */
+.controls{max-width:1180px;margin:0 auto 14px;display:flex;gap:8px;align-items:center;color:#9298A2;font-size:13px}
+.seg{display:flex;background:#121419;border:1px solid #262A33;border-radius:8px;overflow:hidden}
+.seg button{font-family:inherit;font-size:12px;color:#9298A2;background:transparent;border:0;padding:7px 13px;cursor:pointer}
+.seg button.on{background:#1B1E25;color:#E7E9EC}
+.controls .spacer{flex:1}.controls .note{font-size:12px;color:#5b606a}
+
+/* ===== app frame — three-pane body grid (rail is ALWAYS on) ===== */
+.app{max-width:1180px;height:820px;margin:0 auto;background:var(--bg-base);border:1px solid var(--hairline);
+  border-radius:11px;overflow:hidden;display:grid;grid-template-rows:38px 1fr 30px;box-shadow:0 24px 80px -24px rgba(0,0,0,.7)}
+.titlebar{background:var(--bg-rail);display:flex;align-items:center;gap:8px;padding:0 14px;border-bottom:1px solid var(--hairline)}
+.tl{width:11px;height:11px;border-radius:50%}.tl.r{background:#E55C57}.tl.y{background:#E5A93D}.tl.g{background:#5BC25A}
+.titlebar .name{margin-left:8px;font-size:12.5px;color:var(--text-secondary);font-weight:500}
+/* three-pane: sidebar · main · always-present metadata rail */
+.body{display:grid;grid-template-columns:236px 1fr 300px;min-height:0}
+.statusstrip{background:var(--bg-rail);border-top:1px solid var(--hairline);display:flex;align-items:center;gap:14px;padding:0 16px;font-size:11.5px;color:var(--text-muted)}
+.statusstrip .v{color:var(--success);font-weight:500}.statusstrip .right{margin-left:auto}
+.ic{width:13px;height:13px;display:inline-block;vertical-align:-2px}
+
+/* ===== sidebar (verbatim) ===== */
+.rail{background:var(--bg-rail);border-right:1px solid var(--hairline);display:flex;flex-direction:column;min-height:0;padding:10px 0}
+.rail .scroll{flex:1;overflow:auto;padding:0 8px}
+.grouplabel{font-size:10px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted);padding:14px 8px 6px}
+.grouplabel.first{padding-top:6px}
+.navrow{display:flex;align-items:center;gap:9px;padding:6px 8px;border-radius:7px;color:var(--text-secondary);font-size:13px;cursor:pointer}
+.navrow:hover{background:var(--bg-hover)}.navrow.sel{background:var(--bg-raise);color:var(--text-primary)}
+.navrow .nm{font-weight:500;color:var(--text-primary)}.navrow .bal{margin-left:auto;color:var(--text-muted);font-size:12px;font-family:var(--mono)}
+.navrow .spend{margin-left:auto;color:var(--text-muted);font-size:11.5px;font-family:var(--mono)}
+.navrow .dom{color:var(--text-secondary);font-size:12.5px}
+.mark{width:18px;height:18px;border-radius:5px;flex:none;display:grid;place-items:center;font-size:10px;font-weight:600;color:#fff}
+.mark.round{border-radius:50%}
+.squircle{width:18px;height:18px;border-radius:6px;flex:none;display:grid;place-items:center;font-size:10px;font-weight:600;
+  background:var(--cyan-tint);color:var(--cyan);border:1px solid color-mix(in srgb,var(--cyan) 40%,transparent)}
+@keyframes breathe{0%,100%{opacity:.4}50%{opacity:1}}
+.statusdot{width:6px;height:6px;border-radius:50%;margin-left:7px;flex:none;background:var(--cyan);animation:breathe 1.6s ease-in-out infinite}
+.footrow{margin-top:auto;padding:0 8px}
+.badge{margin-left:auto;min-width:18px;height:18px;padding:0 5px;border-radius:6px;background:var(--bg-raise2);border:1px solid var(--hairline);display:grid;place-items:center;font-size:10.5px;color:var(--text-secondary)}
+.badge.amberbadge{background:var(--amber-tint);border-color:color-mix(in srgb,var(--amber) 40%,transparent);color:var(--amber)}
+/* dapp connection favicon square + neutral-identity trust dot (borrows STATE colors, never a signal hue) */
+.favi{width:18px;height:18px;border-radius:5px;flex:none;display:grid;place-items:center;font-size:9px;font-weight:600;color:#fff;background:var(--id-slate)}
+.trustdot{width:6px;height:6px;border-radius:50%;margin-left:auto;flex:none}
+.trustdot.ok{background:var(--success)}.trustdot.warn{background:var(--amber)}.trustdot.bad{background:var(--error)}
+
+/* ===== main shell (verbatim) ===== */
+.main{display:flex;flex-direction:column;min-width:0;min-height:0}
+.breadcrumb{height:48px;flex:none;display:flex;align-items:center;gap:9px;padding:0 22px;border-bottom:1px solid var(--hairline)}
+.crumb{font-size:13px;color:var(--text-secondary)}.crumb .sep{color:var(--text-muted);margin:0 4px}.crumb .cur{color:var(--text-primary);font-weight:500}
+.bc-right{margin-left:auto;display:flex;align-items:center;gap:10px}
+.pill{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 9px;border-radius:7px;border:1px solid var(--border-strong);font-size:12px;color:var(--text-secondary)}
+.kbd{height:26px;min-width:26px;padding:0 8px;border-radius:7px;border:1px solid var(--border-strong);display:inline-grid;place-items:center;font-family:var(--mono);font-size:11px;color:var(--text-muted)}
+.viewscroll{flex:1;overflow:auto;min-height:0}
+.view{display:none;padding:30px 40px 30px;max-width:760px}.view.on{display:block}
+/* activity / rail-focus carry dense origin-attributed rows on one line — give them room */
+.view[data-view="activity"],.view[data-view="rail"]{max-width:820px}
+
+/* ===== editorial atoms (verbatim from v3) ===== */
+.pagehead{display:flex;align-items:flex-start;gap:13px}
+.pagehead .mark{width:30px;height:30px;border-radius:7px;font-size:13px}
+.pagehead h1{font-size:20px;font-weight:600;letter-spacing:-.01em}
+.pagehead .sub{font-size:12.5px;color:var(--text-muted);margin-top:3px;font-family:var(--mono)}
+.seclabel{font-size:10px;font-weight:500;letter-spacing:.1em;text-transform:uppercase;color:var(--text-muted)}
+.amt{font-family:var(--mono);font-variant-numeric:tabular-nums;font-weight:600;letter-spacing:-.02em}
+.amt .int{color:var(--text-primary)}.amt .dec,.amt .tick{color:var(--text-muted)}
+.rule{height:1px;background:var(--hairline)}
+.btn{height:34px;padding:0 16px;border-radius:7px;font-size:13px;font-weight:500;border:1px solid transparent;display:inline-flex;align-items:center;gap:7px;cursor:pointer;background:transparent}
+.btn.primary{background:var(--bg-raise2);color:var(--text-primary);font-weight:600;border-color:var(--hairline)}
+.btn.ghost{color:var(--text-secondary);border-color:var(--border-strong)}
+.btn.ghost.dis{color:var(--text-muted);border-color:var(--hairline)}
+.btn.danger{color:var(--error);border-color:color-mix(in srgb,var(--error) 45%,transparent)}
+.vsep{width:1px;height:20px;background:var(--hairline);margin:0 4px;align-self:center}
+
+/* hero — editorial, oversized (verbatim), meta line reuses .hero .meta */
+.hero{margin:28px 0 2px}
+.hero .amt{font-size:68px;line-height:.92}
+.hero .amt .tick{font-size:28px;letter-spacing:0;margin-left:6px}
+.hero .meta{font-size:13px;color:var(--text-secondary);margin-top:16px}
+.hero .meta .v{color:var(--success)}
+.alloc{height:6px;border-radius:3px;background:var(--bg-raise);display:flex;overflow:hidden;margin:26px 0 10px;max-width:400px}
+.alloc i{display:block;height:100%}
+.legend{display:flex;gap:20px;font-size:12px;color:var(--text-secondary)}
+.legend .sw{width:8px;height:8px;border-radius:2px;display:inline-block;margin-right:6px}.legend .mono{color:var(--text-muted)}
+.actions{display:flex;align-items:center;gap:10px;margin:26px 0 0}
+
+/* identity masthead — new structure, uses existing type scale (h1/section weight) + existing mark */
+.masthead{display:flex;align-items:center;gap:15px;margin-top:2px}
+.masthead .mark{width:34px;height:34px;border-radius:9px;font-size:15px}
+.masthead .name{font-size:28px;font-weight:600;letter-spacing:-.02em;color:var(--text-primary)}
+.masthead .addr{font-size:12.5px;color:var(--text-muted);font-family:var(--mono);margin-top:2px}
+
+/* holdings ledger (verbatim) + a real $ Value column reuses .lrow structure */
+.ledgerlabel{margin:34px 0 10px}
+.lrow{display:flex;align-items:center;gap:12px;padding:14px 2px;border-bottom:1px solid var(--hairline)}
+.lrow:hover{background:var(--bg-hover)}
+.lrow .tok{width:26px;height:26px;border-radius:6px;flex:none;display:grid;place-items:center;font-size:10px;font-weight:600;background:var(--bg-raise);color:var(--text-secondary)}
+.lrow .nm{font-weight:500;font-size:14px}.lrow .tk{font-size:11.5px;color:var(--text-muted);margin-top:1px}
+.lrow .col{margin-left:auto;text-align:right;min-width:96px}.lrow .val{font-family:var(--mono);font-size:13px}.lrow .val .dec{color:var(--text-muted)}
+/* the name wrapper absorbs slack so the three right-hand columns pack against a common right edge each row */
+.lrow .nmwrap{flex:1;min-width:0}
+/* decimal-point alignment: fixed-width columns give every row the same right edge; the dec left-aligns from a fixed min-width so every "." sits on one vertical line */
+.lrow .col.balcol{margin-left:0;width:120px;min-width:120px}
+.lrow .col.valcol{width:120px;min-width:120px}
+.lrow .col .val .dec{display:inline-block;text-align:left}
+.lrow .col.balcol .val .dec{min-width:5ch}   /* fits .9799 */
+.lrow .col.valcol .val .dec{min-width:3ch}    /* fits .55  */
+.lrow .delta{font-size:11.5px;font-family:var(--mono);min-width:60px;text-align:right}
+.lrow .delta.up{color:color-mix(in srgb,var(--success) 78%,var(--text-muted))}.lrow .delta.down{color:color-mix(in srgb,var(--error) 78%,var(--text-muted))}
+/* the $ Value column is right-aligned mono — an extra .col; ledger header row reuses seclabel scale */
+.lhead{display:flex;align-items:center;gap:12px;padding:0 2px 8px;border-bottom:1px solid var(--hairline)}
+.lhead .h{font-size:10px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted)}
+.lhead .col{margin-left:auto;text-align:right;min-width:96px}.lhead .col.d{min-width:60px}
+
+/* ===== "Waiting on you" home strip — one line, quiet when idle / amber + Review link when pending ===== */
+.waitstrip{display:flex;align-items:center;gap:9px;margin:24px 0 2px;padding:12px 2px;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline);font-size:12.5px;color:var(--text-muted)}
+.waitstrip .dot{width:6px;height:6px;border-radius:50%;background:var(--success);flex:none}
+.waitstrip .v{color:var(--text-secondary)}
+.waitstrip.pending{border-top-color:color-mix(in srgb,var(--amber) 45%,transparent);border-bottom-color:color-mix(in srgb,var(--amber) 45%,transparent);color:var(--amber)}
+.waitstrip.pending .dot{background:var(--amber)}
+.waitstrip.pending .lead{color:var(--amber);font-weight:600}
+.waitstrip .reviewlink{margin-left:auto;display:inline-flex;align-items:center;gap:5px;color:var(--amber);font-size:12.5px;font-weight:500;cursor:pointer}
+
+/* ===== NEEDS YOU queue (lives in Activity) — scannable column rows, identity-first, tags not prose ===== */
+.needsyou{margin:2px 0 8px;padding:14px 0 4px;border-top:1px solid color-mix(in srgb,var(--amber) 45%,transparent)}
+.needshead{display:flex;align-items:center;gap:8px;margin:0 0 8px}
+.needshead .lbl{font-size:10px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;color:var(--amber)}
+.needshead .cnt{min-width:18px;height:18px;padding:0 5px;border-radius:6px;background:var(--amber-tint);border:1px solid color-mix(in srgb,var(--amber) 40%,transparent);display:grid;place-items:center;font-size:10.5px;color:var(--amber);font-weight:600}
+.needshead .hint{margin-left:auto;font-size:11.5px;color:var(--text-muted)}
+/* row: [mark] [origin] [ACTION tag] [amount] [→ dest] ··· [warn tag] [keys] [countdown] */
+.preq{display:flex;align-items:center;gap:10px;padding:12px 2px;border-bottom:1px solid var(--hairline)}
+.preq:hover{background:var(--bg-hover)}.preq.sel{background:var(--bg-hover);border-radius:8px}
+.preq .who{flex:none;display:flex;align-items:center}
+.preq .origin{font-size:13px;font-weight:500;color:var(--text-primary);white-space:nowrap;flex:none;min-width:104px}
+.preq .origin.agent{color:var(--cyan)}
+.preq .amt{font-family:var(--mono);font-variant-numeric:tabular-nums;font-weight:500;font-size:13px;white-space:nowrap;flex:none}
+.preq .dest{font-size:12.5px;color:var(--text-secondary);white-space:nowrap;flex:none;display:inline-flex;align-items:center;gap:6px}
+.preq .dest .arrow{color:var(--text-muted)}
+.preq .spacer{flex:1;min-width:6px}
+.preq .keys{display:inline-flex;align-items:center;gap:4px;flex:none}
+.preq .cd{font-size:11.5px;font-family:var(--mono);color:var(--text-muted);width:32px;text-align:right;flex:none;margin-left:2px}
+/* action tag — small uppercase chip from existing surfaces (no new color) */
+.tag{height:19px;padding:0 7px;border-radius:5px;background:var(--bg-raise);border:1px solid var(--hairline);display:inline-flex;align-items:center;font-size:10px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--text-secondary);flex:none}
+/* warning tag — amber pill (borrows the amber STATE color) */
+.wtag{height:19px;padding:0 7px;border-radius:5px;background:var(--amber-tint);border:1px solid color-mix(in srgb,var(--amber) 40%,transparent);display:inline-flex;align-items:center;font-size:10.5px;font-weight:500;color:var(--amber);flex:none}
+
+/* ===== activity log — scannable column rows: [mark] [origin] [ACTION tag] [amount] [→ dest] ··· [hash] [glyph] [time] ===== */
+.acthead{display:flex;align-items:center;margin-bottom:12px}
+.acthead .lbl{font-size:10px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted)}
+/* the kill-switch: shown only when an agent is actually running */
+.killswitch{margin-left:auto;height:30px;padding:0 13px;border-radius:7px;background:var(--amber-tint);border:1px solid color-mix(in srgb,var(--amber) 50%,transparent);color:var(--amber);font-weight:600;font-size:12px;display:inline-flex;align-items:center;gap:7px;cursor:pointer}
+.killswitch:hover{border-color:color-mix(in srgb,var(--amber) 70%,transparent)}
+.killswitch .ic{color:var(--amber)}
+.killswitch.idle{background:transparent;border-color:var(--hairline);color:var(--text-muted);cursor:default}
+.killswitch.idle .ic{color:var(--text-muted)}
+.dayband{font-size:10px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted);margin:20px 0 2px}
+.feedrow{display:flex;flex-wrap:nowrap;align-items:center;gap:10px;padding:12px 2px;border-bottom:1px solid var(--hairline);min-width:0}
+.feedrow:hover{background:var(--bg-hover)}
+.feedrow .who{display:flex;align-items:center;flex:none}
+.feedrow .origin{font-size:13px;font-weight:500;color:var(--text-primary);white-space:nowrap;flex:none;min-width:104px}
+.feedrow .origin.agent{color:var(--cyan)}.feedrow .origin.you{color:var(--amber)}
+.feedrow .amt{font-family:var(--mono);font-variant-numeric:tabular-nums;font-weight:500;font-size:13px;white-space:nowrap;flex:none}
+.feedrow .dest{font-size:12.5px;color:var(--text-secondary);white-space:nowrap;flex:none;display:inline-flex;align-items:center;gap:6px}
+.feedrow .dest .arrow{color:var(--text-muted)}
+.feedrow .sub{font-size:11.5px;color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1;margin-left:4px}
+.feedrow .frail{margin-left:auto;display:flex;flex-direction:row;flex-wrap:nowrap;white-space:nowrap;align-items:center;gap:10px;flex:none}
+.feedrow .frail .hash{color:var(--text-muted);font-size:11.5px;font-family:var(--mono);cursor:pointer}
+.feedrow .frail .hash:hover{color:var(--text-secondary)}
+.feedrow .frail .ago{color:var(--text-muted);font-size:11.5px;width:30px;text-align:right}
+.gly{width:16px;height:16px;flex:none}.gly.ok{color:var(--success)}.gly.bad{color:var(--error)}.gly.wait{color:var(--amber)}
+.gly.live{color:var(--cyan)}
+
+/* ===== the ONE shared Review — transaction as hero (verbatim from agent-v4) ===== */
+.confirmview{max-width:480px}
+.confirmview .ctx{font-size:13px;color:var(--text-muted);margin-bottom:24px}
+.txlabel{font-size:10px;font-weight:500;letter-spacing:.1em;text-transform:uppercase;color:var(--text-muted);margin-bottom:8px}
+.txhero{font-family:var(--mono);font-variant-numeric:tabular-nums;font-weight:600;font-size:44px;line-height:1;letter-spacing:-.02em}
+.txhero .int{color:var(--text-primary)}.txhero .dec,.txhero .tick{color:var(--text-muted)}.txhero .tick{font-size:22px;margin-left:5px}
+.txhero .arrow{color:var(--text-muted);margin:0 12px;font-weight:400}
+.txusd{font-size:13px;color:var(--text-muted);font-family:var(--mono);margin-top:10px}
+.txto{display:flex;align-items:center;gap:12px;margin-top:8px}
+.txto .idi{width:32px;height:32px;border-radius:8px;flex:none;display:grid;place-items:center;font-size:13px;font-weight:600;color:#fff;background:#6A5E45}
+.txto .ens{font-size:16px;font-weight:600;color:var(--text-primary)}
+.txto .addr{font-size:12.5px;color:var(--text-muted);font-family:var(--mono);margin-top:2px}
+.warns{margin:24px 0 0}
+.danger-line{display:flex;gap:9px;align-items:flex-start;color:var(--error);font-size:13.5px;font-weight:500;line-height:1.4}
+.danger-line .ic{color:var(--error);margin-top:1px;flex:none}
+.caution-line{display:flex;gap:9px;align-items:flex-start;color:var(--text-secondary);font-size:12.5px;line-height:1.45;margin-top:10px}
+.caution-line .ic{color:var(--amber);margin-top:1px;flex:none}
+.quiet{margin:22px 0;padding:16px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline);display:grid;grid-template-columns:1fr auto;gap:11px 16px;font-size:12.5px}
+.quiet .k{color:var(--text-muted)}.quiet .v{text-align:right;font-family:var(--mono);color:var(--text-secondary)}
+.quiet .v.auth{color:var(--text-secondary)}.quiet .v.auth .cap{color:var(--success)}
+.quiet .v.san{font-family:var(--sans)}
+.quiet .v.ok{color:var(--success)}
+.quiet .v .link{color:var(--text-secondary);font-family:var(--sans);cursor:pointer;text-decoration:underline;text-decoration-color:var(--text-muted);text-underline-offset:2px}
+.confirm{margin-top:4px;height:48px;width:100%;padding:0 16px 0 18px;border-radius:10px;background:var(--bg-raise2);
+  border:1px solid color-mix(in srgb,var(--amber) 55%,transparent);display:flex;align-items:center;gap:12px;cursor:pointer;font-weight:600;font-size:14px}
+.confirm .keys{margin-left:auto;display:inline-flex;align-items:center;gap:4px}
+.editlink{display:inline-block;margin-top:14px;color:var(--text-secondary);font-size:13px;cursor:pointer}
+
+/* ===== keycap — ONE quiet, flat kbd component (Review confirm, activity/needs-you rows, rail approve) ===== */
+.keycap,.tinykbd{display:inline-flex;align-items:center;justify-content:center;height:19px;min-width:19px;padding:0 5px;border-radius:5px;
+  border:1px solid var(--border-strong);background:var(--bg-base);font-family:var(--mono);font-size:11px;line-height:1;color:var(--text-secondary);vertical-align:middle}
+/* armed (on the confirm button): amber border + amber text, no fill */
+.confirm .keycap{border-color:color-mix(in srgb,var(--amber) 55%,transparent);color:var(--amber)}
+
+/* request-origin header rail on the shared Review — neutral favicon + domain only (no site-reputation feature) */
+.originrail{display:flex;align-items:center;gap:11px;padding:0 0 18px;margin-bottom:6px;border-bottom:1px solid var(--hairline)}
+.originrail .favi{width:26px;height:26px;border-radius:7px;font-size:11px}
+.originrail .squircle{width:26px;height:26px;border-radius:7px;font-size:12px}
+.originrail .idi{width:26px;height:26px;border-radius:7px;flex:none;display:grid;place-items:center;font-size:12px;font-weight:600;color:#fff;background:#6A5E45}
+.originrail .who{font-size:14px;font-weight:600;color:var(--text-primary)}
+.originrail .who .dim{color:var(--text-secondary);font-weight:500}
+.originrail .who.agent{color:var(--cyan)}.originrail .who.you{color:var(--amber)}
+.originrail .oke{margin-left:auto;display:flex;align-items:center;gap:8px;color:var(--text-muted)}
+
+/* Rabby-style balance-diff — kept ONLY for the read-only receipt where it adds net info; hairline rows, no card */
+.diff{margin:20px 0 4px}
+.diff .difflabel{margin-bottom:8px}
+.diffrow{display:flex;align-items:center;gap:12px;padding:13px 2px;border-top:1px solid var(--hairline)}
+.diffrow:last-child{border-bottom:1px solid var(--hairline)}
+.diffrow .tk{width:24px;height:24px;border-radius:6px;flex:none;display:grid;place-items:center;font-size:9px;font-weight:600;background:var(--bg-raise);color:var(--text-secondary)}
+.diffrow .k{font-size:13px;color:var(--text-secondary)}
+.diffrow .amt{margin-left:auto;font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:15px;font-weight:600}
+.diffrow .amt.pay{color:var(--error)}.diffrow .amt.recv{color:var(--success)}
+.diffrow .amt .sym{opacity:.85}
+
+/* ===== right metadata rail (always on) ===== */
+.metarail{background:var(--bg-rail);border-left:1px solid var(--hairline);display:flex;flex-direction:column;min-height:0;min-width:0;overflow:hidden}
+.metahead{height:48px;flex:none;display:flex;align-items:center;gap:9px;padding:0 16px;border-bottom:1px solid var(--hairline)}
+.metahead .t{font-size:12.5px;font-weight:600;color:var(--text-primary)}
+.metabody{flex:1;overflow:auto;padding:18px 16px}
+.metabody .seclabel{margin-bottom:12px}
+.metaobj{display:flex;align-items:center;gap:11px;margin-bottom:16px}
+.metaobj .mark{width:28px;height:28px;border-radius:8px;font-size:12px}
+.metaobj .idi{width:28px;height:28px;border-radius:8px;flex:none;display:grid;place-items:center;font-size:12px;font-weight:600;color:#fff;background:#6A5E45}
+.metaobj .nm{font-size:14px;font-weight:600}
+.metaobj .sub{font-size:11.5px;color:var(--text-muted);font-family:var(--mono);margin-top:2px}
+.metakv{display:grid;grid-template-columns:1fr auto;gap:11px 14px;font-size:12.5px;margin:2px 0 4px}
+.metakv .k{color:var(--text-muted)}.metakv .v{text-align:right;font-family:var(--mono);color:var(--text-secondary)}
+.metakv .v.ok{color:var(--success)}.metakv .v.san{font-family:var(--sans)}
+.metakv .v .link{cursor:pointer;text-decoration:underline;text-decoration-color:var(--text-muted);text-underline-offset:2px}
+.metasec{margin-top:20px;padding-top:16px;border-top:1px solid var(--hairline)}
+.metaline{font-size:12.5px;color:var(--text-secondary);display:flex;align-items:center;gap:8px;padding:5px 0}
+.metaline .ic{color:var(--text-muted)}
+.metabtn{margin-top:16px;height:32px;width:100%;border-radius:7px;border:1px solid var(--border-strong);background:transparent;color:var(--text-secondary);font-size:12.5px;font-weight:500;display:inline-flex;align-items:center;justify-content:center;gap:7px;cursor:pointer}
+.metabtn:hover{background:var(--bg-hover)}
+
+/* compact clear-signing inside the rail (Rail focus) — reuses the diff/quiet vocabulary at small size */
+.railsign .txlabel{margin-top:4px}
+.railsign .txmini{font-family:var(--mono);font-variant-numeric:tabular-nums;font-weight:600;font-size:22px;letter-spacing:-.02em;margin:2px 0 2px}
+.railsign .txmini .int{color:var(--text-primary)}.railsign .txmini .dec,.railsign .txmini .tick{color:var(--text-muted)}.railsign .txmini .arrow{color:var(--text-muted);margin:0 7px}
+.railsign .danger-line{font-size:12px;margin-top:14px}
+.railsign .railkeys{display:flex;align-items:center;gap:8px;margin-top:18px}
+.railsign .railkeys .approve{flex:1;height:36px;border-radius:8px;background:var(--bg-raise2);border:1px solid color-mix(in srgb,var(--amber) 55%,transparent);color:var(--text-primary);font-weight:600;font-size:12.5px;display:flex;align-items:center;gap:8px;padding:0 12px;cursor:pointer}
+.railsign .railkeys .approve .keycap{margin-left:auto;border-color:color-mix(in srgb,var(--amber) 55%,transparent);color:var(--amber)}
+.railsign .railkeys .deny{height:36px;padding:0 12px;border-radius:8px;border:1px solid var(--border-strong);color:var(--text-muted);font-size:12.5px;display:grid;place-items:center;cursor:pointer;font-family:var(--mono)}
+.reviewcap{font-size:11.5px;color:var(--text-muted);margin-top:20px;padding-top:14px;border-top:1px solid var(--hairline);line-height:1.5;max-width:480px}
+.reviewcap b.you{color:var(--amber)}.reviewcap b.agent{color:var(--cyan)}
+
+/* receipt (Transaction view) — the read-only status chip beside the hero */
+.rcptstatus{display:inline-flex;align-items:center;gap:7px;height:24px;padding:0 10px;border-radius:7px;font-size:11.5px;font-weight:600;
+  background:color-mix(in srgb,var(--success) 12%,transparent);border:1px solid color-mix(in srgb,var(--success) 40%,transparent);color:var(--success);margin-bottom:14px}
+.rcptstatus .gly{width:14px;height:14px}
+</style>
+</head>
+<body>
+<div class="controls">
+  <div class="seg" id="vseg">
+    <button data-s="home" class="on">Wallet home</button>
+    <button data-s="review">Review</button>
+    <button data-s="activity">Activity</button>
+    <button data-s="tx">Transaction</button>
+    <button data-s="rail">Rail focus</button>
+  </div>
+  <div class="spacer"></div>
+  <div class="seg" id="tseg"><button data-theme="dark" class="on">Dark</button><button data-theme="light">Light</button></div>
+</div>
+
+<div class="app">
+  <div class="titlebar"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span><span class="name">Deckard</span></div>
+  <div class="body" id="body">
+
+    <!-- ===== SIDEBAR (Wallets · Agents · Connections — no Projects layer) ===== -->
+    <aside class="rail">
+      <div class="scroll">
+        <div class="grouplabel first">Wallets</div>
+        <div class="navrow sel" data-go="home"><span class="mark round" style="background:#3E6F66">M</span><span class="nm">Meridian</span><span class="bal">9.98</span></div>
+        <div class="navrow"><span class="mark round" style="background:#5A4E73">H</span><span class="nm">Harbor</span><span class="bal">2.41</span></div>
+
+        <div class="grouplabel">Agents</div>
+        <div class="navrow" data-go="rail"><span class="squircle">K</span><span class="nm" style="font-weight:500">Kyoto</span><span class="spend">0.32 ETH</span><span class="statusdot"></span></div>
+        <div class="navrow"><span class="squircle">O</span><span class="nm" style="font-weight:500">Osaka</span><span class="spend">0.00 ETH</span></div>
+
+        <div class="grouplabel">Connections</div>
+        <div class="navrow"><span class="favi" style="background:#D34E5B">U</span><span class="dom">app.uniswap.org</span><span class="trustdot warn" title="unknown site"></span></div>
+        <div class="navrow"><span class="favi" style="background:#5C7CC0">A</span><span class="dom">app.aave.com</span><span class="trustdot ok" title="known"></span></div>
+      </div>
+      <div class="footrow">
+        <div class="navrow" data-go="activity"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 8v4l3 2"/><circle cx="12" cy="12" r="9"/></svg><span>Activity</span><span class="badge amberbadge">2</span></div>
+        <div class="navrow"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span>Settings</span></div>
+      </div>
+    </aside>
+
+    <!-- ===== MAIN ===== -->
+    <section class="main">
+      <div class="breadcrumb">
+        <span class="mark round" id="crumbmark" style="width:16px;height:16px;border-radius:50%;background:#3E6F66;font-size:8px">M</span>
+        <span class="crumb"><span class="cur" id="crumb">Meridian</span></span>
+        <div class="bc-right"><span class="pill">Ethereum</span><span class="kbd">⌘K</span></div>
+      </div>
+      <div class="viewscroll">
+
+        <!-- ========== WALLET HOME (default) ========== -->
+        <div class="view on" data-view="home">
+          <div class="masthead">
+            <span class="mark round" style="background:#3E6F66">M</span>
+            <div><div class="name">Meridian</div><div class="addr">0xf39F…2266</div></div>
+          </div>
+          <div class="hero">
+            <div class="amt"><span class="int">9</span><span class="dec">.9799</span><span class="tick">ETH</span></div>
+            <div class="meta"><span class="mono">$24,180.55</span> &nbsp;·&nbsp; synced 4s ago &nbsp;·&nbsp; <span class="v">verified on mainnet</span></div>
+          </div>
+          <div class="alloc"><i style="width:78%;background:var(--id-slate)"></i><i style="width:22%;background:var(--shield)"></i></div>
+          <div class="legend"><span><span class="sw" style="background:var(--id-slate)"></span>Public <span class="mono">7.78</span></span><span><span class="sw" style="background:var(--shield)"></span>Private <span class="mono">2.20</span></span></div>
+          <div class="actions">
+            <button class="btn primary"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2l8 4v6c0 5-3.5 8-8 10-4.5-2-8-5-8-10V6z"/></svg>Shield</button>
+            <span class="vsep"></span><button class="btn ghost">Send</button><button class="btn ghost">Receive</button><button class="btn ghost">Swap</button>
+          </div>
+
+          <!-- one-line "Waiting on you" strip: pending state (amber + Review link). The quiet idle variant is the commented alternative below. -->
+          <div class="waitstrip pending" data-go="activity">
+            <span class="dot"></span><span class="lead">2 waiting for you</span>
+            <span class="reviewlink">Review<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M9 18l6-6-6-6"/></svg></span>
+          </div>
+          <!-- idle variant (no pending requests):
+          <div class="waitstrip"><span class="dot"></span><span class="v">Nothing waiting for you.</span></div> -->
+
+          <!-- holdings ledger with a real $ Value column -->
+          <div class="seclabel ledgerlabel">Holdings</div>
+          <div class="lhead"><span class="h">Asset</span><span class="col"><span class="h">Balance</span></span><span class="col d"><span class="h">24h</span></span><span class="col"><span class="h">Value</span></span></div>
+          <div>
+            <div class="lrow"><span class="tok">Ξ</span><div class="nmwrap"><div class="nm">Ethereum</div><div class="tk">ETH</div></div><div class="col balcol"><div class="val"><span class="int">9</span><span class="dec">.9799</span></div></div><div class="delta up">+1.2%</div><div class="col valcol"><div class="val"><span class="int">$24,180</span><span class="dec">.55</span></div></div></div>
+            <div class="lrow"><span class="tok" style="color:#7E9CC0">$</span><div class="nmwrap"><div class="nm">USD Coin</div><div class="tk">USDC</div></div><div class="col balcol"><div class="val"><span class="int">1,284</span><span class="dec">.00</span></div></div><div class="delta up">+0.0%</div><div class="col valcol"><div class="val"><span class="int">$1,284</span><span class="dec">.00</span></div></div></div>
+            <div class="lrow"><span class="tok" style="color:#7E8AA0">r</span><div class="nmwrap"><div class="nm">Rocket Pool ETH</div><div class="tk">rETH</div></div><div class="col balcol"><div class="val"><span class="int">0</span><span class="dec">.0000</span></div></div><div class="delta down">−0.3%</div><div class="col valcol"><div class="val"><span class="int">$0</span><span class="dec">.00</span></div></div></div>
+          </div>
+        </div>
+
+        <!-- ========== THE ONE SHARED REVIEW (clear-signing, DAPP origin) ========== -->
+        <div class="view" data-view="review">
+          <div class="confirmview">
+            <!-- request-origin header rail: neutral favicon + domain only (no site-reputation) -->
+            <div class="originrail">
+              <span class="favi" style="background:#D34E5B">U</span>
+              <span class="who"><span class="dim">app.uniswap.org</span> requests</span>
+              <span class="oke"><span class="kbd">⌘K</span></span>
+            </div>
+
+            <div class="txlabel">Swapping</div>
+            <div class="txhero"><span class="int">0</span><span class="dec">.4</span> <span class="tick">ETH</span><span class="arrow">→</span><span class="int">1,284</span> <span class="tick">USDC</span></div>
+            <div class="txusd">$967.20 at this quote</div>
+
+            <div class="txlabel" style="margin-top:22px">To</div>
+            <div class="txto"><span class="idi" style="background:#3A5A78">c</span><div><div class="ens">CoW Settlement</div><div class="addr">0x9008…c41</div></div></div>
+
+            <div class="warns">
+              <div class="danger-line"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>This can't be undone.</div>
+            </div>
+
+            <div class="quiet">
+              <div class="k">From</div><div class="v">Meridian · 0xf39F…2266</div>
+              <div class="k">Route</div><div class="v san">CoW Protocol</div>
+              <div class="k">Network fee</div><div class="v">~0.0009 ETH · $2.10</div>
+              <div class="k">Allowed by</div><div class="v auth">Swap rule · <span class="cap">$0.14 of $0.20 daily left after this</span></div>
+            </div>
+
+            <div class="confirm"><span>Approve swap</span><span class="keys"><span class="keycap">⌘↵</span></span></div>
+            <span class="editlink">Edit</span>
+
+            <div class="reviewcap">The same surface renders for every origin — only the top row changes: <b class="you">You are sending</b> / <b class="agent">Kyoto proposes</b> / app.uniswap.org requests.</div>
+          </div>
+        </div>
+
+        <!-- ========== ACTIVITY (Needs-you queue + scannable log) ========== -->
+        <div class="view" data-view="activity">
+          <div class="acthead">
+            <span class="lbl">Activity</span>
+            <!-- kill-switch: shown because Kyoto is currently running. When no agent runs, swap for the .idle variant (below). -->
+            <button class="killswitch"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M12 3v9"/><path d="M6.6 6.6a8 8 0 1 0 10.8 0"/></svg>Stop all agents</button>
+            <!-- idle variant: <button class="killswitch idle" disabled><svg class="ic" ...></svg>No agents running</button> -->
+          </div>
+
+          <!-- NEEDS YOU queue: scannable, identity-first, tags not prose -->
+          <div class="needsyou">
+            <div class="needshead"><span class="lbl">Needs you</span><span class="cnt">2</span></div>
+            <!-- (1) dapp swap -->
+            <div class="preq">
+              <span class="who"><span class="favi" style="background:#D34E5B">U</span></span>
+              <span class="origin">app.uniswap.org</span>
+              <span class="tag">Swap</span>
+              <span class="amt">0.4 ETH</span>
+              <span class="dest"><span class="arrow">→</span>USDC</span>
+              <span class="spacer"></span>
+              <span class="wtag">new site</span>
+              <span class="keys"><span class="tinykbd">⌘↵</span><span class="tinykbd">X</span></span>
+              <span class="cd">0:41</span>
+            </div>
+            <!-- (2) agent shield -->
+            <div class="preq">
+              <span class="who"><span class="squircle">K</span></span>
+              <span class="origin agent">Kyoto</span>
+              <span class="tag">Shield</span>
+              <span class="amt">0.8 ETH</span>
+              <span class="spacer"></span>
+              <span class="wtag">over cap</span>
+              <span class="keys"><span class="tinykbd">⌘↵</span><span class="tinykbd">X</span></span>
+              <span class="cd">2:10</span>
+            </div>
+          </div>
+
+          <!-- day-grouped, origin-attributed activity log (scannable columns) -->
+          <div class="dayband">Today</div>
+          <div class="feedrow">
+            <span class="who"><span class="squircle">K</span></span>
+            <span class="origin agent">Kyoto</span>
+            <span class="tag">Shield</span>
+            <span class="amt">0.20 ETH</span>
+            <span class="sub">proving the spend</span>
+            <span class="frail"><span class="hash">pending</span><svg class="gly live" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l2.5 1.5"/></svg><span class="ago">now</span></span>
+          </div>
+          <div class="feedrow">
+            <span class="who"><span class="mark round" style="background:#3E6F66;width:18px;height:18px;font-size:10px">M</span></span>
+            <span class="origin you">You</span>
+            <span class="tag">Send</span>
+            <span class="amt">0.01 ETH</span>
+            <span class="dest"><span class="arrow">→</span>vitalik.eth</span>
+            <span class="frail"><span class="hash">0x7099…dc79</span><svg class="gly ok" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><circle cx="12" cy="12" r="9"/><path d="M8.5 12.5l2.5 2.5 4.5-5"/></svg><span class="ago">18m</span></span>
+          </div>
+          <div class="feedrow">
+            <span class="who"><span class="favi" style="width:18px;height:18px;font-size:9px;background:#5C7CC0">A</span></span>
+            <span class="origin">app.aave.com</span>
+            <span class="tag">Supply</span>
+            <span class="amt">1,000 USDC</span>
+            <span class="sub">3.8% APY</span>
+            <span class="frail"><span class="hash">0x87870…5951</span><svg class="gly ok" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><circle cx="12" cy="12" r="9"/><path d="M8.5 12.5l2.5 2.5 4.5-5"/></svg><span class="ago">42m</span></span>
+          </div>
+          <div class="feedrow" data-go="tx">
+            <span class="who"><span class="squircle">K</span></span>
+            <span class="origin agent">Kyoto</span>
+            <span class="tag">Shield</span>
+            <span class="amt">0.02 ETH</span>
+            <span class="frail"><span class="hash">0xbe0e34…b6dd</span><svg class="gly ok" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><circle cx="12" cy="12" r="9"/><path d="M8.5 12.5l2.5 2.5 4.5-5"/></svg><span class="ago">1h</span></span>
+          </div>
+          <div class="dayband">Yesterday</div>
+          <div class="feedrow">
+            <span class="who"><span class="squircle">K</span></span>
+            <span class="origin agent">Kyoto</span>
+            <span class="tag">Shield</span>
+            <span class="amt">0.08 ETH</span>
+            <span class="sub">you declined · over cap</span>
+            <span class="frail"><svg class="gly bad" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><circle cx="12" cy="12" r="9"/><path d="M15 9l-6 6M9 9l6 6"/></svg><span class="ago">1d</span></span>
+          </div>
+        </div>
+
+        <!-- ========== TRANSACTION (read-only receipt) ========== -->
+        <div class="view" data-view="tx">
+          <div class="confirmview">
+            <div class="originrail">
+              <span class="squircle" style="width:26px;height:26px;border-radius:7px;font-size:12px">K</span>
+              <span class="who agent">Kyoto shielded</span>
+              <span class="oke"><span class="hash" style="color:var(--text-muted);font-size:11.5px;font-family:var(--mono)">0xbe0e34…b6dd</span></span>
+            </div>
+
+            <div class="rcptstatus"><svg class="gly ok" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><circle cx="12" cy="12" r="9"/><path d="M8.5 12.5l2.5 2.5 4.5-5"/></svg>Confirmed</div>
+            <div class="txlabel">Shielded</div>
+            <div class="txhero"><span class="int">0</span><span class="dec">.02</span> <span class="tick">ETH</span></div>
+            <div class="txusd">$48.36 · moved to your private balance</div>
+
+            <div class="quiet">
+              <div class="k">Status</div><div class="v ok">Confirmed</div>
+              <div class="k">Hash</div><div class="v">0xbe0e34…b6dd &nbsp;<span class="link">copy</span> &nbsp;<span class="link">explorer ↗</span></div>
+              <div class="k">From</div><div class="v">Meridian · 0xf39F…2266</div>
+              <div class="k">To</div><div class="v san">Railgun shield · private</div>
+              <div class="k">Amount</div><div class="v">0.02 ETH · $48.36</div>
+              <div class="k">Network fee (gas)</div><div class="v">~0.0006 ETH · $1.45</div>
+              <div class="k">Block</div><div class="v">10,822,981</div>
+              <div class="k">Time</div><div class="v san">Today · 1h ago</div>
+              <div class="k">Authorized by</div><div class="v san">Kyoto · Shield rule</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ========== RAIL FOCUS (select in the list, detail in the rail) ========== -->
+        <div class="view" data-view="rail">
+          <div class="needsyou">
+            <div class="needshead"><span class="lbl">Needs you</span><span class="cnt">2</span><span class="hint">Nothing selected.</span></div>
+            <div class="preq sel">
+              <span class="who"><span class="favi" style="background:#D34E5B">U</span></span>
+              <span class="origin">app.uniswap.org</span>
+              <span class="tag">Swap</span>
+              <span class="amt">0.4 ETH</span>
+              <span class="dest"><span class="arrow">→</span>USDC</span>
+              <span class="spacer"></span>
+              <span class="wtag">new site</span>
+              <span class="keys"><span class="tinykbd">⌘↵</span><span class="tinykbd">X</span></span>
+              <span class="cd">0:41</span>
+            </div>
+            <div class="preq">
+              <span class="who"><span class="squircle">K</span></span>
+              <span class="origin agent">Kyoto</span>
+              <span class="tag">Shield</span>
+              <span class="amt">0.8 ETH</span>
+              <span class="spacer"></span>
+              <span class="wtag">over cap</span>
+              <span class="keys"><span class="tinykbd">⌘↵</span><span class="tinykbd">X</span></span>
+              <span class="cd">2:10</span>
+            </div>
+          </div>
+          <div style="opacity:.62">
+            <div class="seclabel ledgerlabel">Holdings</div>
+            <div>
+              <div class="lrow"><span class="tok">Ξ</span><div class="nmwrap"><div class="nm">Ethereum</div><div class="tk">ETH</div></div><div class="col balcol"><div class="val"><span class="int">9</span><span class="dec">.9799</span></div></div><div class="delta up">+1.2%</div><div class="col valcol"><div class="val"><span class="int">$24,180</span><span class="dec">.55</span></div></div></div>
+              <div class="lrow"><span class="tok" style="color:#7E9CC0">$</span><div class="nmwrap"><div class="nm">USD Coin</div><div class="tk">USDC</div></div><div class="col balcol"><div class="val"><span class="int">1,284</span><span class="dec">.00</span></div></div><div class="delta up">+0.0%</div><div class="col valcol"><div class="val"><span class="int">$1,284</span><span class="dec">.00</span></div></div></div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ===== RIGHT METADATA RAIL (always present) ===== -->
+    <aside class="metarail">
+      <div class="metahead"><span class="t" id="railtitle">This wallet</span></div>
+
+      <!-- default rail body: focused wallet detail -->
+      <div class="metabody" id="railwallet">
+        <div class="seclabel">This wallet</div>
+        <div class="metaobj">
+          <span class="mark round" style="background:#3E6F66">M</span>
+          <div><div class="nm">Meridian</div><div class="sub">0xf39F…2266</div></div>
+        </div>
+        <div class="metakv">
+          <div class="k">Balance</div><div class="v">9.9799 ETH</div>
+          <div class="k">Value</div><div class="v">$24,180.55</div>
+          <div class="k">Synced</div><div class="v">4s ago</div>
+          <div class="k">Status</div><div class="v ok">Verified</div>
+          <div class="k">Network</div><div class="v san">Ethereum · mainnet</div>
+        </div>
+        <div class="metasec">
+          <div class="seclabel" style="margin-bottom:12px">Agent caps here</div>
+          <div class="metakv">
+            <div class="k">Kyoto daily</div><div class="v">0.32 / 0.50 ETH</div>
+            <div class="k">Per-transaction</div><div class="v">0.20 ETH</div>
+          </div>
+        </div>
+        <div class="metasec">
+          <div class="metakv">
+            <div class="k">Connections</div><div class="v">2</div>
+            <div class="k">Agents</div><div class="v san">1 active</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- rail body variant for Rail focus: the selected pending request's compact clear-signing -->
+      <div class="metabody railsign" id="railrequest" style="display:none">
+        <div class="originrail" style="padding-bottom:14px">
+          <span class="favi" style="background:#D34E5B;width:24px;height:24px;border-radius:7px;font-size:11px">U</span>
+          <span class="who" style="font-size:13px"><span class="dim">app.uniswap.org</span></span>
+        </div>
+        <div class="txlabel">Swapping</div>
+        <div class="txmini"><span class="int">0</span><span class="dec">.4</span> <span class="tick">ETH</span><span class="arrow">→</span><span class="int">1,284</span> <span class="tick">USDC</span></div>
+        <div class="txusd" style="margin-top:6px">$967.20 at this quote</div>
+        <div class="metakv" style="margin-top:16px">
+          <div class="k">To</div><div class="v">CoW · 0x9008…c41</div>
+          <div class="k">Route</div><div class="v san">CoW Protocol</div>
+          <div class="k">Network fee</div><div class="v">$2.10</div>
+          <div class="k">Allowed by</div><div class="v san" style="color:var(--success)">Swap rule</div>
+        </div>
+        <div class="danger-line"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>This can't be undone.</div>
+        <div class="railkeys">
+          <div class="approve"><span>Approve</span><span class="keycap">⌘↵</span></div>
+          <div class="deny">X</div>
+        </div>
+      </div>
+
+      <!-- rail body variant for Transaction: the same tx's status + links -->
+      <div class="metabody" id="railtx" style="display:none">
+        <div class="seclabel">This transaction</div>
+        <div class="metaobj">
+          <span class="squircle" style="width:28px;height:28px;border-radius:8px;font-size:12px">K</span>
+          <div><div class="nm" style="color:var(--cyan)">Kyoto</div><div class="sub">shield · confirmed</div></div>
+        </div>
+        <div class="metakv">
+          <div class="k">Status</div><div class="v ok">Confirmed</div>
+          <div class="k">Block</div><div class="v">10,822,981</div>
+          <div class="k">Time</div><div class="v san">1h ago</div>
+          <div class="k">Fee</div><div class="v">$1.45</div>
+        </div>
+        <div class="metasec">
+          <div class="seclabel" style="margin-bottom:12px">Hash</div>
+          <div class="metakv"><div class="k" style="font-family:var(--mono)">0xbe0e34…b6dd</div><div class="v"><span class="link">copy</span></div></div>
+          <button class="metabtn"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6M10 14 21 3"/></svg>View on explorer</button>
+        </div>
+        <div class="metasec">
+          <div class="seclabel" style="margin-bottom:12px">Authorized by</div>
+          <div class="metaline"><span class="squircle" style="width:16px;height:16px;font-size:8px">K</span>Kyoto · Shield rule</div>
+        </div>
+      </div>
+    </aside>
+
+  </div>
+  <div class="statusstrip"><span class="v">Synced · block 10,823,004</span><span class="v">Verified · mainnet</span><span class="right">Ethereum</span></div>
+</div>
+
+<script>
+const vseg=document.getElementById('vseg'),tseg=document.getElementById('tseg'),crumb=document.getElementById('crumb'),crumbmark=document.getElementById('crumbmark');
+const railwallet=document.getElementById('railwallet'),railrequest=document.getElementById('railrequest'),railtx=document.getElementById('railtx'),railtitle=document.getElementById('railtitle');
+// breadcrumb = current entity only (no Projects prefix); sub-views append "› Sub"
+const crumbMap={home:'Meridian',review:'Meridian › Swap',activity:'Activity',tx:'Meridian › Transaction',rail:'Meridian'};
+
+function go(s){
+  [...vseg.children].forEach(x=>x.classList.toggle('on',x.dataset.s===s));
+  document.querySelectorAll('.view').forEach(v=>v.classList.toggle('on',v.dataset.view===s));
+  crumb.textContent=crumbMap[s];
+  // Activity has no single entity mark; hide the leading breadcrumb mark there
+  crumbmark.style.display = (s==='activity') ? 'none' : 'grid';
+  // rail body per view
+  railwallet.style.display='none';railrequest.style.display='none';railtx.style.display='none';
+  if(s==='rail'){railrequest.style.display='block';railtitle.textContent='Pending request';}
+  else if(s==='tx'){railtx.style.display='block';railtitle.textContent='This transaction';}
+  else{railwallet.style.display='block';railtitle.textContent='This wallet';}
+}
+vseg.addEventListener('click',e=>{const b=e.target.closest('button');if(b)go(b.dataset.s);});
+document.querySelectorAll('[data-go]').forEach(el=>el.addEventListener('click',()=>go(el.dataset.go)));
+
+tseg.addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;
+  [...tseg.children].forEach(x=>x.classList.toggle('on',x===b));
+  document.documentElement.setAttribute('data-theme',b.dataset.theme);});
+</script>
+</body>
+</html>
