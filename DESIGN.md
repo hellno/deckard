@@ -11,12 +11,23 @@
 > versioned the golden references in-repo. The token names below are the contract the crate's
 > `theme.rs` / `tokens` module implement — a view that hardcodes a value the token layer already
 > names is a review failure.
+> v4 (2026-07-02): an IA / flow / interaction pass on top of the grounded flow audit
+> (`docs/research/11-ia-flows-audit.md`) and a `/design-consultation`
+> (`docs/research/12-design-direction-v4.md`). **The visual system is unchanged** (fonts, grayscale,
+> the two-signal actor axis, tokens, `⌘↵` confirm); the *structure* changed: a three-pane always-on
+> right rail, the **request-origin model** (you / dapp / agent — one shared review, one attributed
+> feed), the Projects layer dropped, auto-assigned agent handles (no fixed "Atlas"), a Transaction
+> detail view, the identity masthead + the no-"Wallet"-label rule, holdings with a `$` value column,
+> and the honest cap ledger.
 >
 > **Golden references (the pixel ground-truth agents build against), versioned in-repo under `designs/`:**
+> - `designs/deckard-v4.html` — **the current v4 IA** (wallet home, the one shared clear-signing
+>   Review across origins, Activity, Transaction detail, three-pane rail; light + dark). Authoritative
+>   on **IA/layout/flow**; defers to the v3 refs below on the editorial atoms + the confirm styling.
 > - `designs/deckard-editorial-v3.html` — home, send confirm, swap compose, swap review, activity
->   (the editorial language, light + dark).
-> - `designs/deckard-agent-v4.html` — the agent surface, the compact agent presence on the home, and
->   the redesigned transaction-as-hero confirm (this confirm supersedes the v3 send confirm).
+>   (the editorial language + atoms, light + dark).
+> - `designs/deckard-agent-v4.html` — the redesigned transaction-as-hero confirm (this confirm styling
+>   supersedes the v3 send confirm; the v4 IA ref above reuses it).
 > When this doc and a reference disagree, the doc wins on rules and the reference wins on pixels;
 > fix whichever is stale. (These were unversioned under `~/.gstack/...` through v2; v3 checked them
 > into the repo so the "matches golden reference" definition-of-done item is actually verifiable.)
@@ -113,24 +124,54 @@ AI-coded-design tell, and we reject it.
 ---
 
 ## Information architecture
-**Two-pane shell** (sidebar + main + a thin top breadcrumb bar + a bottom status strip). No third
-inspector pane; detail is contextual or a right slide-over when genuinely needed.
+**Three-pane shell** (sidebar + main + a persistent right **metadata rail** + a thin top breadcrumb
+bar + a bottom status strip). The rail shows contextual detail for the focused object (a wallet → its
+holdings/status + cap ledger; a pending request → its clear-signing detail; an activity row → its
+receipt). It is always on, not collapsible — the Linear nav·content·rail model. *(v4: this replaces
+the v2/v3 "two-pane, no third inspector pane" rule; a request/agent/tx always has detail worth seeing
+without navigating away, so the rail earns its place.)*
 
-**Sidebar = a single-column Conductor-style tree.** Top-level entities are **Projects**. Each
-project expands to two first-class groups:
-- **Wallets** — Splits-style rows: identity mark + name + truncated mono address + right-aligned
-  balance.
-- **Agents** — **first-class, standalone** (this is a v2 change; agents were previously buried in
-  the wallet home). Row: cyan squircle + name + right-aligned spend magnitude + status glyph.
+**Sidebar = a single-column tree of the account's real entities.** There is **no Projects layer** —
+Deckard has no project-switching, so the top-level groups are the things that actually exist *(v4:
+dropped the `Projects` parent; it named a concept the product doesn't have)*:
+- **Wallets** — identity mark + **name** + truncated mono address + right-aligned balance. Every wallet
+  has a real name, and the literal word **"Wallet" never appears as a label** anywhere (an unnamed
+  wallet gets a deterministic default, never "Wallet"). The breadcrumb names the entity (`Meridian`,
+  `Meridian › Swap`) — never a project prefix, never the word "Wallet".
+- **Agents** — cyan squircle + an **auto-assigned, human-renamable handle** (a rotating codename/city
+  list, e.g. `Kyoto` — **not** an invented persona like "Atlas") + spend magnitude + status glyph.
+- **Connections** — dapp origins (favicon + domain + a trust dot). First-class group; deep connection
+  management is deferred (ADR-0001 / #44), but the slot and the origin model exist now.
+
+### The request-origin model (v4 — the spine)
+Every request to move money has an **origin**: **you** (in-app), a **dapp** (browser bridge today,
+plugins later), or an **agent** (MCP). One shared review, one attributed feed, one Rules vocabulary
+span them all — this is the product's spine, not the agent loop alone. The origin is rendered by
+**identity + a header rail**, never a third signal color: amber = human and cyan = agent stay the only
+two signal colors; a **dapp/external origin is a neutral identity** (favicon + domain) **+ a trust
+badge that borrows the state colors** (verified = success, first-seen = amber caution, flagged =
+danger). Non-human sessions get the auto-assigned handle above. Approval is **policy / per-origin**,
+not one global posture — "approve every move" is itself a valid policy; agents run on policy, dapps
+default to approve-per-request (a scoped per-origin grant is deferred, ADR-0001).
 
 **Views are contextual to selection:**
-- Select a **wallet** → its home (hero balance, allocation, actions, holdings, and a **compact
-  agent presence** row, not the full policy).
-- Select a **project** → aggregate across its wallets + its wallets and agents.
-- Select an **agent** → the **agent surface** (§The agent interaction model).
-- **Activity** is a destination (the see-and-stop log). **Settings** is a bottom gear (global).
-  **Send / Receive / Swap / Shield** are actions on the selected wallet. Clear-signing is the
-  confirm step inside them, and the same review renders for an agent's proposal awaiting approval.
+- Select a **wallet** → its home: an identity **masthead** (name + mark above the mono hero) + the
+  hero USD/synced/verified meta line + allocation + **left-anchored** actions + a compact **"Waiting
+  on you"** strip (one line; the home flips supervision-forward — the queue surfaces above the
+  portfolio — only when a request/agent is live) + the **holdings ledger** (mono, a **$ value column +
+  24h**, decimal-point aligned).
+- Select an **agent** → the agent surface (§The agent interaction model). *(v4: kept light this pass;
+  the in-wallet agent-interaction model needs more thought — documented as an expandable slot.)*
+- **Activity** is a destination: the origin-attributed see-and-stop feed (a `NEEDS YOU` queue above a
+  day-grouped log; rows are **scannable, not prose** — identity + an action tag + mono amount + a
+  warning tag + hash/glyph/time) with the **STOP** emergency control (`Stop all agents`, shown only
+  when an agent is active so it never reads as a start/stop toggle).
+- Select a **transaction** → a **Transaction detail** view (v4 addition): the clear-signed receipt +
+  hash (copy + explorer) + from/to + amount + gas + block + time + **Authorized by** (the rule/origin
+  that permitted it).
+- **Settings** is a bottom gear (global). **Send / Receive / Swap / Shield** are actions on the
+  selected wallet; the confirm step is the one **shared clear-signing Review** (§Clear-signing), which
+  renders identically for you, a dapp, or an agent — only the origin header rail changes.
 
 ---
 
@@ -406,16 +447,28 @@ key-cap affordance** (like Linear/Raycast "Create ↵"), made spam-proof by tier
   `⌘↵` **arms** ("Press ⌘↵ again to send") and the second sends. No modal, no checkbox.
 - Mouse users get an equivalent click on the same button; the button is never a hold target.
 
-### Clear-signing review (the shared trust engine; transaction-as-hero)
-Rendered for self-send, swap, shield, and an agent proposal. It is a **statement, not a form**:
-- The **transaction is the hero**: a tiny `SENDING`/`SWAPPING` label, then the **amount big in
-  mono**, then the USD-equiv, then `TO` with a **prominent identicon + ENS + full-ish address**
-  (via `truncated_address`). What can lose money (how much, to whom) dominates.
-- **Danger first, in red** (`caution_line` danger): "Public on Ethereum and can't be undone."
-  Then amber caution lines (first-time recipient, slippage). Never a gray box.
-- **Quiet supporting facts** demoted below a hairline: From, network fee, route/slippage. State each
-  fact **once** (no triple-restatement).
-- The `⌘↵` confirm button + the arm note + an Edit link.
+### Clear-signing review — the ONE shared trust engine (transaction-as-hero)
+There is exactly **one** review surface, rendered for **every origin**: self-send, swap, shield, a
+**dapp request**, or an agent proposal. Only the **origin header rail** (who is asking) changes; the
+body is identical. Two review layouts would mean two ways to be fooled. It is a **statement, not a
+form**:
+- **Origin header rail**: the requester's identity — `You are sending` (amber), `Kyoto proposes`
+  (cyan agent handle), or `app.uniswap.org requests` (a dapp: neutral favicon + domain). A dapp or
+  agent is identity + a state-color trust badge, **never a third signal color**.
+- The **transaction is the hero**: a tiny `SENDING`/`SWAPPING` label, then the **amount big in mono**,
+  then the USD-equiv, then `TO` with a **prominent identicon + ENS + full-ish address** (via
+  `truncated_address`). Say the amount **once** — do not repeat it as a "you pay / you receive"
+  balance-diff for a simple swap (a Rabby-style "what changes" block is only for txs whose net effects
+  aren't obvious from the hero).
+- **Danger first, in red** (`caution_line` danger): "This can't be undone." *(v4: was the wordier
+  "Public on Ethereum and can't be undone" — plain and declarative, no textbook blockchain explainer.)*
+  Then amber caution lines (first-time recipient, slippage). Never a gray box. **No speculative
+  site-reputation** copy — we don't have it.
+- **Quiet supporting facts** demoted below a hairline: From, network fee, route/slippage, and the
+  **Allowed by** authority line — the rule that permitted it + the cap **after this move**
+  (`Swap rule · $0.14 of $0.20 daily left after this`). State each fact **once**.
+- The `⌘↵` confirm button (via a platform-aware **key-cap** widget — `⌘` on macOS, `Ctrl` on Linux)
+  + an Edit link. No prose arm-delay explainer beside it.
 
 ### Policy / agent surface, budget gauge, kill switch
 See §The agent interaction model. The `budget_gauge` and the Pause/Revoke/Rotate/Adjust controls are
@@ -574,8 +627,18 @@ A GUI change is not done until ALL hold (paste screenshots as evidence):
 - [ ] Every new action has a ⌘K `Command`.
 - [ ] No leftover starter slop (keyboard-hint rows, "Welcome to Deckard", dead settings, leaked
       build-flag or provider strings, orphan `—`).
-- [ ] Matches the golden-reference HTML (`designs/deckard-editorial-v3.html` /
-      `designs/deckard-agent-v4.html`) in layout and hierarchy.
+- [ ] **Identity is named** *(v4)*: wallets/agents show a real name/handle; the literal word "Wallet"
+      appears nowhere as a label; the breadcrumb names the entity (never a project prefix, never "Wallet").
+- [ ] **Money keeps its context** *(v4)*: holdings carry a mono `$` value column + 24h, **decimal-point
+      aligned**; the balance hero carries a USD + synced/verified meta line (honest fallbacks off mainnet).
+- [ ] **One shared Review** *(v4)*: send/swap/shield/dapp/agent all render the single
+      transaction-as-hero review; origin is a header rail + identity + a state-color trust badge, never
+      a third signal color; the `Allowed by` line shows the cap **after** this move; no unenforced cap
+      is ever shown as enforced.
+- [ ] Key-caps via the platform-aware `key_cap` widget (`⌘` macOS / `Ctrl` Linux), not a hardcoded glyph. *(v4)*
+- [ ] Matches the golden-reference HTML: **`designs/deckard-v4.html`** for IA/layout/flow;
+      `designs/deckard-editorial-v3.html` + `designs/deckard-agent-v4.html` for the editorial atoms +
+      the confirm styling.
 
 ## Decisions log
 | Date | Decision | Rationale |
@@ -594,3 +657,4 @@ A GUI change is not done until ALL hold (paste screenshots as evidence):
 | 2026-06-20 | **Activity lean now = audit log + STOP**; triage inbox / keyboard nav / drill-in receipts / filtering deferred and documented. | Build the see-and-stop log first; layer the inbox interactions once the loop is real. |
 | 2026-06-20 | **UI/display face: General Sans → Schibsted Grotesk** (JetBrains Mono unchanged). | General Sans is Fontshare/ITF proprietary — its EULA forbids redistributing the raw files / public-server hosting, which the public repo violated once #114 committed them. Schibsted Grotesk is OFL-1.1, a structural drop-in (same 400/500/600 weights), and built for editorial publishing — it fits the locked Editorial direction. Chosen over Hanken Grotesk (safer/quieter) and IBM Plex Sans (more recognizable) via /design-consultation. |
 | 2026-07-01 | **v3 token layer + versioned references.** Named every scale (spacing, object sizes, type, radii, stroke, elevation, opacity, icon, motion) as a token → Rust const; gave the semantic roles their own names over the single warm light (deliberate overload, not accidental); promoted light to a full token table; added elevation/opacity/AA sub-specs; unified the transaction hero to one `text-tx-hero` (was 40/32); declared object sizes a separate ladder (resolving the 30px-off-grid tension); checked the golden HTML references into `designs/`. | A design-system audit found the doctrine strong but enforcement partial: color + fonts were centralized, but everything below (127 raw `px()` across ~43 values, 11 scattered `text_size(px())`, duplicated leaf widgets) was hand-rolled, and "matches golden reference" pointed at an out-of-repo, unversioned, stale file. Prose can't enforce a spacing grid; a `const` the compiler + a lint check can. |
+| 2026-07-02 | **v4 request-origin IA.** Kept the visual system; reworked structure: a three-pane always-on right rail; the **request-origin model** (you / dapp / agent — one shared clear-signing Review, one origin-attributed feed, origin as identity + a state-color trust badge, never a third signal); dropped the Projects layer; auto-assigned renamable agent handles (retired the "Atlas" placeholder); a Transaction detail view; identity masthead + the no-"Wallet"-label rule; holdings with a mono `$` column + decimal alignment + a hero USD/verified meta line; the honest cap ledger; and a platform-aware key-cap widget. Golden ref: `designs/deckard-v4.html`. | A grounded flow audit (`docs/research/11-ia-flows-audit.md`) found the bones strong but four load-bearing gaps (identity, two clear-signing treatments, a read-only agent surface, an unenforced cap). A `/design-consultation` (`docs/research/12-design-direction-v4.md`; Linear/Raycast/Superhuman/Rabby references + two outside voices) landed the direction: the product is the request→review→approve/stop loop generalized across *who is asking*, and the agent is one origin among several — not the whole product. Deep agent internals + dapp-connection editing deferred. |
