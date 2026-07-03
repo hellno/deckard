@@ -526,8 +526,7 @@ pub(crate) fn page_header(
                 .when_some(subtitle, |d, s| {
                     d.child(
                         div()
-                            .min_w_0()
-                            .truncate()
+                            .flex_shrink_0()
                             .text_sm()
                             .text_color(muted)
                             .when_some(subtitle_mono, |d, mono| d.font_family(mono))
