@@ -12,6 +12,7 @@ mod commit_flow;
 mod commit_view;
 mod errors;
 mod money;
+mod names;
 mod onboarding;
 mod palette;
 mod palette_commands;

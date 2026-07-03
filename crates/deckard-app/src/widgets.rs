@@ -8,7 +8,7 @@
 //! screen *cannot* drift.
 //!
 //! Style matches the rest of the crate: the atomic primitives are pure functions that take
-//! explicit theme colors (`Hsla`) and return an `AnyElement` (see `shell_chrome::agent_squircle`).
+//! explicit theme colors (`Hsla`) and return an `AnyElement` (see `identity_mark` / `agent_mark`).
 //! No raw hex; callers pass `cx.theme().*` / `theme::amber(is_dark)`.
 //!
 //! The v4 *composite* widgets (`origin_header`, `status_glyph`, `balance_diff`, the `meta_rail`
@@ -118,7 +118,7 @@ fn monogram(seed: &str) -> SharedString {
 /// §Actor model: shape is the accessibility backup; never a blank fill). Square
 /// (rounded) for projects/wallets; pass `radius = size / 2` for the round human
 /// principal. `fill` is the desaturated identity slate; `glyph` tints the monogram.
-/// The agent uses [`agent_mark`] / `shell_chrome::agent_squircle` instead (cyan, the actor signal).
+/// The agent uses [`agent_mark`] instead (cyan-bordered, the actor signal).
 pub(crate) fn identity_mark(
     seed: &str,
     size: Pixels,
@@ -144,14 +144,11 @@ pub(crate) fn identity_mark(
 }
 
 /// The **cyan agent squircle**, handle-aware (DESIGN §Actor model: agent = a cyan squircle monogram
-/// — the ONE cyan surface). Same treatment as `shell_chrome::agent_squircle` — cyan-tint fill + the
-/// **cyan border that defines the squircle** + a cyan monogram — but seeded so it renders the agent's
-/// handle initial (`K` for `Kyoto`) instead of a fixed `A`. The bordered cyan mark IS the two-signal
-/// actor signal, so it keeps the border `identity_mark` omits.
-// reason: consumed by `origin_header` (E5, #185); E2 (#182) migrates the sidebar/breadcrumb/feed off
-// the fixed-`A` `shell_chrome::agent_squircle` onto this handle-aware widget.
-#[allow(dead_code)]
-fn agent_mark(
+/// — the ONE cyan surface): a cyan-tint fill + the **cyan border that defines the squircle** + a
+/// cyan monogram, seeded so it renders the agent's handle initial (`K` for `Kyoto`). The bordered
+/// cyan mark IS the two-signal actor signal, so it keeps the border `identity_mark` omits. The one
+/// agent mark for the sidebar, breadcrumb, wallet-home presence, agent surface, and activity feed.
+pub(crate) fn agent_mark(
     seed: &str,
     size: Pixels,
     radius: Pixels,
@@ -496,15 +493,17 @@ pub(crate) fn kv_row(
 }
 
 /// The ONE page-header anatomy (DESIGN §Component primitives): a caller-built identity `mark`
-/// (`identity_mark` / `agent_squircle`) + an H1 title at ONE size (`text_xl`, `text.primary`,
-/// 600) + an optional muted one-line subtitle. Kills the hand-rolled headers at three sizes.
-// reason: consumed by the v4 view headers (E2/E4/E6/E7); E1 lands the one anatomy so no view
-// re-rolls a header at its own size.
-#[allow(dead_code)]
+/// (`identity_mark` / `agent_mark`) + an H1 title at ONE size (`text_xl`, `text.primary`, 600) +
+/// an optional muted one-line subtitle. Kills the hand-rolled headers at three sizes. Pass
+/// `subtitle_mono = Some(theme.mono_font_family)` when the subtitle is an address (DESIGN §Trust:
+/// addresses are mono), `None` for prose.
+// The one header anatomy consumed by the v4 view headers (E2 wires the wallet-home masthead;
+// E4/E6/E7 follow) so no view re-rolls a header at its own size.
 pub(crate) fn page_header(
     mark: AnyElement,
     title: &str,
     subtitle: Option<&str>,
+    subtitle_mono: Option<SharedString>,
     primary: Hsla,
     muted: Hsla,
 ) -> AnyElement {
@@ -527,8 +526,11 @@ pub(crate) fn page_header(
                 .when_some(subtitle, |d, s| {
                     d.child(
                         div()
+                            .min_w_0()
+                            .truncate()
                             .text_sm()
                             .text_color(muted)
+                            .when_some(subtitle_mono, |d, mono| d.font_family(mono))
                             .child(SharedString::from(s.to_string())),
                     )
                 }),

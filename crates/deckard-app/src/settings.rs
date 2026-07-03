@@ -41,7 +41,16 @@ impl ThemeModePref {
 #[serde(default)]
 pub struct Settings {
     pub theme_mode: ThemeModePref,
-    pub display_name: String,
+    /// The wallet's human name, shown in the masthead/breadcrumb/sidebar (E2, #182). Empty = the
+    /// deterministic default from the account address ([`crate::names::default_wallet_name`]); a
+    /// non-empty value is the operator's rename. The `display_name` alias migrates the value from
+    /// the pre-#182 "Display name" field (its description was already "a label for this wallet
+    /// profile") so an upgrade never silently drops a name the user had set.
+    #[serde(alias = "display_name")]
+    pub wallet_name: String,
+    /// The agent's handle, shown wherever the agent is named (E2, #182). Empty = the auto-assigned
+    /// default ([`crate::names::default_agent_handle`]); a non-empty value is the operator's rename.
+    pub agent_handle: String,
     pub launch_minimized: bool,
     /// Custom Ethereum RPC URL (bring-your-own-RPC). Empty = the bundled default.
     /// The trustless default (a local Helios light client) supersedes this later.
@@ -68,7 +77,8 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             theme_mode: ThemeModePref::Dark,
-            display_name: String::new(),
+            wallet_name: String::new(),
+            agent_handle: String::new(),
             launch_minimized: false,
             rpc_url: String::new(),
             watch_address: String::new(),
@@ -219,6 +229,24 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_display_name_migrates_into_wallet_name() {
+        // A pre-#182 config carried the value in `display_name` (the old "Display name" field,
+        // already described as a wallet-profile label). The serde alias must carry it into
+        // `wallet_name` so an upgrade never silently drops a name the user had set.
+        let legacy: Settings =
+            serde_json::from_str(r#"{"display_name":"Treasury"}"#).expect("legacy config parses");
+        assert_eq!(legacy.wallet_name, "Treasury");
+        // A new config uses the canonical field name.
+        let current: Settings =
+            serde_json::from_str(r#"{"wallet_name":"Treasury"}"#).expect("current config parses");
+        assert_eq!(current.wallet_name, "Treasury");
+        // Round-trip writes the canonical name (the alias is read-only).
+        let json = serde_json::to_string(&current).expect("serialize");
+        assert!(json.contains("wallet_name"));
+        assert!(!json.contains("display_name"));
+    }
 
     #[test]
     fn rpc_resolution_prefers_env_then_setting_then_per_chain_default() {
