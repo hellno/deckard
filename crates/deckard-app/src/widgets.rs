@@ -7,16 +7,27 @@
 //! cause of the visual drift. A primitive bakes in the correct DESIGN value so a
 //! screen *cannot* drift.
 //!
-//! Style matches the rest of the crate: pure functions that take explicit theme
-//! colors (`Hsla`) and return an `AnyElement` (see `shell_chrome::agent_squircle`).
+//! Style matches the rest of the crate: the atomic primitives are pure functions that take
+//! explicit theme colors (`Hsla`) and return an `AnyElement` (see `shell_chrome::agent_squircle`).
 //! No raw hex; callers pass `cx.theme().*` / `theme::amber(is_dark)`.
+//!
+//! The v4 *composite* widgets (`origin_header`, `status_glyph`, `balance_diff`, the `meta_rail`
+//! family, `stop_brake`) pull many theme tokens at once, so they take `theme: &Theme` and resolve
+//! colors internally — the convention DESIGN.md §Build notes sanctions ("a widget reads them from
+//! `cx.theme()`"). Their pure decision logic (the platform key-cap label, the action-tag label,
+//! the status→icon map) is factored into small `fn`s that ARE unit-tested. Every v4 primitive is
+//! the foundation the request-origin views (E2–E7, epic #179) consume; until a child wires its
+//! call site, each carries a scoped `#[allow(dead_code)]` with a `// reason:` naming that consumer
+//! (the `money::usd` precedent), so `-D warnings` stays green without a one-off view edit here.
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
     div, px, relative, AnyElement, FontWeight, Hsla, IntoElement, ParentElement, Pixels,
     SharedString, Styled,
 };
-use gpui_component::{h_flex, v_flex, Icon, IconName};
+use gpui_component::{h_flex, v_flex, Icon, IconName, Theme};
+
+use deckard_core::U256;
 
 /// Middle-truncate an address/hash to the ONE canonical rule: first-6 + last-4
 /// (DESIGN §Trust: "show enough of each address that two are distinguishable").
@@ -92,11 +103,22 @@ pub(crate) fn divider(color: Hsla) -> AnyElement {
         .into_any_element()
 }
 
+/// The deterministic single-char monogram for an identity `seed` (DESIGN §Actor model: shape is
+/// the accessibility backup; never a blank fill). The first char, uppercased, or `•` when empty.
+fn monogram(seed: &str) -> SharedString {
+    seed.trim()
+        .chars()
+        .next()
+        .map(|c| c.to_uppercase().to_string())
+        .unwrap_or_else(|| "•".to_string())
+        .into()
+}
+
 /// A project / wallet **identity mark** with a deterministic monogram (DESIGN
 /// §Actor model: shape is the accessibility backup; never a blank fill). Square
 /// (rounded) for projects/wallets; pass `radius = size / 2` for the round human
 /// principal. `fill` is the desaturated identity slate; `glyph` tints the monogram.
-/// The agent uses `shell_chrome::agent_squircle` instead (cyan, the actor signal).
+/// The agent uses [`agent_mark`] / `shell_chrome::agent_squircle` instead (cyan, the actor signal).
 pub(crate) fn identity_mark(
     seed: &str,
     size: Pixels,
@@ -104,13 +126,6 @@ pub(crate) fn identity_mark(
     fill: Hsla,
     glyph: Hsla,
 ) -> AnyElement {
-    let ch: SharedString = seed
-        .trim()
-        .chars()
-        .next()
-        .map(|c| c.to_uppercase().to_string())
-        .unwrap_or_else(|| "•".to_string())
-        .into();
     div()
         .size(size)
         .rounded(radius)
@@ -123,7 +138,41 @@ pub(crate) fn identity_mark(
                 .text_size(size * 0.46)
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(glyph)
-                .child(ch),
+                .child(monogram(seed)),
+        )
+        .into_any_element()
+}
+
+/// The **cyan agent squircle**, handle-aware (DESIGN §Actor model: agent = a cyan squircle monogram
+/// — the ONE cyan surface). Same treatment as `shell_chrome::agent_squircle` — cyan-tint fill + the
+/// **cyan border that defines the squircle** + a cyan monogram — but seeded so it renders the agent's
+/// handle initial (`K` for `Kyoto`) instead of a fixed `A`. The bordered cyan mark IS the two-signal
+/// actor signal, so it keeps the border `identity_mark` omits.
+// reason: consumed by `origin_header` (E5, #185); E2 (#182) migrates the sidebar/breadcrumb/feed off
+// the fixed-`A` `shell_chrome::agent_squircle` onto this handle-aware widget.
+#[allow(dead_code)]
+fn agent_mark(
+    seed: &str,
+    size: Pixels,
+    radius: Pixels,
+    agent: Hsla,
+    agent_tint: Hsla,
+) -> AnyElement {
+    div()
+        .size(size)
+        .rounded(radius)
+        .bg(agent_tint)
+        .border_1()
+        .border_color(agent)
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .text_size(size * 0.46)
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(agent)
+                .child(monogram(seed)),
         )
         .into_any_element()
 }
@@ -215,4 +264,717 @@ pub(crate) fn truncated_address(
                 .child(short_addr(addr)),
         )
         .into_any_element()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// v4 request-origin primitives (epic #179). Each is the shared foundation the
+// origin views consume; the `#[allow(dead_code)]` + `// reason:` lands the widget
+// ahead of its E2–E7 consumer (mirrors `money::usd`) so no later view hand-rolls it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A chord a [`key_cap`] can render. The `⌘↵` chord renders as ONE cap (DESIGN §The confirm
+/// pattern) — a chord can't be fat-fingered like a bare Enter.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // reason: variants selected per confirm tier by E5/E6 (#185/#186).
+pub(crate) enum KeyCap {
+    /// The irreversible-move confirm chord: `⌘↵` on macOS, `Ctrl↵` elsewhere.
+    CmdEnter,
+    /// A routine forward step (Continue / Review / Next).
+    Enter,
+    /// A literal single key (e.g. `X` to deny).
+    Key(&'static str),
+}
+
+/// The primary-modifier label for `os` (pass `std::env::consts::OS`): `⌘` on macOS, `Ctrl`
+/// everywhere else. A pure fn so the platform mapping is unit-testable without a window.
+#[allow(dead_code)] // reason: the platform half of `key_cap`; consumed by E5/E6 via `key_cap`.
+fn primary_mod_label(os: &str) -> &'static str {
+    if os == "macos" {
+        "⌘"
+    } else {
+        "Ctrl"
+    }
+}
+
+/// The glyphs a [`KeyCap`] renders for `os`. Pure (no rendering) so it is unit-testable.
+#[allow(dead_code)] // reason: the label half of `key_cap`; consumed by E5/E6 via `key_cap`.
+fn key_cap_label(cap: KeyCap, os: &str) -> String {
+    match cap {
+        KeyCap::CmdEnter => format!("{}↵", primary_mod_label(os)),
+        KeyCap::Enter => "↵".to_string(),
+        KeyCap::Key(k) => k.to_string(),
+    }
+}
+
+/// A quiet, flat key-cap chip (DESIGN §The confirm pattern + §Command palette): a bordered,
+/// rounded, mono glyph. **Platform-aware** — `⌘` on macOS, `Ctrl` on Linux (via
+/// `std::env::consts::OS`), the `⌘↵` chord as ONE cap. `armed` renders the amber border + amber
+/// text (no fill) of the live confirm; at rest it is `border.strong` + `text.muted`. The one
+/// key-cap so no view hardcodes a `⌘`/`Ctrl` glyph.
+// reason: the v4 confirm button (E5, #185) + activity / needs-you key hints (E6, #186) consume
+// this; E1 lands the shared, platform-aware glyph so no later view re-rolls it.
+#[allow(dead_code)]
+pub(crate) fn key_cap(
+    cap: KeyCap,
+    armed: bool,
+    border_strong: Hsla,
+    muted: Hsla,
+    amber: Hsla,
+    mono: SharedString,
+) -> AnyElement {
+    let (border, text) = if armed {
+        (amber, amber)
+    } else {
+        (border_strong, muted)
+    };
+    div()
+        .flex()
+        .flex_shrink_0()
+        .items_center()
+        .justify_center()
+        .px_1p5()
+        .py_0p5()
+        .rounded(crate::tokens::RADIUS_INPUT)
+        .border_1()
+        .border_color(border)
+        .font_family(mono)
+        .text_xs()
+        .text_color(text)
+        .child(SharedString::from(key_cap_label(cap, std::env::consts::OS)))
+        .into_any_element()
+}
+
+/// A value-move verb, for [`action_tag`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // reason: variants selected per row by the Activity feed / Review (E5/E6).
+pub(crate) enum ActionKind {
+    Send,
+    Swap,
+    Shield,
+    Supply,
+    Receive,
+    Approve,
+    Revoke,
+}
+
+/// The uppercase label for an [`ActionKind`]. Pure so it is unit-testable.
+#[allow(dead_code)] // reason: the label half of `action_tag`; consumed via `action_tag` (E6).
+fn action_label(kind: ActionKind) -> &'static str {
+    match kind {
+        ActionKind::Send => "SEND",
+        ActionKind::Swap => "SWAP",
+        ActionKind::Shield => "SHIELD",
+        ActionKind::Supply => "SUPPLY",
+        ActionKind::Receive => "RECEIVE",
+        ActionKind::Approve => "APPROVE",
+        ActionKind::Revoke => "REVOKE",
+    }
+}
+
+/// The uppercase action chip (`SWAP` / `SHIELD` / `SEND` / `SUPPLY`) that leads a scannable
+/// activity or needs-you row (DESIGN §The request-origin model: an action *tag*, not prose). A
+/// NEUTRAL chip — `bg.raise` fill, hairline border, `text.secondary` — never a signal color: the
+/// origin identity carries the color, the tag carries the verb.
+// reason: consumed by the v4 Activity feed + needs-you queue (E6, #186) and the Review verb (E5);
+// E1 lands it so no row hand-rolls a `format!`-uppercased span.
+#[allow(dead_code)]
+pub(crate) fn action_tag(kind: ActionKind, raise: Hsla, border: Hsla, text: Hsla) -> AnyElement {
+    div()
+        .flex_shrink_0()
+        .px_1p5()
+        .py_0p5()
+        .rounded(crate::tokens::RADIUS_ROW)
+        .bg(raise)
+        .border_1()
+        .border_color(border)
+        .text_size(crate::tokens::TEXT_LABEL)
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(text)
+        .child(SharedString::from(action_label(kind)))
+        .into_any_element()
+}
+
+/// The state a [`status_glyph`] carries.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // reason: variants selected per row/receipt by E6/E7 (#186/#187).
+pub(crate) enum StatusGlyph {
+    /// Confirmed / approved / executed — a `success` check.
+    Confirmed,
+    /// Failed / declined / revoked — a `danger` x.
+    Failed,
+    /// Awaiting you — an amber ring.
+    Pending,
+    /// An agent currently acting — a cyan ring.
+    Live,
+    /// No status — a muted minus.
+    Neutral,
+}
+
+/// The Lucide icon for a [`StatusGlyph`]. Pure so it is unit-testable. No `clock` ships in the
+/// icon set, so `Pending`/`Live` use the loader ring — the DESIGN "clock-ring = pending" intent
+/// (a ring, not a checkmark); the color separates awaiting-you (amber) from an agent (cyan).
+#[allow(dead_code)] // reason: the icon half of `status_glyph`; consumed via `status_glyph`.
+fn status_icon(state: StatusGlyph) -> IconName {
+    match state {
+        StatusGlyph::Confirmed => IconName::CircleCheck,
+        StatusGlyph::Failed => IconName::CircleX,
+        StatusGlyph::Pending | StatusGlyph::Live => IconName::LoaderCircle,
+        StatusGlyph::Neutral => IconName::Minus,
+    }
+}
+
+/// The ONE status vocabulary (DESIGN §Component primitives: "one status vocabulary across feed +
+/// chips"): a circular glyph whose color carries the state — `success` check = confirmed, `danger`
+/// x = failed, amber ring = pending/awaiting-you, cyan ring = an agent acting, muted minus = none.
+/// The icon shape backs the color, so it survives grayscale.
+// reason: consumed by the v4 Activity feed + Transaction receipt (E6/E7, #186/#187); E1 lands one
+// glyph set so the feed + receipt stop re-rolling per-file status SVGs.
+#[allow(dead_code)]
+pub(crate) fn status_glyph(state: StatusGlyph, theme: &Theme) -> AnyElement {
+    let is_dark = theme.is_dark();
+    let tone = match state {
+        StatusGlyph::Confirmed => theme.success,
+        StatusGlyph::Failed => theme.danger,
+        StatusGlyph::Pending => crate::theme::amber(is_dark),
+        StatusGlyph::Live => crate::theme::agent(is_dark),
+        StatusGlyph::Neutral => theme.muted_foreground,
+    };
+    Icon::new(status_icon(state))
+        .size(crate::tokens::ICON_MD)
+        .text_color(tone)
+        .into_any_element()
+}
+
+/// A [`kv_row`] value: mono by default, sans for a human phrase ("Ethereum · mainnet"), or
+/// `success`-tinted for a verified / OK state.
+#[allow(dead_code)] // reason: variants selected per fact by the rail / Review (E3/E5).
+pub(crate) enum KvValue<'a> {
+    Mono(&'a str),
+    Sans(&'a str),
+    Ok(&'a str),
+}
+
+/// The ONE key/value row (DESIGN §Widget vocabulary): label-left `text.muted`, value-right (mono
+/// `text.primary`, or sans, or `success`), the row clamped so a long value truncates rather than
+/// overflowing. Shared by clear-signing quiet-facts, the policy ledger, and the metadata rail.
+// reason: consumed by the v4 metadata rail (E3, #183) + the Review quiet facts (E5, #185).
+#[allow(dead_code)]
+pub(crate) fn kv_row(
+    label: &str,
+    value: KvValue,
+    muted: Hsla,
+    primary: Hsla,
+    success: Hsla,
+    mono: SharedString,
+) -> AnyElement {
+    let (text, is_mono, color) = match value {
+        KvValue::Mono(v) => (v, true, primary),
+        KvValue::Sans(v) => (v, false, primary),
+        KvValue::Ok(v) => (v, false, success),
+    };
+    h_flex()
+        .w_full()
+        .items_center()
+        .justify_between()
+        .gap_4()
+        .text_size(crate::tokens::TEXT_BODY)
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_color(muted)
+                .child(SharedString::from(label.to_string())),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_color(color)
+                .when(is_mono, |d| d.font_family(mono))
+                .child(SharedString::from(text.to_string())),
+        )
+        .into_any_element()
+}
+
+/// The ONE page-header anatomy (DESIGN §Component primitives): a caller-built identity `mark`
+/// (`identity_mark` / `agent_squircle`) + an H1 title at ONE size (`text_xl`, `text.primary`,
+/// 600) + an optional muted one-line subtitle. Kills the hand-rolled headers at three sizes.
+// reason: consumed by the v4 view headers (E2/E4/E6/E7); E1 lands the one anatomy so no view
+// re-rolls a header at its own size.
+#[allow(dead_code)]
+pub(crate) fn page_header(
+    mark: AnyElement,
+    title: &str,
+    subtitle: Option<&str>,
+    primary: Hsla,
+    muted: Hsla,
+) -> AnyElement {
+    h_flex()
+        .w_full()
+        .items_center()
+        .gap_3()
+        .child(mark)
+        .child(
+            v_flex()
+                .min_w_0()
+                .gap_0p5()
+                .child(
+                    div()
+                        .text_xl()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(primary)
+                        .child(SharedString::from(title.to_string())),
+                )
+                .when_some(subtitle, |d, s| {
+                    d.child(
+                        div()
+                            .text_sm()
+                            .text_color(muted)
+                            .child(SharedString::from(s.to_string())),
+                    )
+                }),
+        )
+        .into_any_element()
+}
+
+/// Who a shared-Review request came FROM (DESIGN §The request-origin model): the human, an agent,
+/// or a dapp. The verb is the human's action (`You are sending`); agents `propose`, dapps `request`.
+#[allow(dead_code)] // reason: constructed per request by the shared Review (E5, #185) + rail (E3).
+pub(crate) enum Origin<'a> {
+    /// The human principal — a round identity mark (`account` seeds it) + amber `You are {verb}`.
+    You { account: &'a str, verb: &'a str },
+    /// An agent (MCP) — a cyan mark (`handle` seeds it) + `{handle} proposes`, the cyan signal.
+    Agent { handle: &'a str },
+    /// A dapp origin — a NEUTRAL favicon mark + `{domain} requests`; never a third signal color.
+    Dapp { domain: &'a str },
+}
+
+/// A per-origin trust badge (DESIGN §The request-origin model): it borrows the STATE colors, never
+/// a signal hue. `Verified` = success, `FirstSeen` = amber caution, `Flagged` = danger.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // reason: attached per origin by the shared Review (E5, #185).
+pub(crate) enum Trust {
+    Verified,
+    FirstSeen,
+    Flagged,
+}
+
+/// The small state-color trust badge for the [`origin_header`] rail.
+#[allow(dead_code)] // reason: the badge half of `origin_header`; consumed via `origin_header`.
+fn trust_badge(trust: Trust, theme: &Theme) -> AnyElement {
+    let is_dark = theme.is_dark();
+    // The tint is hue-keyed (DESIGN §Opacity): the amber caution reads weaker at equal alpha, so it
+    // gets the `alpha-tint-warm` .14 (via `theme::amber_tint`); the success/danger states take the
+    // standard `ALPHA_TINT` .12.
+    let (label, tone, tint) = match trust {
+        Trust::Verified => (
+            "Verified",
+            theme.success,
+            theme.success.opacity(crate::tokens::ALPHA_TINT),
+        ),
+        Trust::FirstSeen => (
+            "New site",
+            crate::theme::amber(is_dark),
+            crate::theme::amber_tint(is_dark),
+        ),
+        Trust::Flagged => (
+            "Flagged",
+            theme.danger,
+            theme.danger.opacity(crate::tokens::ALPHA_TINT),
+        ),
+    };
+    div()
+        .flex_shrink_0()
+        .px_1p5()
+        .py_0p5()
+        .rounded(crate::tokens::RADIUS_ROW)
+        .bg(tint)
+        .border_1()
+        .border_color(tone)
+        .text_size(crate::tokens::TEXT_LABEL)
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(tone)
+        .child(SharedString::from(label))
+        .into_any_element()
+}
+
+/// The request-origin header rail on the shared Review (DESIGN §Clear-signing): identity mark +
+/// who-line + an optional state-color trust badge, over a bottom hairline. This is the ONLY thing
+/// that changes across origins — the review body below is identical, so there is one review to be
+/// fooled by. A dapp/external origin is a neutral identity + a state-color badge, NEVER a third
+/// signal color; the agent mark is the bordered cyan squircle ([`agent_mark`], handle-aware).
+/// `You` is amber, an agent is cyan, a dapp is neutral.
+// reason: consumed by the ONE shared Review (E5, #185) + the rail's compact clear-signing (E3).
+#[allow(dead_code)]
+pub(crate) fn origin_header(origin: Origin, trust: Option<Trust>, theme: &Theme) -> AnyElement {
+    let is_dark = theme.is_dark();
+    let amber = crate::theme::amber(is_dark);
+    let agent = crate::theme::agent(is_dark);
+    let agent_tint = crate::theme::agent_tint(is_dark);
+    let id_fill = crate::theme::identity_square(is_dark);
+    let primary = theme.foreground;
+    let muted = theme.muted_foreground;
+    let border = theme.border;
+    let round = crate::tokens::MARK_LG * 0.5;
+
+    // (mark, who-line) per origin. The dapp who-line is neutral (dim domain + primary verb);
+    // You/Agent tint the whole phrase with their signal color.
+    let (mark, who): (AnyElement, AnyElement) = match origin {
+        Origin::You { account, verb } => (
+            identity_mark(account, crate::tokens::MARK_LG, round, id_fill, primary),
+            div()
+                .text_sm()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(amber)
+                .child(SharedString::from(format!("You are {verb}")))
+                .into_any_element(),
+        ),
+        Origin::Agent { handle } => (
+            agent_mark(
+                handle,
+                crate::tokens::MARK_LG,
+                crate::tokens::RADIUS_ROW,
+                agent,
+                agent_tint,
+            ),
+            div()
+                .text_sm()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(agent)
+                .child(SharedString::from(format!("{handle} proposes")))
+                .into_any_element(),
+        ),
+        Origin::Dapp { domain } => (
+            identity_mark(
+                domain,
+                crate::tokens::MARK_LG,
+                crate::tokens::RADIUS_ROW,
+                id_fill,
+                primary,
+            ),
+            h_flex()
+                .min_w_0()
+                .items_baseline()
+                .gap_1()
+                .text_sm()
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(muted)
+                        .child(SharedString::from(domain.to_string())),
+                )
+                .child(div().flex_shrink_0().text_color(primary).child("requests"))
+                .into_any_element(),
+        ),
+    };
+
+    h_flex()
+        .w_full()
+        .items_center()
+        .gap_3()
+        .pb_4()
+        .border_b_1()
+        .border_color(border)
+        .child(mark)
+        .child(div().flex_1().min_w_0().child(who))
+        .when_some(trust, |el, t| el.child(trust_badge(t, theme)))
+        .into_any_element()
+}
+
+/// A direction for a [`DiffRow`]: what the tx does to a balance.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // reason: selected per net effect by the receipt / multi-effect Review (E7/E5).
+pub(crate) enum DiffDir {
+    /// You pay — `−`, `danger`.
+    Out,
+    /// You receive — `+`, `success`.
+    In,
+}
+
+/// One row of a [`balance_diff`] — a net effect on one asset.
+#[allow(dead_code)] // reason: constructed per net effect by the receipt / Review (E7/E5).
+pub(crate) struct DiffRow<'a> {
+    /// The ticker — seeds the row's token mark and is its label (e.g. `ETH`).
+    pub token: &'a str,
+    /// The magnitude in base units.
+    pub amount: U256,
+    /// Decimals for `amount` (18 for ETH).
+    pub decimals: u8,
+    /// The direction of the effect.
+    pub dir: DiffDir,
+}
+
+/// The Rabby-style "what changes" balance diff (DESIGN §Clear-signing): hairline rows, no card,
+/// each `[token mark] [ticker] ···· [signed amount]`. Kept ONLY for a multi-effect tx whose net
+/// effects aren't obvious from the hero (a simple swap states its amount once, no diff). `Out`
+/// renders `−` in `danger`, `In` renders `+` in `success`; the amount is mono via `money.rs`.
+// reason: consumed by the read-only Transaction receipt + multi-effect Review (E7/E5, #187/#185).
+#[allow(dead_code)]
+pub(crate) fn balance_diff(rows: &[DiffRow], theme: &Theme) -> AnyElement {
+    let muted = theme.muted_foreground;
+    let border = theme.border;
+    let raise = theme.secondary; // bg.raise — the token mark fill
+    let success = theme.success;
+    let danger = theme.danger;
+    let mono = theme.mono_font_family.clone();
+
+    let mut col = v_flex().w_full().border_b_1().border_color(border);
+    for row in rows {
+        let (sign, tone) = match row.dir {
+            DiffDir::Out => ("−", danger),
+            DiffDir::In => ("+", success),
+        };
+        col = col.child(
+            h_flex()
+                .w_full()
+                .items_center()
+                .gap_3()
+                .py_3()
+                .border_t_1()
+                .border_color(border)
+                .child(identity_mark(
+                    row.token,
+                    crate::tokens::MARK_MD,
+                    crate::tokens::RADIUS_ROW,
+                    raise,
+                    muted,
+                ))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(crate::tokens::TEXT_BODY)
+                        .text_color(muted)
+                        .child(SharedString::from(row.token.to_string())),
+                )
+                .child(
+                    h_flex()
+                        .flex_shrink_0()
+                        .items_baseline()
+                        .child(div().font_family(mono.clone()).text_color(tone).child(sign))
+                        .child(crate::money::money(
+                            row.amount,
+                            row.decimals,
+                            6,
+                            Some(row.token),
+                            false,
+                            mono.clone(),
+                            tone,
+                            tone,
+                        )),
+                ),
+        );
+    }
+    col.into_any_element()
+}
+
+/// The always-on right metadata rail container (DESIGN §IA: "~300px, hairline-left, not
+/// collapsible; contextual to the focused object"). A fixed-width column — a titled 48px head over
+/// a scrollable body. E3 fills `body` with `meta_section` / `meta_obj` / `kv_row` blocks.
+// reason: consumed by the three-pane shell (E3, #183) — home / request / transaction rail bodies.
+#[allow(dead_code)]
+pub(crate) fn meta_rail(title: &str, body: AnyElement, theme: &Theme) -> AnyElement {
+    let border = theme.border;
+    let rail_bg = theme.sidebar; // bg.rail
+    let fg = theme.foreground;
+    v_flex()
+        .w(crate::tokens::RAIL_W)
+        .h_full()
+        .flex_shrink_0()
+        .min_h_0()
+        .bg(rail_bg)
+        .border_l_1()
+        .border_color(border)
+        .child(
+            h_flex()
+                .flex_shrink_0()
+                .h(px(48.0))
+                .px_4()
+                .items_center()
+                .border_b_1()
+                .border_color(border)
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(fg)
+                        .child(SharedString::from(title.to_string())),
+                ),
+        )
+        .child(
+            v_flex()
+                .flex_1()
+                .min_h_0()
+                .overflow_hidden()
+                .p_4()
+                .gap_4()
+                .child(body),
+        )
+        .into_any_element()
+}
+
+/// A ruled sub-section inside [`meta_rail`] (DESIGN: a `.metasec` — a top hairline + an optional
+/// `section_label` + body). Groups a set of `kv_row`s under a quiet label.
+// reason: consumed by the three-pane shell rail bodies (E3, #183).
+#[allow(dead_code)]
+pub(crate) fn meta_section(label: Option<&str>, body: AnyElement, theme: &Theme) -> AnyElement {
+    let border = theme.border;
+    let muted = theme.muted_foreground;
+    v_flex()
+        .w_full()
+        .pt_4()
+        .gap_3()
+        .border_t_1()
+        .border_color(border)
+        .when_some(label, |d, l| d.child(section_label(l, muted)))
+        .child(body)
+        .into_any_element()
+}
+
+/// The identity object at the top of a rail body (DESIGN: a `.metaobj` — a caller-built `mark` +
+/// name (600) + a mono sub-line, e.g. the truncated address or `shield · confirmed`).
+// reason: consumed by the three-pane shell rail bodies (E3, #183).
+#[allow(dead_code)]
+pub(crate) fn meta_obj(mark: AnyElement, name: &str, sub: &str, theme: &Theme) -> AnyElement {
+    let fg = theme.foreground;
+    let muted = theme.muted_foreground;
+    let mono = theme.mono_font_family.clone();
+    h_flex()
+        .w_full()
+        .items_center()
+        .gap_3()
+        .child(mark)
+        .child(
+            v_flex()
+                .min_w_0()
+                .gap_0p5()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(fg)
+                        .child(SharedString::from(name.to_string())),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .font_family(mono)
+                        .text_xs()
+                        .text_color(muted)
+                        .child(SharedString::from(sub.to_string())),
+                ),
+        )
+        .into_any_element()
+}
+
+/// The STOP brake state (DESIGN §Widget vocabulary + §Agent model).
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // reason: driven by agent-active + arm state in the Activity header (E6, #186).
+pub(crate) enum BrakeState {
+    /// An agent is active, not yet armed — amber, `Stop all agents`.
+    Ready,
+    /// Armed after the first press — danger, `Confirm STOP`.
+    Armed,
+    /// No agent running — neutral, `No agents running` (never a start/stop toggle).
+    Idle,
+}
+
+/// The one kill-switch treatment (DESIGN §Widget vocabulary): amber-idle → danger-armed, reused
+/// across Activity + the agent surface. Text-only (no `power` icon ships, and the app's existing
+/// STOP is text), the always-reachable panic brake; the view owns the `⌘↵`/Esc arm handlers and
+/// the STOP-zeroizes-the-key logic — this renders only its state.
+// reason: consumed by the v4 Activity header + agent surface (E6, #186) to replace the two
+// hand-rolled STOP controls with one widget.
+#[allow(dead_code)]
+pub(crate) fn stop_brake(state: BrakeState, theme: &Theme) -> AnyElement {
+    let is_dark = theme.is_dark();
+    let amber = crate::theme::amber(is_dark);
+    let amber_tint = crate::theme::amber_tint(is_dark);
+    let danger = theme.danger;
+    let border = theme.border;
+    let muted = theme.muted_foreground;
+    let (label, edge, text, fill) = match state {
+        BrakeState::Ready => ("Stop all agents", amber, amber, Some(amber_tint)),
+        BrakeState::Armed => (
+            "Confirm STOP",
+            danger,
+            danger,
+            Some(danger.opacity(crate::tokens::ALPHA_TINT)),
+        ),
+        BrakeState::Idle => ("No agents running", border, muted, None),
+    };
+    h_flex()
+        .flex_shrink_0()
+        .items_center()
+        .px_3()
+        .py_1p5()
+        .rounded(crate::tokens::RADIUS_ROW)
+        .border_1()
+        .border_color(edge)
+        .when_some(fill, |d, f| d.bg(f))
+        .text_size(crate::tokens::TEXT_BODY)
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(text)
+        .child(SharedString::from(label))
+        .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_cap_is_platform_aware() {
+        // AC #2: `Ctrl` on a forced-Linux path, `⌘` on macOS. The public `key_cap` reads
+        // `std::env::consts::OS`; the pure helpers let us assert BOTH platforms from any host.
+        assert_eq!(primary_mod_label("macos"), "⌘");
+        assert_eq!(primary_mod_label("linux"), "Ctrl");
+        // A non-macOS `os` string always resolves to `Ctrl` (Linux/Windows/other).
+        assert_eq!(primary_mod_label("windows"), "Ctrl");
+    }
+
+    #[test]
+    fn key_cap_chord_renders_as_one_cap() {
+        // The `⌘↵` / `Ctrl↵` chord is a single cap's text, platform-aware.
+        assert_eq!(key_cap_label(KeyCap::CmdEnter, "macos"), "⌘↵");
+        assert_eq!(key_cap_label(KeyCap::CmdEnter, "linux"), "Ctrl↵");
+        // Routine forward step is a bare Enter; a literal key is passed through.
+        assert_eq!(key_cap_label(KeyCap::Enter, "macos"), "↵");
+        assert_eq!(key_cap_label(KeyCap::Key("X"), "linux"), "X");
+    }
+
+    #[test]
+    fn action_tags_are_uppercase_verbs() {
+        assert_eq!(action_label(ActionKind::Swap), "SWAP");
+        assert_eq!(action_label(ActionKind::Shield), "SHIELD");
+        assert_eq!(action_label(ActionKind::Send), "SEND");
+        assert_eq!(action_label(ActionKind::Supply), "SUPPLY");
+    }
+
+    #[test]
+    fn status_glyphs_map_to_shipped_icons() {
+        // No `clock` ships → pending/live share the loader ring; the color (resolved at the
+        // render site) separates them. Confirmed/failed/neutral map to their circle glyphs.
+        // `IconName` derives only `IntoElement, Clone` (no `PartialEq`), so match on the variant.
+        assert!(matches!(
+            status_icon(StatusGlyph::Confirmed),
+            IconName::CircleCheck
+        ));
+        assert!(matches!(
+            status_icon(StatusGlyph::Failed),
+            IconName::CircleX
+        ));
+        assert!(matches!(
+            status_icon(StatusGlyph::Pending),
+            IconName::LoaderCircle
+        ));
+        assert!(matches!(
+            status_icon(StatusGlyph::Live),
+            IconName::LoaderCircle
+        ));
+        assert!(matches!(status_icon(StatusGlyph::Neutral), IconName::Minus));
+    }
 }

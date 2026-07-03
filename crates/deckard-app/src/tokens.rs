@@ -39,8 +39,30 @@ pub const RADIUS_MODAL: Pixels = px(10.0);
 /// Dividers, input outlines, the focus ring — the one hairline width.
 pub const STROKE_HAIRLINE: Pixels = px(1.0);
 
+// ── Object sizes (marks / glyphs) — a SEPARATE named ladder (DESIGN.md §Object sizes),
+//    tuned to glyph legibility and deliberately OFF the 4px spacing grid: the grid governs
+//    *space between* things, this ladder governs *the size of* things. Each rung lands with its
+//    first consumer (an unused `pub const` is a build error here), so `mark-sm` (16, the inline
+//    row/chip mark) arrives with E2/E6 when a 16px mark does; E1 needs only these two rungs. A
+//    mark picks the nearest rung, never a raw off-ladder `px()`. ──
+/// A balance-diff token mark (sidebar / breadcrumb marks are this rung too).
+pub const MARK_MD: Pixels = px(20.0);
+/// The page-header mark + the shared-Review origin / metadata-rail object mark.
+pub const MARK_LG: Pixels = px(30.0);
+
+// ── Icon sizes (DESIGN.md §Icons) — Lucide, hairline-weight, `currentColor`. ──
+/// Status glyphs + row leads (matches gpui's default `size_4`; named so the intent is explicit).
+pub const ICON_MD: Pixels = px(16.0);
+
+// ── Opacity / tint alpha (DESIGN.md §Opacity) — one alpha ladder so tints stop being one-off
+//    rgba literals. The two SIGNAL tints (amber .14, cyan .12) live in `theme.rs`; this is the
+//    STATE tint, for a success/danger trust badge or the armed STOP brake fill. ──
+pub const ALPHA_TINT: f32 = 0.12;
+
 // ── Chrome dimensions ──
 pub const SIDEBAR_W: Pixels = px(248.0);
+/// The always-on right metadata rail (DESIGN.md §IA: "~300px, hairline-left, not collapsible").
+pub const RAIL_W: Pixels = px(300.0);
 pub const STATUS_H: Pixels = px(25.0);
 /// The reading column on a main surface.
 pub const CONTENT_MAX_W: Pixels = px(760.0);
