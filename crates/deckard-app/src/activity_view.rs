@@ -36,14 +36,14 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    div, px, Context, FontWeight, InteractiveElement, IntoElement, ParentElement,
+    div, px, AnyElement, Context, FontWeight, InteractiveElement, IntoElement, ParentElement,
     StatefulInteractiveElement, Styled,
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
     h_flex,
     scroll::ScrollableElement,
-    v_flex, ActiveTheme, Icon, IconName, Sizable,
+    v_flex, ActiveTheme, Icon, IconName, Sizable, Theme,
 };
 
 use deckard_contract::{
@@ -55,7 +55,10 @@ use deckard_contract::{
 use crate::money::money;
 use crate::shell::Shell;
 use crate::theme;
-use crate::widgets::agent_mark;
+use crate::widgets::{
+    agent_mark, caution_line, identity_mark, kv_row, meta_obj, meta_section, origin_header,
+    status_glyph, KvValue, Origin, StatusGlyph,
+};
 
 /// The displayed subject for an action's origin: the agent's handle when an agent acted, "You"
 /// when the foreground app did (E2, #182 — one agent in demo scope, named via `Shell::agent_handle`).
@@ -1450,6 +1453,289 @@ fn activity_shell(inner: gpui::AnyElement) -> impl IntoElement {
                 .items_start()
                 .child(inner),
         )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The Activity surface's right metadata rail (E3, #183; DESIGN §IA). Read-only —
+// approve/deny stay in the feed's own review, so the no-blind-approve invariant
+// lives there; the rail only ever *shows* the record in focus. Lives here (not in
+// `shell_rail.rs`) to reuse the feed's private summary helpers rather than fork them.
+// ─────────────────────────────────────────────────────────────────────────────
+
+impl Shell {
+    /// The Activity rail's title + body, contextual to what's in focus: the selected pending
+    /// request's compact clear-signing, else the most-recent broadcast transaction's receipt, else a
+    /// quiet empty state. `activity_selected` indexes the pending subset ([`activity_pending`]), so a
+    /// highlighted row is always the one detailed — never "Nothing selected." while a row is selected.
+    pub(crate) fn activity_rail(&self, cx: &mut Context<Self>) -> (&'static str, AnyElement) {
+        let theme = cx.theme();
+        let handle = self.agent_handle();
+        let pending = activity_pending(&self.activity);
+        // The rail matches the on-screen review: when one is open (`activity_reviewing`) and its
+        // record is still pending, detail THAT request; otherwise the highlighted pending row. So an
+        // open review of X never shows a different row's clear-signing beside it.
+        let focused = self
+            .activity_reviewing
+            .and_then(|id| pending.iter().copied().find(|r| r.request_id == id))
+            .or_else(|| pending.get(self.activity_selected).copied());
+        if let Some(rec) = focused {
+            return (
+                "Pending request",
+                request_rail_body(rec, &handle, self.mask, theme),
+            );
+        }
+        // Nothing pending → the latest thing that actually broadcast (newest-first feed order).
+        if let Some(rec) = self.activity.iter().find(|r| r.tx_hash.is_some()) {
+            return (
+                "This transaction",
+                tx_rail_body(rec, &handle, self.mask, theme),
+            );
+        }
+        ("Activity", empty_rail_body(theme))
+    }
+}
+
+/// The compact headline verb for a pending request (`Shielding` / `Sending` / `Swapping`).
+fn request_verb(payload: &PendingPayloadView) -> &'static str {
+    match payload {
+        PendingPayloadView::Tx(intent) => match intent.kind {
+            IntentKind::Send => "Sending",
+            IntentKind::Shield => "Shielding",
+            IntentKind::Unshield => "Unshielding",
+            IntentKind::ContractCall => "Calling",
+        },
+        PendingPayloadView::Order(_) => "Swapping",
+        PendingPayloadView::Approve { .. } => "Approving",
+        PendingPayloadView::Message(_) => "Signing",
+    }
+}
+
+/// The lowercase action word for a settled receipt's sub-line (`shield · confirmed`).
+fn action_word(payload: &PendingPayloadView) -> &'static str {
+    match payload {
+        PendingPayloadView::Tx(intent) => match intent.kind {
+            IntentKind::Send => "send",
+            IntentKind::Shield => "shield",
+            IntentKind::Unshield => "unshield",
+            IntentKind::ContractCall => "call",
+        },
+        PendingPayloadView::Order(_) => "swap",
+        PendingPayloadView::Approve { .. } => "approve",
+        PendingPayloadView::Message(_) => "signature",
+    }
+}
+
+/// The selected pending request as **compact clear-signing** (DESIGN §The request-origin model): the
+/// origin header (agent = cyan, you = amber) + the verb/amount + the fence that's holding it + the
+/// irreversible caution. A read-only echo of the feed's review — the arm-delay confirm + resolve
+/// stay on the feed, so the rail can never blind-approve.
+fn request_rail_body(
+    rec: &ActivityRecord,
+    agent_handle: &str,
+    mask: bool,
+    theme: &Theme,
+) -> AnyElement {
+    let fg = theme.foreground;
+    let muted = theme.muted_foreground;
+    let success = theme.success;
+    let warn = theme.warning;
+    let mono = theme.mono_font_family.clone();
+    let amber = theme::amber(theme.is_dark());
+
+    // An agent proposes → the cyan origin header. An `App`-origin pending request is ambiguous —
+    // a foreground action OR a browser/dapp request the daemon always cards (`daemon.rs`) — and
+    // carries no domain on the record, so the rail stays NEUTRAL rather than claim a false amber
+    // human origin (two signal colors only). A precise dapp identity + trust badge lands when the
+    // bridge carries its origin (ADR-0001 / #44).
+    let header = match rec.origin {
+        ProposalOrigin::Agent => origin_header(
+            Origin::Agent {
+                handle: agent_handle,
+            },
+            None,
+            theme,
+        ),
+        ProposalOrigin::App => neutral_request_header(theme),
+    };
+
+    // The verb is the sans label; the second line is the amount/object in mono (golden ref's
+    // `txlabel` + `txmini`) — for a Tx that's the value (+ recipient), never a re-stated verb.
+    let object_line = match &rec.payload {
+        PendingPayloadView::Tx(intent) => {
+            let amount = format!("{} ETH", masked_amount(intent.value, mask));
+            match intent.kind {
+                IntentKind::Send => format!("{amount} → {}", short_address(&intent.to)),
+                _ => amount,
+            }
+        }
+        _ => payload_summary(&rec.payload, mask),
+    };
+    let headline = v_flex()
+        .w_full()
+        .gap_1()
+        .child(
+            div()
+                .text_sm()
+                .text_color(muted)
+                .child(request_verb(&rec.payload)),
+        )
+        .child(
+            div()
+                .w_full()
+                .min_w_0()
+                .truncate()
+                .font_family(mono.clone())
+                .text_color(fg)
+                .child(object_line),
+        )
+        .into_any_element();
+
+    // What's holding it: the ACTUAL breached fence (daemon-recomputed), or — for a guardrail hold
+    // that breached no cap — simply that it awaits approval.
+    let (fence_label, fence_val) = match cite_phrase(rec.reason) {
+        Some(phrase) => (cite_label(rec.reason), phrase),
+        None => ("Held for", "your approval"),
+    };
+    let facts = v_flex().w_full().gap_2().child(kv_row(
+        fence_label,
+        KvValue::Sans(fence_val),
+        muted,
+        fg,
+        success,
+        warn,
+        mono.clone(),
+    ));
+
+    v_flex()
+        .w_full()
+        .gap_4()
+        .child(header)
+        .child(headline)
+        .child(facts)
+        .child(caution_line(amber, fg, false, "This can't be undone."))
+        .into_any_element()
+}
+
+/// The most-recent broadcast transaction's **receipt** (compact): the actor identity, a status
+/// glyph + one-line result (an executed shield reads "moved … to your private balance"), and the
+/// facts the record actually carries — time + the tx hash. Block/fee aren't on an `ActivityRecord`,
+/// so the rail never invents them.
+fn tx_rail_body(rec: &ActivityRecord, agent_handle: &str, mask: bool, theme: &Theme) -> AnyElement {
+    let fg = theme.foreground;
+    let muted = theme.muted_foreground;
+    let success = theme.success;
+    let warn = theme.warning;
+    let mono = theme.mono_font_family.clone();
+    let is_dark = theme.is_dark();
+
+    let actor = origin_subject(rec.origin, agent_handle);
+    let mark = if rec.origin == ProposalOrigin::Agent {
+        agent_mark(
+            actor,
+            crate::tokens::MARK_LG,
+            crate::tokens::RADIUS_ROW,
+            theme::agent(is_dark),
+            theme::agent_tint(is_dark),
+        )
+    } else {
+        identity_mark(
+            actor,
+            crate::tokens::MARK_LG,
+            crate::tokens::RADIUS_ROW,
+            theme::identity_square(is_dark),
+            fg,
+        )
+    };
+    let sub = format!("{} · confirmed", action_word(&rec.payload));
+    let obj = meta_obj(mark, actor, &sub, theme);
+
+    let status = h_flex()
+        .w_full()
+        .items_center()
+        .gap_2()
+        .child(status_glyph(StatusGlyph::Confirmed, theme))
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_sm()
+                .text_color(fg)
+                .child(settled_outcome_label(rec, mask)),
+        )
+        .into_any_element();
+
+    let now = now_ms();
+    let mut facts = v_flex().w_full().gap_2().child(kv_row(
+        "Time",
+        KvValue::Sans(&relative_time(rec.timestamp_ms, now)),
+        muted,
+        fg,
+        success,
+        warn,
+        mono.clone(),
+    ));
+    if let Some(hash) = rec.tx_hash {
+        facts = facts.child(kv_row(
+            "Hash",
+            KvValue::Mono(&short_tx(&hash)),
+            muted,
+            fg,
+            success,
+            warn,
+            mono.clone(),
+        ));
+    }
+
+    v_flex()
+        .w_full()
+        .gap_4()
+        .child(obj)
+        .child(status)
+        .child(meta_section(None, facts.into_any_element(), theme))
+        .into_any_element()
+}
+
+/// A neutral "awaiting your approval" header for an ambiguous `App`-origin pending request. The
+/// two-signal model reserves amber for a genuine human and cyan for an agent, so an origin the rail
+/// can't attribute (foreground vs. browser bridge) gets neither — it mirrors `origin_header`'s
+/// mark + line + bottom-hairline anatomy in neutral.
+fn neutral_request_header(theme: &Theme) -> AnyElement {
+    let primary = theme.foreground;
+    let border = theme.border;
+    let id_fill = theme::identity_square(theme.is_dark());
+    h_flex()
+        .w_full()
+        .items_center()
+        .gap_3()
+        .pb_4()
+        .border_b_1()
+        .border_color(border)
+        .child(identity_mark(
+            "Request",
+            crate::tokens::MARK_LG,
+            crate::tokens::RADIUS_ROW,
+            id_fill,
+            primary,
+        ))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_sm()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(primary)
+                .child("Awaiting your approval"),
+        )
+        .into_any_element()
+}
+
+/// The quiet Activity rail when the feed is empty — nothing pending, nothing broadcast to detail.
+fn empty_rail_body(theme: &Theme) -> AnyElement {
+    div()
+        .text_sm()
+        .text_color(theme.muted_foreground)
+        .child("No activity yet.")
+        .into_any_element()
 }
 
 #[cfg(test)]

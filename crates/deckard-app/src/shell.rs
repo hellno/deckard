@@ -75,7 +75,6 @@ fn write_then_unlock(
 /// key-less automation on the same wallet EOA.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Selection {
-    Project,
     Wallet,
     Agent,
 }
@@ -3270,12 +3269,6 @@ impl Render for Shell {
                     .overflow_y_scrollbar()
                     .child(self.render_wallet_home(cx))
                     .into_any_element(),
-                (Selection::Project, Surface::Home) => div()
-                    .id("scroll-project")
-                    .size_full()
-                    .overflow_y_scrollbar()
-                    .child(self.render_project_home(cx))
-                    .into_any_element(),
                 // The agent's own surface (DESIGN.md v2 §The agent interaction model): selected
                 // from the sidebar Agents group. Rendered entirely from policy data + the agent's
                 // activity slice.
@@ -3290,24 +3283,32 @@ impl Render for Shell {
                 .size_full()
                 .child(title_bar)
                 .child(
-                    h_flex().size_full().child(self.render_sidebar(cx)).child(
-                        // Fill the full pane height (like the sidebar's `.h_full()`): `h_flex`
-                        // centers its children vertically, so without this the content column
-                        // collapses to its intrinsic height and floats mid-pane — the
-                        // breadcrumb, content, and bottom status strip then bunch up and overlap
-                        // whenever a view is shorter than the viewport.
-                        v_flex()
-                            .flex_1()
-                            .h_full()
-                            .min_w_0()
-                            .min_h_0()
-                            .child(self.render_breadcrumb(cx))
-                            // The slot is a `v_flex`, not a plain `div` (gpui defaults to
-                            // `display: block`): the centered Receive/Shield roots use `flex_1` +
-                            // `justify_center`, which only fill + center inside a flex parent.
-                            .child(v_flex().flex_1().min_h_0().child(content))
-                            .child(self.render_status_strip(cx)),
-                    ),
+                    // Three-pane shell (E3, #183): sidebar · main · the always-on right metadata
+                    // rail. The rail is a fixed-width `flex_shrink_0` sibling (never collapsible),
+                    // so the main column between them stays `flex_1` + `min_w_0` and content can
+                    // run off neither edge — the no-horizontal-overflow invariant.
+                    h_flex()
+                        .size_full()
+                        .child(self.render_sidebar(cx))
+                        .child(
+                            // Fill the full pane height (like the sidebar's `.h_full()`): `h_flex`
+                            // centers its children vertically, so without this the content column
+                            // collapses to its intrinsic height and floats mid-pane — the
+                            // breadcrumb, content, and bottom status strip then bunch up and overlap
+                            // whenever a view is shorter than the viewport.
+                            v_flex()
+                                .flex_1()
+                                .h_full()
+                                .min_w_0()
+                                .min_h_0()
+                                .child(self.render_breadcrumb(cx))
+                                // The slot is a `v_flex`, not a plain `div` (gpui defaults to
+                                // `display: block`): the centered Receive/Shield roots use `flex_1`
+                                // + `justify_center`, which only fill + center inside a flex parent.
+                                .child(v_flex().flex_1().min_h_0().child(content))
+                                .child(self.render_status_strip(cx)),
+                        )
+                        .child(self.render_meta_rail(cx)),
                 )
                 .children(self.palette_open.then(|| self.render_palette(cx)))
                 .into_any_element()
