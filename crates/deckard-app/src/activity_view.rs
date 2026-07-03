@@ -23,7 +23,7 @@
 //! had no human and renders neutral. An executed shield reads the *result* ("moved … ETH to your
 //! private balance"), the demo's payoff.
 //!
-//! Each row carries the two-actor chain (the cyan agent squircle for Atlas, neutral for a
+//! Each row carries the two-actor chain (the cyan `agent_mark` for the agent, neutral for a
 //! foreground app action), the lifecycle glyph, the real broadcast `tx_hash`, a relative
 //! timestamp, and — for an over-cap/over-scope proposal — the ACTUAL breached fence (per-tx vs
 //! daily, never a hardcoded cite). A header STOP control is the always-reachable panic brake.
@@ -54,14 +54,14 @@ use deckard_contract::{
 
 use crate::money::money;
 use crate::shell::Shell;
-use crate::shell_chrome::agent_squircle;
 use crate::theme;
+use crate::widgets::agent_mark;
 
-/// The displayed subject for an action's origin: the agent's name when an agent acted, "You"
-/// when the foreground app did. One agent in the demo scope (Atlas).
-fn origin_subject(origin: ProposalOrigin) -> &'static str {
+/// The displayed subject for an action's origin: the agent's handle when an agent acted, "You"
+/// when the foreground app did (E2, #182 — one agent in demo scope, named via `Shell::agent_handle`).
+fn origin_subject(origin: ProposalOrigin, agent_handle: &str) -> &str {
     match origin {
-        ProposalOrigin::Agent => "Atlas",
+        ProposalOrigin::Agent => agent_handle,
         ProposalOrigin::App => "You",
     }
 }
@@ -434,12 +434,10 @@ impl Shell {
                             .text_color(fg)
                             .child("Activity"),
                     )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(muted)
-                            .child("What Atlas and you did this session. Watch it, and stop it."),
-                    ),
+                    .child(div().text_sm().text_color(muted).child(format!(
+                        "What {} and you did this session. Watch it, and stop it.",
+                        self.agent_handle()
+                    ))),
             )
             .child(self.activity_stop_control(cx))
     }
@@ -549,11 +547,11 @@ impl Shell {
 
     /// One dense feed row — the two-actor chain + the outcome cluster.
     ///
-    /// - **Agent, auto-allowed within cap** (no human in the loop): `[A] Atlas · shield 0.05 ETH
+    /// - **Agent, auto-allowed within cap** (no human in the loop): `[K] Kyoto · shield 0.05 ETH
     ///   · auto-approved within cap  ✓ 0x6ea…9f3c · 4m ago` (muted label, green glyph).
-    /// - **Agent, executed shield** (the demo payoff): `[A] Atlas · shield 0.05 ETH · moved
+    /// - **Agent, executed shield** (the demo payoff): `[K] Kyoto · shield 0.05 ETH · moved
     ///   0.05 ETH to your private balance  ✓ 0x6ea…9f3c · 4m ago`.
-    /// - **Agent, proposed (over cap / mainnet)** — lives in NEEDS YOU: `[A] Atlas · … → You
+    /// - **Agent, proposed (over cap / mainnet)** — lives in NEEDS YOU: `[K] Kyoto · … → You
     ///   waiting … over per-tx cap`, plus the `⌘⏎ · x` hint on the SELECTED row and a hover-only
     ///   "Review →" for the mouse.
     /// - **Agent, human-approved/denied** (`!auto_allowed`, settled): the outcome label tints
@@ -583,6 +581,7 @@ impl Shell {
         let amber = theme::amber(is_dark);
 
         let is_agent = record.origin == ProposalOrigin::Agent;
+        let agent_handle = self.agent_handle();
         let proposed = is_proposed(record);
         let selected = proposed && selected_id == Some(record.request_id);
         // A human is in the chain for anything that was NOT auto-allowed hands-free — an over-cap
@@ -594,13 +593,19 @@ impl Shell {
         let needed_human = human_acted(record);
         let summary = payload_summary(&record.payload, self.mask);
 
-        // The lead glyph: the cyan agent squircle for an agent, a neutral identity square for an
-        // app action — both static.
+        // The lead glyph: the cyan agent mark (handle-seeded) for an agent, a neutral identity
+        // square for an app action — both static.
         let lead = if is_agent {
-            agent_squircle(px(20.0), px(6.0), agent, agent_tint)
+            agent_mark(
+                &agent_handle,
+                crate::tokens::MARK_MD,
+                crate::tokens::RADIUS_ROW,
+                agent,
+                agent_tint,
+            )
         } else {
             div()
-                .size(px(20.0))
+                .size(crate::tokens::MARK_MD)
                 .rounded(crate::tokens::RADIUS_ROW)
                 .bg(theme::identity_square(is_dark))
                 .into_any_element()
@@ -618,7 +623,7 @@ impl Shell {
                     .text_sm()
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(fg)
-                    .child(origin_subject(record.origin).to_string()),
+                    .child(origin_subject(record.origin, &agent_handle).to_string()),
             )
             .child(div().flex_shrink_0().text_sm().text_color(muted).child("·"))
             // The verb + object is the part that grows and clamps: it gets the flex space and
@@ -843,16 +848,23 @@ impl Shell {
         let agent_tint = theme::agent_tint(is_dark);
 
         let is_agent = record.origin == ProposalOrigin::Agent;
-        let subject = origin_subject(record.origin);
+        let agent_handle = self.agent_handle();
+        let subject = origin_subject(record.origin, &agent_handle);
         let cite = cite_phrase(record.reason).unwrap_or("held for your approval");
 
         let band = {
             let lead = if is_agent {
-                agent_squircle(px(24.0), px(7.0), agent, agent_tint)
+                agent_mark(
+                    &agent_handle,
+                    crate::tokens::MARK_MD,
+                    crate::tokens::RADIUS_ROW,
+                    agent,
+                    agent_tint,
+                )
             } else {
                 div()
-                    .size(px(24.0))
-                    .rounded(px(7.0))
+                    .size(crate::tokens::MARK_MD)
+                    .rounded(crate::tokens::RADIUS_ROW)
                     .bg(theme::identity_square(is_dark))
                     .into_any_element()
             };

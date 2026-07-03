@@ -81,7 +81,12 @@ impl Shell {
             .child(mode_button("mode-light", "Light", ThemeModePref::Light))
             .into_any_element();
 
-        let name_control = Input::new(&self.name_input).w(px(220.0)).into_any_element();
+        let wallet_name_control = Input::new(&self.wallet_name_input)
+            .w(px(220.0))
+            .into_any_element();
+        let agent_handle_control = Input::new(&self.agent_handle_input)
+            .w(px(220.0))
+            .into_any_element();
         let rpc_control = Input::new(&self.rpc_input).w(px(260.0)).into_any_element();
         let watch_control = Input::new(&self.watch_input)
             .w(px(260.0))
@@ -150,20 +155,28 @@ impl Shell {
                             watch_control,
                         )),
                 )
-                .child(section_label("Profile", muted))
+                .child(section_label("Names", muted))
                 .child(
                     card()
                         .child(row(
-                            "Display name",
-                            "A label for this wallet profile.",
-                            name_control,
+                            "Wallet name",
+                            "The name shown in the breadcrumb and masthead. Blank uses an auto-assigned name.",
+                            wallet_name_control,
                         ))
                         .child(divider(border))
                         .child(row(
-                            "Start in menu bar",
-                            "Launch minimized.",
-                            launch_control,
+                            "Agent handle",
+                            "The handle shown wherever the agent is named. Blank uses an auto-assigned handle.",
+                            agent_handle_control,
                         )),
+                )
+                .child(section_label("General", muted))
+                .child(
+                    card().child(row(
+                        "Start in menu bar",
+                        "Launch minimized.",
+                        launch_control,
+                    )),
                 )
                 .child(div().pt_2().text_xs().text_color(muted).child(format!(
                     "Preferences are stored at {}",

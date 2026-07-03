@@ -23,7 +23,6 @@ use gpui_component::{
 use crate::palette_commands::{self, COMMANDS};
 use crate::settings::ThemeModePref;
 use crate::shell::{Selection, Shell};
-use crate::shell_chrome::short_addr;
 use crate::theme;
 
 /// The live display label for a command — the registry title, except mask/theme flip to
@@ -105,8 +104,10 @@ impl Shell {
                     }),
             );
 
-        // --- Context line: the active scope (wallet identity / project). ---
-        let context_line = self.palette_context_line(id_square, muted, mono.clone());
+        // --- Context line: the active scope (wallet identity / agent / project). ---
+        let agent = theme::agent(is_dark);
+        let agent_tint = theme::agent_tint(is_dark);
+        let context_line = self.palette_context_line(id_square, fg, agent, agent_tint, muted);
 
         // --- Results: the ranked rows (or an empty-state line). ---
         let results = if self.palette_results.is_empty() {
@@ -188,48 +189,40 @@ impl Shell {
             )
     }
 
-    /// The context line under the query: the active scope. A wallet selection shows the
-    /// identity square + truncated mono address; the project shows the identity square +
-    /// "Personal".
+    /// The context line under the query: the active scope, named (E2, #182). A wallet shows its
+    /// identity mark + name (`Meridian`); the agent shows its cyan mark + handle (`Kyoto`); the
+    /// project shows its mark + name — never the literal word Wallet, never a raw address.
     fn palette_context_line(
         &self,
         id_square: gpui::Hsla,
+        fg: gpui::Hsla,
+        agent: gpui::Hsla,
+        agent_tint: gpui::Hsla,
         muted: gpui::Hsla,
-        mono: SharedString,
     ) -> impl IntoElement {
         let row = h_flex().items_center().gap_2().px_4().pb_2().text_xs();
+        let sm = crate::tokens::MARK_SM;
+        let radius = crate::tokens::RADIUS_ROW;
         match self.selection {
             Selection::Wallet => {
-                let addr = short_addr(&self.wallet_address_string());
-                let label = if addr.is_empty() {
-                    "Wallet".to_string()
-                } else {
-                    addr
-                };
-                row.child(
-                    div()
-                        .size(px(14.0))
-                        .rounded(crate::tokens::RADIUS_INPUT)
-                        .bg(id_square),
-                )
-                .child(div().font_family(mono).text_color(muted).child(label))
+                let name = self.wallet_name();
+                row.child(crate::widgets::identity_mark(
+                    &name, sm, radius, id_square, fg,
+                ))
+                .child(div().text_color(muted).child(name))
             }
             Selection::Project => row
-                .child(
-                    div()
-                        .size(px(14.0))
-                        .rounded(crate::tokens::RADIUS_INPUT)
-                        .bg(id_square),
-                )
+                .child(crate::widgets::identity_mark(
+                    "Personal", sm, radius, id_square, fg,
+                ))
                 .child(div().text_color(muted).child("Personal")),
-            Selection::Agent => row
-                .child(
-                    div()
-                        .size(px(14.0))
-                        .rounded(crate::tokens::RADIUS_INPUT)
-                        .bg(id_square),
-                )
-                .child(div().text_color(muted).child("Atlas")),
+            Selection::Agent => {
+                let handle = self.agent_handle();
+                row.child(crate::widgets::agent_mark(
+                    &handle, sm, radius, agent, agent_tint,
+                ))
+                .child(div().text_color(muted).child(handle))
+            }
         }
     }
 

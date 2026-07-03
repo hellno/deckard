@@ -45,6 +45,8 @@ pub const STROKE_HAIRLINE: Pixels = px(1.0);
 //    first consumer (an unused `pub const` is a build error here), so `mark-sm` (16, the inline
 //    row/chip mark) arrives with E2/E6 when a 16px mark does; E1 needs only these two rungs. A
 //    mark picks the nearest rung, never a raw off-ladder `px()`. ──
+/// An inline identity mark in a row or chip (e.g. the ⌘K scope line's wallet/agent mark).
+pub const MARK_SM: Pixels = px(16.0);
 /// A balance-diff token mark (sidebar / breadcrumb marks are this rung too).
 pub const MARK_MD: Pixels = px(20.0);
 /// The page-header mark + the shared-Review origin / metadata-rail object mark.

@@ -6,13 +6,13 @@
 //! components — the demo scope is a single project / wallet, so the tree is a plain
 //! `v_flex` of rows. Color law (DESIGN §Color): ~95% grayscale; the selected row is a
 //! brightness lift (`secondary`), NEVER a colored keyline; amber is reserved for
-//! Receive's keyline + focus rings; cyan appears ONLY on the agent squircle glyph
-//! (in the wallet home's policy fence + the activity feed).
+//! Receive's keyline + focus rings; cyan appears ONLY on the agent mark (the cyan
+//! squircle, `widgets::agent_mark`) — the sidebar/breadcrumb agent, its surface, the feed.
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, AnyElement, Context, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement,
-    Pixels, StatefulInteractiveElement, Styled,
+    div, px, Context, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
+    Styled,
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
@@ -24,42 +24,10 @@ use crate::settings::ThemeModePref;
 use crate::shell::{Selection, Shell, Surface};
 use crate::theme;
 
-/// Middle-truncate an address for a tight row, e.g. `0xA1b2…9F3c`. Re-exported from
-/// [`crate::widgets`] so existing call sites (`crate::shell_chrome::short_addr`) keep working
-/// while the single canonical definition lives in the shared widget vocabulary.
-pub(crate) use crate::widgets::short_addr;
-
-/// The agent's cyan squircle monogram — the ONE cyan surface (DESIGN §Actor model): a
-/// rounded square (NEVER `rounded_full`) with the "A" monogram. Always static — the cyan
-/// glyph is the two-signal identity marker; it carries no pulse or ambient motion. Shared
-/// by the sidebar row, the wallet-home fence header, the palette, and the activity feed.
-pub(crate) fn agent_squircle(
-    size: Pixels,
-    radius: Pixels,
-    agent: Hsla,
-    agent_tint: Hsla,
-) -> AnyElement {
-    div()
-        .size(size)
-        .rounded(radius)
-        .bg(agent_tint)
-        .border_1()
-        .border_color(agent)
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(
-            div()
-                .text_xs()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(agent)
-                .child("A"),
-        )
-        .into_any_element()
-}
-
 impl Shell {
-    /// The current view's human label, for the breadcrumb's trailing segment.
+    /// The trailing view segment of the breadcrumb, for a full-pane action surface opened over the
+    /// selected wallet (`Meridian › Send`). `Home` has no trailing segment — its breadcrumb names
+    /// the focused entity alone (see [`Shell::breadcrumb_entity`]).
     fn view_label(&self) -> &'static str {
         match self.surface {
             Surface::Settings => "Settings",
@@ -68,19 +36,26 @@ impl Shell {
             Surface::Shield => "Shield",
             Surface::Activity => "Activity",
             Surface::Swap => "Swap",
-            Surface::Home => match self.selection {
-                Selection::Project => "Personal",
-                Selection::Wallet => "Wallet",
-                Selection::Agent => "Atlas",
-            },
+            Surface::Home => "",
         }
     }
 
-    /// The hand-built sidebar tree: a PROJECTS label, one project row, a Wallets
-    /// group + one wallet row, a flex spacer, an Activity ledger row, and a footer
-    /// gear that opens Settings. Neutral throughout. (Atlas is key-less automation ON
-    /// the wallet — same EOA — so it lives in the wallet home's policy fence, not as a
-    /// separate sidebar entity.)
+    /// The entity the breadcrumb names (E2, #182): the agent handle on the agent home, "Personal"
+    /// on the project home, otherwise the wallet's name — the wallet is the entity every action
+    /// surface (Send/Receive/Shield/Swap/Settings) acts on. Drops the old `Personal ›` prefix and
+    /// the literal word Wallet. `is_agent` picks the cyan agent mark over the neutral identity mark.
+    fn breadcrumb_entity(&self) -> (String, bool) {
+        match (self.surface, self.selection) {
+            (Surface::Home, Selection::Agent) => (self.agent_handle(), true),
+            (Surface::Home, Selection::Project) => ("Personal".to_string(), false),
+            _ => (self.wallet_name(), false),
+        }
+    }
+
+    /// The hand-built sidebar tree: a PROJECTS label, one project row, a Wallets group + one
+    /// named wallet row, an Agents group + the first-class agent row (its cyan `agent_mark` +
+    /// handle + status), a flex spacer, an Activity ledger row, and a footer gear that opens
+    /// Settings. Neutral throughout except the agent's cyan mark.
     pub fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let fg = theme.foreground;
@@ -104,7 +79,9 @@ impl Shell {
         let agent = theme::agent(is_dark);
         let agent_tint = theme::agent_tint(is_dark);
 
-        let addr = short_addr(&self.wallet_address_string());
+        // Identity is named (E2, #182): the sidebar names the wallet + agent, not a raw address.
+        let wallet_name = self.wallet_name();
+        let agent_handle = self.agent_handle();
         let balance = self
             .portfolio
             .as_ref()
@@ -146,8 +123,8 @@ impl Shell {
                             .gap_2()
                             .child(crate::widgets::identity_mark(
                                 "Personal",
-                                px(16.0),
-                                px(4.0),
+                                crate::tokens::MARK_SM,
+                                crate::tokens::RADIUS_ROW,
                                 id_square,
                                 fg,
                             ))
@@ -177,22 +154,24 @@ impl Shell {
                                     .gap_2()
                                     .min_w_0()
                                     .child(crate::widgets::identity_mark(
-                                        &addr,
-                                        px(16.0),
-                                        px(4.0),
+                                        &wallet_name,
+                                        crate::tokens::MARK_SM,
+                                        crate::tokens::RADIUS_ROW,
                                         id_square,
                                         fg,
                                     ))
                                     .child(
                                         div()
-                                            .font_family(mono.clone())
-                                            .text_xs()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_sm()
                                             .text_color(fg)
-                                            .child(addr),
+                                            .child(wallet_name),
                                     ),
                             )
                             .child(
                                 div()
+                                    .flex_shrink_0()
                                     .font_family(mono.clone())
                                     .text_xs()
                                     .text_color(muted)
@@ -217,8 +196,14 @@ impl Shell {
                         h_flex()
                             .items_center()
                             .gap_2()
-                            .child(agent_squircle(px(18.0), px(5.0), agent, agent_tint))
-                            .child(div().text_sm().text_color(fg).child("Atlas"))
+                            .child(crate::widgets::agent_mark(
+                                &agent_handle,
+                                crate::tokens::MARK_SM,
+                                crate::tokens::RADIUS_ROW,
+                                agent,
+                                agent_tint,
+                            ))
+                            .child(div().text_sm().text_color(fg).child(agent_handle))
                             .child(div().flex_1())
                             .child(div().size(px(6.0)).rounded_full().bg(agent)),
                     )
@@ -281,16 +266,42 @@ impl Shell {
             )
     }
 
-    /// The 44px breadcrumb bar: `[identity square] Personal › <view>` on the left,
-    /// and the neutral network pill + ⌘K affordance + theme toggle on the right
-    /// (the controls lifted out of the old title bar).
+    /// The 44px breadcrumb bar: `[mark] <entity>` on the left — the entity the current view is
+    /// about (`Meridian`, the agent `Kyoto`, or `Personal`), plus `› <view>` on an action surface
+    /// (`Meridian › Send`). Identity is named (E2, #182): no `Personal ›` prefix, no literal Wallet.
+    /// The neutral network pill + ⌘K affordance + theme toggle sit on the right.
     pub fn render_breadcrumb(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let fg = theme.foreground;
         let muted = theme.muted_foreground;
         let border = theme.border;
         let surface = theme.secondary;
-        let id_square = theme::identity_square(theme.is_dark());
+        let is_dark = theme.is_dark();
+        let id_square = theme::identity_square(is_dark);
+        let agent = theme::agent(is_dark);
+        let agent_tint = theme::agent_tint(is_dark);
+
+        // The focused entity + its mark (cyan agent mark vs. neutral identity mark). On an action
+        // surface the trailing `› <view>` is appended; Home shows the entity name alone.
+        let (entity_name, is_agent_entity) = self.breadcrumb_entity();
+        let entity_mark = if is_agent_entity {
+            crate::widgets::agent_mark(
+                &entity_name,
+                crate::tokens::MARK_MD,
+                crate::tokens::RADIUS_ROW,
+                agent,
+                agent_tint,
+            )
+        } else {
+            crate::widgets::identity_mark(
+                &entity_name,
+                crate::tokens::MARK_MD,
+                crate::tokens::RADIUS_ROW,
+                id_square,
+                fg,
+            )
+        };
+        let on_home = self.surface == Surface::Home;
         let theme_icon = if self.settings.theme_mode == ThemeModePref::Dark {
             IconName::Sun
         } else {
@@ -316,23 +327,28 @@ impl Shell {
                 h_flex()
                     .items_center()
                     .gap_2()
-                    .child(crate::widgets::identity_mark(
-                        "Personal",
-                        px(16.0),
-                        px(4.0),
-                        id_square,
-                        fg,
-                    ))
-                    .child(div().text_sm().text_color(fg).child("Personal"))
-                    // Skip the trailing "› <view>" when it would just repeat the project name
-                    // (Project Home's label is "Personal" → avoid "Personal › Personal").
-                    .when(
-                        !(self.surface == Surface::Home && self.selection == Selection::Project),
-                        |el| {
-                            el.child(div().text_sm().text_color(muted).child("›"))
-                                .child(div().text_sm().text_color(fg).child(self.view_label()))
-                        },
-                    ),
+                    .min_w_0()
+                    .child(entity_mark)
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .text_color(fg)
+                            .child(entity_name),
+                    )
+                    // An action surface (Send/Receive/Shield/Swap/Activity/Settings) appends
+                    // `› <view>`; Home names the entity alone.
+                    .when(!on_home, |el| {
+                        el.child(div().flex_shrink_0().text_sm().text_color(muted).child("›"))
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_sm()
+                                    .text_color(fg)
+                                    .child(self.view_label()),
+                            )
+                    }),
             )
             .child(
                 h_flex()

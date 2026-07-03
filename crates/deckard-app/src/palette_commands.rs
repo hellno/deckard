@@ -80,6 +80,22 @@ pub const COMMANDS: &[Command] = &[
         shortcut: Some("⌘,"),
         icon: Some(IconName::Settings),
     },
+    // Rename the wallet / agent (E2, #182). Both open Settings and focus their field. No bundled
+    // pencil glyph, so no icon.
+    Command {
+        id: "rename-wallet",
+        title: "Rename wallet",
+        aliases: &["rename", "name", "wallet name", "label", "rename wallet"],
+        shortcut: None,
+        icon: None,
+    },
+    Command {
+        id: "rename-agent",
+        title: "Rename agent",
+        aliases: &["rename agent", "handle", "agent name", "agent handle"],
+        shortcut: None,
+        icon: None,
+    },
     Command {
         id: "copy",
         title: "Copy address",

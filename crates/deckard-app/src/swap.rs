@@ -185,7 +185,7 @@ pub fn confirm_swap_blocking(
 
     // (3) Propose the order FIRST. A valid order is always NeedsApproval; a Deny is terminal. The
     //     pending order is also what admits the exact-gross approve in step 4. App-origin: this is
-    //     the user's foreground GUI swap, so the feed labels it "You", not "Atlas".
+    //     the user's foreground GUI swap, so the feed labels it "You", not the agent handle.
     match client.propose_order_blocking(&order, deckard_contract::ProposalOrigin::App)? {
         Decision::NeedsApproval { .. } => {}
         Decision::Allow => {

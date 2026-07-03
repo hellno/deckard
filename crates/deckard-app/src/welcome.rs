@@ -17,9 +17,10 @@ use deckard_core::{tokens_for, U256};
 
 use crate::money::money;
 use crate::shell::{Shell, Surface};
-use crate::shell_chrome::agent_squircle;
 use crate::theme;
-use crate::widgets::{budget_gauge, identity_mark, section_label, short_addr};
+use crate::widgets::{
+    agent_mark, budget_gauge, identity_mark, page_header, section_label, short_addr,
+};
 
 /// One row in the holdings table. Carries the raw balance (not a pre-formatted
 /// string) so the amount column can render mono-for-money with dimmed decimals.
@@ -148,14 +149,11 @@ impl Shell {
             .map(|p| !p.tokens.is_empty())
             .unwrap_or(false);
 
-        // Wallet identity for the header: a desaturated, tinted-neutral square
-        // (DESIGN rule 4 — identity squares avoid the warm/amber band).
+        // Wallet identity for the masthead: a desaturated, tinted-neutral square
+        // (DESIGN rule 4 — identity squares avoid the warm/amber band). Identity is named
+        // (E2, #182): the real wallet name, never the literal word Wallet.
         let id_square = theme::identity_square(theme.is_dark());
-        let wallet_name = if self.viewing_watch {
-            "Watched account".to_string()
-        } else {
-            "Personal".to_string()
-        };
+        let wallet_name = self.wallet_name();
 
         div()
             .size_full()
@@ -168,51 +166,40 @@ impl Shell {
                     .items_start()
                     .max_w(px(680.0))
                     .gap_6()
-                    // Page header (DESIGN §Page header): identity square + wallet-name
-                    // H1 (text.primary, weight 600 — NEVER cyan) + a muted mono,
-                    // middle-truncated address subtitle.
+                    // Identity masthead (DESIGN §request-origin model: name + mark above the mono
+                    // hero) via the one shared `page_header` anatomy: a rounded identity square +
+                    // the wallet-name H1 (text.primary, 600 — NEVER cyan) + the muted mono,
+                    // middle-truncated address subtitle. A ghost Refresh caps the row.
                     .child(
                         h_flex()
                             .w_full()
                             .items_center()
-                            .justify_between()
+                            .gap_3()
+                            .child(div().flex_1().min_w_0().child(page_header(
+                                identity_mark(
+                                    &wallet_name,
+                                    crate::tokens::MARK_LG,
+                                    crate::tokens::RADIUS_ROW,
+                                    id_square,
+                                    fg,
+                                ),
+                                &wallet_name,
+                                Some(account_pill.as_str()),
+                                Some(mono.clone()),
+                                fg,
+                                muted,
+                            )))
                             .child(
-                                h_flex()
-                                    .items_center()
-                                    .gap_3()
-                                    .child(identity_mark(
-                                        &wallet_name,
-                                        px(28.0),
-                                        px(6.0),
-                                        id_square,
-                                        fg,
-                                    ))
-                                    .child(
-                                        v_flex()
-                                            .gap_0p5()
-                                            .child(
-                                                div()
-                                                    .text_xl()
-                                                    .font_weight(FontWeight::SEMIBOLD)
-                                                    .text_color(fg)
-                                                    .child(wallet_name),
-                                            )
-                                            .child(
-                                                div()
-                                                    .font_family(mono.clone())
-                                                    .text_xs()
-                                                    .text_color(muted)
-                                                    .child(account_pill),
-                                            ),
-                                    ),
-                            )
-                            .child(
-                                Button::new("refresh")
-                                    .ghost()
-                                    .icon(IconName::Replace)
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.refresh_portfolio(cx)),
-                                    ),
+                                div().flex_shrink_0().child(
+                                    Button::new("refresh")
+                                        .ghost()
+                                        .icon(IconName::Replace)
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| {
+                                                this.refresh_portfolio(cx)
+                                            }),
+                                        ),
+                                ),
                             ),
                     )
                     // Balance hero: the merged Total (public + private), a Private/Public
@@ -265,21 +252,21 @@ impl Shell {
                     )
                     // Holdings, or a state.
                     .child(self.render_holdings(first_sync, has_tokens, holdings, cx))
-                    // Compact agent presence — ONE clickable Atlas row that opens the agent
-                    // surface (where the full policy fence now lives). Atlas is key-less
+                    // Compact agent presence — ONE clickable agent row that opens the agent
+                    // surface (where the full policy fence now lives). The agent is key-less
                     // automation ON this same wallet (same EOA); the home only carries a calm
                     // status + budget glance, not the full configuration.
                     .child(self.render_agent_presence(cx)),
             )
     }
 
-    /// The compact agent presence for the wallet home — a single clickable Atlas row that
+    /// The compact agent presence for the wallet home — a single clickable agent row that
     /// navigates to the agent surface (`Selection::Agent`), where the full policy fence lives.
     /// Set off from the holdings above by whitespace + a top hairline (editorial section, NOT a
-    /// card). The row carries the cyan identity squircle, the "Atlas" name, a small "acting" cyan
-    /// status, and a thin Spent-today/Daily-budget gauge (from the daemon's LIVE policy, never
-    /// invented) in a ~200px container on the right, plus a muted chevron. When the policy hasn't
-    /// landed yet (`agent_policy == None`) the row reads just "Atlas · idle" with no gauge.
+    /// card). The row carries the cyan `agent_mark` (handle-seeded), the agent handle, a small
+    /// "acting" cyan status, and a thin Spent-today/Daily-budget gauge (from the daemon's LIVE
+    /// policy, never invented) in a ~200px container on the right, plus a muted chevron. When the
+    /// policy hasn't landed yet (`agent_policy == None`) the row reads just "<handle> · idle".
     fn render_agent_presence(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let fg = theme.foreground;
@@ -291,6 +278,7 @@ impl Shell {
         let agent = theme::agent(is_dark);
         let agent_tint = theme::agent_tint(is_dark);
         let amber = theme::amber(is_dark);
+        let agent_handle = self.agent_handle();
 
         // The Spent-today / Daily-budget gauge in a ~200px container, computed from the live policy
         // (never invented). `frac = spent_today / daily_cap` via the integer-safe `fraction` helper;
@@ -335,13 +323,19 @@ impl Shell {
                     .gap_3()
                     .py_1p5()
                     .cursor_pointer()
-                    .child(agent_squircle(px(18.0), px(5.0), agent, agent_tint))
+                    .child(agent_mark(
+                        &agent_handle,
+                        crate::tokens::MARK_MD,
+                        crate::tokens::RADIUS_ROW,
+                        agent,
+                        agent_tint,
+                    ))
                     .child(
                         div()
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(fg)
-                            .child("Atlas"),
+                            .child(agent_handle),
                     )
                     // Status: "acting" (cyan) when the policy is live, a muted "idle" otherwise.
                     .child(if has_policy {

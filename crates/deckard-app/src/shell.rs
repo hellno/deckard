@@ -68,10 +68,11 @@ fn write_then_unlock(
 
 /// What the sidebar tree selects — the contextual-view driver. The home surface
 /// renders differently per selection (project / wallet). Demo scope is a single
-/// project + wallet; and Atlas, the agent. Atlas is now a FIRST-CLASS entity
-/// (DESIGN.md v2 §The agent interaction model): a standalone sidebar row that opens
-/// its own surface (policy + controls + its activity), no longer folded into the
-/// wallet home. It is still key-less automation on the same wallet EOA.
+/// project + wallet, and the agent (auto-named `Kyoto` by default — see
+/// [`crate::names`]). The agent is a FIRST-CLASS entity (DESIGN.md v2 §The agent
+/// interaction model): a standalone sidebar row that opens its own surface (policy +
+/// controls + its activity), no longer folded into the wallet home. It is still
+/// key-less automation on the same wallet EOA.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Selection {
     Project,
@@ -153,7 +154,12 @@ pub struct Shell {
     /// The active full-pane surface (Home = the selection's contextual view).
     pub surface: Surface,
     pub settings: Settings,
-    pub name_input: Entity<InputState>,
+    /// The Settings "Wallet name" field — renames the wallet (E2, #182); empty reverts to the
+    /// deterministic default. Persisted to `settings.wallet_name` on change/blur.
+    pub wallet_name_input: Entity<InputState>,
+    /// The Settings "Agent handle" field — renames the agent (E2, #182); empty reverts to the
+    /// auto-assigned default. Persisted to `settings.agent_handle` on change/blur.
+    pub agent_handle_input: Entity<InputState>,
     pub rpc_input: Entity<InputState>,
     pub watch_input: Entity<InputState>,
     pub created: usize,
@@ -183,7 +189,7 @@ pub struct Shell {
     /// figure (DESIGN §Trust). Initialised from `Settings.mask_balances` and persisted on
     /// every toggle — the inverse of the seed reveal's momentary, default-hidden model.
     pub mask: bool,
-    /// The signer's live policy fence, rendered on the wallet home's "What Atlas may do"
+    /// The signer's live policy fence, rendered on the wallet home's "what the agent may do"
     /// card so it shows the SAME numbers `deckard_policy_get` returns. Fetched from the
     /// daemon (`PolicyGet` deliberately succeeds while locked — the fence is config, not a
     /// secret); `None` until the first fetch lands or when the daemon is unreachable.
@@ -382,19 +388,38 @@ impl Shell {
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle, cx);
 
-        let name_input = cx.new(|cx| {
+        // Wallet name / agent handle (E2, #182): persist the rename as the user types (and on
+        // blur). Empty = revert to the deterministic default (see `Shell::wallet_name` /
+        // `agent_handle`), so clearing the field is a valid "reset to auto" gesture.
+        let wallet_name_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Your name")
-                .default_value(settings.display_name.clone())
+                .placeholder("Auto (e.g. Meridian)")
+                .default_value(settings.wallet_name.clone())
         });
-
-        // Persist the text field as the user types (and on blur).
-        cx.subscribe(&name_input, |this, state, event: &InputEvent, cx| {
+        cx.subscribe(&wallet_name_input, |this, state, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change | InputEvent::Blur) {
-                this.settings.display_name = state.read(cx).value().to_string();
+                this.settings.wallet_name = state.read(cx).value().to_string();
                 this.settings.save();
+                cx.notify();
             }
         })
+        .detach();
+
+        let agent_handle_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Auto (e.g. Kyoto)")
+                .default_value(settings.agent_handle.clone())
+        });
+        cx.subscribe(
+            &agent_handle_input,
+            |this, state, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change | InputEvent::Blur) {
+                    this.settings.agent_handle = state.read(cx).value().to_string();
+                    this.settings.save();
+                    cx.notify();
+                }
+            },
+        )
         .detach();
 
         // Custom RPC URL: persist as typed; apply (re-spawn the provider) on blur.
@@ -642,7 +667,8 @@ impl Shell {
             selection: Selection::Wallet,
             surface: Surface::Home,
             settings,
-            name_input,
+            wallet_name_input,
+            agent_handle_input,
             rpc_input,
             watch_input,
             created: 0,
@@ -1256,7 +1282,7 @@ impl Shell {
         self.start_balance_poll(cx);
     }
 
-    /// Fetch the daemon's live policy for the wallet home's "What Atlas may do" fence (off
+    /// Fetch the daemon's live policy for the wallet home's "what the agent may do" fence (off
     /// the UI thread). Key-less: `PolicyGet` is a read of the fence the daemon enforces — the
     /// daemon answers it even while locked, so this works from the unlock gate too. On any
     /// failure the card keeps its previous snapshot (or honestly shows none); never fabricates.
@@ -1371,6 +1397,30 @@ impl Shell {
         self.wallet_address
             .map(|a| a.to_string())
             .unwrap_or_default()
+    }
+
+    /// The wallet's display name (E2, #182): the operator's rename (`settings.wallet_name`) when
+    /// set, else a deterministic codename from the account address — never the literal word Wallet.
+    /// A watched read-only address is named "Watched account" (it isn't your renamable wallet).
+    pub fn wallet_name(&self) -> String {
+        if self.viewing_watch {
+            return "Watched account".to_string();
+        }
+        let renamed = self.settings.wallet_name.trim();
+        if !renamed.is_empty() {
+            return renamed.to_string();
+        }
+        crate::names::default_wallet_name(&self.wallet_address_string()).to_string()
+    }
+
+    /// The agent's handle (E2, #182): the operator's rename (`settings.agent_handle`) when set, else
+    /// the auto-assigned default (index 0 → `Kyoto`) — retires the old fixed placeholder handle.
+    pub fn agent_handle(&self) -> String {
+        let renamed = self.settings.agent_handle.trim();
+        if !renamed.is_empty() {
+            return renamed.to_string();
+        }
+        crate::names::default_agent_handle(0).to_string()
     }
 
     /// The chain the daemon signs for (resolved once at startup). The swap surface reads it to
@@ -1643,7 +1693,7 @@ impl Shell {
     pub fn select(&mut self, sel: Selection, cx: &mut Context<Self>) {
         self.selection = sel;
         self.surface = Surface::Home;
-        // The wallet home now carries the "What Atlas may do" policy fence — re-fetch the
+        // The wallet home now carries the "what the agent may do" policy fence — re-fetch the
         // daemon's live policy on every visit so an out-of-band edit to policy.json (or a
         // STOP) shows up without a relaunch.
         if matches!(sel, Selection::Wallet | Selection::Agent) {
@@ -2287,7 +2337,7 @@ impl Shell {
         cx.notify();
         let client = self.signer.client();
         let order_for_task = order.clone();
-        // App-origin: the user's foreground GUI swap → the feed labels the order "You", not "Atlas".
+        // App-origin: the user's foreground GUI swap → the feed labels the order "You", not the agent handle.
         let task = cx.background_spawn(async move {
             client.propose_order_blocking(&order_for_task, deckard_contract::ProposalOrigin::App)
         });
@@ -2988,6 +3038,21 @@ impl Shell {
                 self.stop_revoke_all(cx);
             }
             "settings" => self.open(Surface::Settings, cx),
+            // Rename the wallet / agent (E2, #182): open Settings and focus the field so the ⌘K
+            // command lands the operator directly on the input it named. Drop the captured
+            // prev-focus so `close_palette` (below) doesn't yank focus back off the field.
+            "rename-wallet" => {
+                self.open(Surface::Settings, cx);
+                self.palette_prev_focus = None;
+                self.wallet_name_input
+                    .update(cx, |input, cx| input.focus(window, cx));
+            }
+            "rename-agent" => {
+                self.open(Surface::Settings, cx);
+                self.palette_prev_focus = None;
+                self.agent_handle_input
+                    .update(cx, |input, cx| input.focus(window, cx));
+            }
             "copy" => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(
                     self.wallet_address_string(),

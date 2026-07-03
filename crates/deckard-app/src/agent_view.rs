@@ -18,11 +18,11 @@ use gpui_component::{
 use crate::shell::Shell;
 use crate::theme;
 use crate::welcome::{agent_policy_rows, fraction};
-use crate::widgets::{budget_gauge, section_label};
+use crate::widgets::{agent_mark, budget_gauge, section_label};
 
 impl Shell {
-    /// The agent surface for the selected agent (currently the one agent, Atlas):
-    /// identity + a plain-language autonomy statement + the limits/scope + a budget
+    /// The agent surface for the selected agent (currently the one agent, handle `Kyoto` by
+    /// default): identity + a plain-language autonomy statement + the limits/scope + a budget
     /// gauge + controls (Pause / Rotate / Adjust / Revoke and STOP) + what this
     /// agent did. Built from `self.agent_policy` (the live daemon fence).
     pub fn render_agent_surface(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -38,6 +38,7 @@ impl Shell {
         let agent = theme::agent(is_dark);
         let agent_tint = theme::agent_tint(is_dark);
         let amber = theme::amber(is_dark);
+        let agent_handle = self.agent_handle();
 
         // Derive the per-tx cap (ETH) for the plain-language autonomy line — never
         // invented; the same number the fence shows. `None` until the first fetch, or
@@ -68,9 +69,10 @@ impl Shell {
                     .w_full()
                     .items_center()
                     .gap_3()
-                    .child(crate::shell_chrome::agent_squircle(
-                        px(34.0),
-                        px(9.0),
+                    .child(agent_mark(
+                        &agent_handle,
+                        crate::tokens::MARK_LG,
+                        crate::tokens::RADIUS_ROW,
                         agent,
                         agent_tint,
                     ))
@@ -79,7 +81,7 @@ impl Shell {
                             .text_xl()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(fg)
-                            .child("Atlas"),
+                            .child(agent_handle.clone()),
                     )
                     // A small "acting" status — cyan, the agent actor signal.
                     .child(
@@ -132,8 +134,8 @@ impl Shell {
                         let spent_eth = deckard_core::format_amount(p.spent_today_wei, 18, 6);
                         let mono_rows = mono.clone();
                         let autonomy = format!(
-                            "Atlas acts on its own under {cap} ETH per move and asks you above \
-                         that. It can shield ETH only. It never holds your key, and it \
+                            "{agent_handle} acts on its own under {cap} ETH per move and asks you \
+                         above that. It can shield ETH only. It never holds your key, and it \
                          cannot send to a new address."
                         );
 
