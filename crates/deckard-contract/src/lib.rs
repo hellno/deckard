@@ -47,7 +47,7 @@ pub use message_signing::{
 };
 pub use mock::MockSigner;
 pub use policy::{
-    evaluate, evaluate_message, evaluate_order, Allowlist, ApprovalMode, Effect, Policy,
+    evaluate, evaluate_message, evaluate_order, Allowlist, ApprovalMode, Authority, Effect, Policy,
     PolicyError, Rule, POLICY_VERSION,
 };
 pub use read_status::ReadStatus;
@@ -130,6 +130,7 @@ mod roundtrip_tests {
                 },
                 Rule::Shield {
                     approval: ApprovalMode::Never,
+                    per_tx_cap_wei: None,
                 },
                 Rule::Swap {
                     tokens: Allowlist::Only(vec![Address::repeat_byte(0xCC)]),
@@ -228,6 +229,7 @@ mod roundtrip_tests {
                 },
                 Rule::Shield {
                     approval: ApprovalMode::OverCap,
+                    per_tx_cap_wei: None,
                 },
                 Rule::Swap {
                     tokens: Allowlist::Any,
@@ -336,6 +338,7 @@ mod roundtrip_tests {
             spent_today_wei: U256::from(321u64),
             rules: vec![Rule::Shield {
                 approval: ApprovalMode::Never,
+                per_tx_cap_wei: None,
             }],
         };
         roundtrip(&live);

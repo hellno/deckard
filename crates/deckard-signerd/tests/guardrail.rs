@@ -62,7 +62,10 @@ fn write_mode_policy(dir: &std::path::Path, mode: ApprovalMode) {
                 per_tx_cap_wei: Some(U256::from(PER_TX_CAP)),
                 recipients: Allowlist::Any,
             },
-            Rule::Shield { approval: mode },
+            Rule::Shield {
+                approval: mode,
+                per_tx_cap_wei: None,
+            },
         ],
     };
     write_policy(dir, &policy);

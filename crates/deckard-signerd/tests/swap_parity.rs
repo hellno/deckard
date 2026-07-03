@@ -61,6 +61,7 @@ fn policy(allow_swap_tokens: Vec<Address>, revoked: bool) -> Policy {
             },
             Rule::Shield {
                 approval: ApprovalMode::OverCap,
+                per_tx_cap_wei: None,
             },
         ],
     }

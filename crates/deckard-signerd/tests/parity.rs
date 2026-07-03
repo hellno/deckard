@@ -72,7 +72,10 @@ fn policy(
                     Allowlist::Only(allow)
                 },
             },
-            Rule::Shield { approval: mode },
+            Rule::Shield {
+                approval: mode,
+                per_tx_cap_wei: None,
+            },
         ],
     }
 }

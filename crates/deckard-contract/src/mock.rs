@@ -506,7 +506,10 @@ mod tests {
                     per_tx_cap_wei: Some(U256::from(per_tx)),
                     recipients: Allowlist::Any,
                 },
-                Rule::Shield { approval: mode },
+                Rule::Shield {
+                    approval: mode,
+                    per_tx_cap_wei: None,
+                },
                 Rule::Swap {
                     tokens: Allowlist::Any,
                 },
