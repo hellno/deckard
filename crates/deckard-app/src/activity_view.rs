@@ -35,6 +35,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use gpui::prelude::FluentBuilder;
 use gpui::{
     div, px, Context, FontWeight, InteractiveElement, IntoElement, ParentElement,
     StatefulInteractiveElement, Styled,
@@ -829,9 +830,16 @@ impl Shell {
         }
     }
 
-    /// The clear-signing review for a single proposed feed row — the shared trust card, with the
-    /// REAL breached-fence cite from the record (per-tx vs daily), never a hardcoded
-    /// "per-transaction cap". Confirm is `⌘Enter`.
+    /// The clear-signing review for a single proposed feed row — the ONE shared Review (DESIGN
+    /// §Clear-signing), NOT a divergent boxed card. Only the request-origin rail changes: an agent
+    /// proposal shows the cyan `<handle> proposes`, a dapp message its neutral `<domain> requests`,
+    /// otherwise `You are …`. A Tx renders the same transaction-as-hero (amount + full `To`) as the
+    /// self Send/Shield review via the shared `tx_hero`/`tx_recipient`; a swap/approve/message keeps
+    /// its native rows under the same rail. One danger line `This can't be undone.`, then the amber
+    /// breach caution naming the fence, then the **Allowed by** line (within-cap) or the native
+    /// facts. Confirm is the shared ⌘↵ key-cap; **the no-blind-approve guard is unchanged** — the
+    /// `⌘Enter`/click still routes through `approve_activity` → `approve_target`, which resolves ONLY
+    /// the still-pending record this card renders.
     pub fn render_activity_review(
         &self,
         record: &ActivityRecord,
@@ -841,120 +849,161 @@ impl Shell {
         let fg = theme.foreground;
         let muted = theme.muted_foreground;
         let border = theme.border;
-        let surface = theme.secondary;
         let danger = theme.danger;
         let is_dark = theme.is_dark();
-        let agent = theme::agent(is_dark);
-        let agent_tint = theme::agent_tint(is_dark);
+        let amber = theme::amber(is_dark);
+        let mono = theme.mono_font_family.clone();
+        let fill = theme.muted; // bg.raise2 — the confirm button fill
 
-        let is_agent = record.origin == ProposalOrigin::Agent;
         let agent_handle = self.agent_handle();
-        let subject = origin_subject(record.origin, &agent_handle);
-        let cite = cite_phrase(record.reason).unwrap_or("held for your approval");
+        let wallet_name = self.wallet_name();
+        let verb = you_verb(&record.payload);
 
-        let band = {
-            let lead = if is_agent {
-                agent_mark(
-                    &agent_handle,
-                    crate::tokens::MARK_MD,
-                    crate::tokens::RADIUS_ROW,
-                    agent,
-                    agent_tint,
-                )
-            } else {
-                div()
-                    .size(crate::tokens::MARK_MD)
-                    .rounded(crate::tokens::RADIUS_ROW)
-                    .bg(theme::identity_square(is_dark))
-                    .into_any_element()
-            };
-            let band_bg = if is_agent { agent_tint } else { surface };
-            h_flex()
-                .w_full()
-                .items_center()
-                .gap_3()
-                .px_3()
-                .py_2p5()
-                .rounded_lg()
-                .bg(band_bg)
-                .child(lead)
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_sm()
-                        .text_color(fg)
-                        .child(format!(
-                            "{subject} wants to {} · cites: {cite}",
-                            payload_summary(&record.payload, self.mask)
-                        )),
-                )
+        // The request-origin rail — the ONLY thing that changes across origins. An agent proposal
+        // is the cyan handle; an App-origin dapp MESSAGE carries its domain in the payload, so it
+        // gets the neutral dapp rail (the one dapp attribution available without the deferred
+        // tx-origin wire plumbing, ADR-0001); anything else is You. Trust badge is `None` — we
+        // don't have site reputation (DESIGN: no speculative site-trust).
+        let origin = match record.origin {
+            ProposalOrigin::Agent => crate::widgets::Origin::Agent {
+                handle: &agent_handle,
+            },
+            ProposalOrigin::App => match &record.payload {
+                PendingPayloadView::Message(m) if !m.origin.is_empty() => {
+                    crate::widgets::Origin::Dapp { domain: &m.origin }
+                }
+                _ => crate::widgets::Origin::You {
+                    account: &wallet_name,
+                    verb,
+                },
+            },
         };
+        let origin_rail = crate::widgets::origin_header(origin, None, theme);
+        // `theme` is not borrowed past this point — the `self.*(cx)` calls below re-borrow it.
+
+        // A Tx renders the shared transaction-hero (amount + full To) + the Allowed-by line; a
+        // swap/approve/message keeps its native rows. The amount is shown in full (never masked) —
+        // at the moment of authorization you must see exactly what you approve.
+        //
+        // `tx_hero` formats at 18 decimals (native ETH). Every agent Tx reaching this review IS
+        // native ETH — `deckard_send` hardcodes `token: None` (sidecar.rs) and Shield/Unshield move
+        // ETH — so `intent.token` is always `None` and the scale is correct. A non-18-decimal ERC-20
+        // Tx would mis-scale, but that path is not reachable today; decoding ERC-20 amount/decimals
+        // for clear-signing is deferred with the rest of the dapp-tx work (ADR-0001). This matches
+        // the pre-E5 card, which also formatted the Amount row at 18 decimals — no regression.
+        let (hero, to, authority) = if let PendingPayloadView::Tx(intent) = &record.payload {
+            let unit = if intent.token.is_none() {
+                Some("ETH")
+            } else {
+                Some("tokens")
+            };
+            let hero = crate::commit_view::tx_hero(
+                tx_noun(&intent.kind),
+                intent.value,
+                unit,
+                mono.clone(),
+                fg,
+                muted,
+            );
+            let to = crate::commit_view::tx_recipient(
+                &intent.to.to_checksum(None),
+                mono.clone(),
+                fg,
+                muted,
+                theme::identity_square(is_dark),
+            );
+            let auth = self.review_authority_row(intent.kind.clone(), intent.value, cx);
+            (Some(hero), Some(to), auth)
+        } else {
+            (None, None, None)
+        };
+        let is_tx = hero.is_some();
+        // Non-Tx payloads keep their native detail rows (which already carry the breach cite row).
+        let native_rows: Vec<gpui::AnyElement> = if is_tx {
+            Vec::new()
+        } else {
+            self.activity_review_detail_rows(record, cx)
+        };
+        // For a Tx, the amber caution names WHY it's held (the breached fence); a within-cap hold
+        // shows the Allowed-by line instead, so the two are complementary.
+        let breach = if is_tx {
+            breach_caution(record.reason)
+                .map(|c| crate::widgets::caution_line(amber, muted, true, c))
+        } else {
+            None
+        };
+        let quiet = authority.map(|a| {
+            v_flex()
+                .w_full()
+                .child(crate::widgets::divider(border))
+                .child(a)
+                .child(crate::widgets::divider(border))
+        });
+
+        // The shared ⌘↵ confirm — armed amber (the no-blind-approve guard, not an arm-delay, is the
+        // safety here). Deny is one-key by design (fail-safe); Cancel leaves the review.
+        let approve = div()
+            .id("activity-approve")
+            .w_full()
+            .h(px(48.0))
+            .rounded(crate::tokens::RADIUS_MODAL)
+            .border_1()
+            .border_color(border)
+            .bg(fill)
+            .flex()
+            .items_center()
+            .px_4()
+            .cursor_pointer()
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_sm()
+                    .text_color(fg)
+                    .child("Approve"),
+            )
+            .child(div().flex_1())
+            .child(crate::widgets::key_cap(
+                crate::widgets::KeyCap::CmdEnter,
+                true,
+                border,
+                muted,
+                amber,
+                mono.clone(),
+            ))
+            .on_click(cx.listener(|this, _, _, cx| this.approve_activity(cx)));
 
         activity_shell(
             v_flex()
                 .w_full()
                 .gap_4()
-                .child(activity_heading_block(
-                    "Review request",
-                    "Confirm exactly what leaves and where, then approve or deny.",
-                    fg,
-                    muted,
-                ))
-                .child(band)
-                // Danger early — but tell the truth about WHICH fence was breached.
-                .child(
-                    h_flex()
-                        .items_center()
-                        .gap_1p5()
-                        .child(Icon::new(IconName::TriangleAlert).text_color(danger).small())
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(danger)
-                                .child(review_danger_line(record.reason)),
-                        ),
-                )
-                .child(
-                    v_flex()
-                        .w_full()
-                        .p_4()
-                        .rounded_lg()
-                        .border_1()
-                        .border_color(border)
-                        .bg(surface)
-                        .children(self.activity_review_detail_rows(record, cx)),
-                )
+                .child(origin_rail)
+                .children(hero)
+                .children(to)
+                .child(crate::widgets::error_line(danger, "This can't be undone."))
+                .children(breach)
+                .when(!native_rows.is_empty(), |col| {
+                    col.child(v_flex().w_full().children(native_rows))
+                })
+                .children(quiet)
+                .child(approve)
                 .child(
                     h_flex()
                         .w_full()
                         .gap_2()
                         .child(
-                            Button::new("activity-approve")
-                                .primary()
-                                .label("⌘Enter  Approve")
-                                .on_click(cx.listener(|this, _, _, cx| this.approve_activity(cx))),
-                        )
-                        .child(
                             Button::new("activity-deny")
                                 .ghost()
-                                .label("x  Deny")
+                                .label("Deny")
                                 .on_click(cx.listener(|this, _, _, cx| this.deny_activity(cx))),
                         )
                         .child(
                             Button::new("activity-cancel")
                                 .ghost()
-                                .label("Esc  Cancel")
+                                .label("Cancel")
                                 .on_click(
                                     cx.listener(|this, _, _, cx| this.cancel_activity_review(cx)),
                                 ),
                         ),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(muted)
-                        .child("Approving authorizes this spend. It will be signed and broadcast, and you can't undo it."),
                 )
                 .into_any_element(),
         )
@@ -1327,13 +1376,43 @@ fn settled_outcome_label(record: &ActivityRecord, mask: bool) -> String {
     settled_label(record).to_string()
 }
 
-/// The danger line at the top of the review card — names the actual fence breached.
-fn review_danger_line(reason: BreachedLimit) -> &'static str {
+/// The action noun for the shared Review's transaction-hero label ("Sending" / "Shielding" / …),
+/// by intent kind — mirrors the self Send/Shield review's `noun` so an agent's Tx reads identically.
+fn tx_noun(kind: &IntentKind) -> &'static str {
+    match kind {
+        IntentKind::Send => "Sending",
+        IntentKind::Shield => "Shielding",
+        IntentKind::Unshield => "Withdrawing",
+        IntentKind::ContractCall => "Calling",
+    }
+}
+
+/// The lowercase verb for a `You are {verb}` origin rail on an App-origin request, by payload.
+fn you_verb(payload: &PendingPayloadView) -> &'static str {
+    match payload {
+        PendingPayloadView::Tx(intent) => match intent.kind {
+            IntentKind::Send => "sending",
+            IntentKind::Shield => "shielding",
+            IntentKind::Unshield => "withdrawing",
+            IntentKind::ContractCall => "calling a contract",
+        },
+        PendingPayloadView::Order(_) => "swapping",
+        PendingPayloadView::Approve { .. } => "approving a spender",
+        PendingPayloadView::Message(_) => "signing a message",
+    }
+}
+
+/// The amber caution naming WHY a proposal is held (the breached fence), shown below the one danger
+/// line on a Tx review. `None` for a within-cap hold (e.g. a guardrail hold) — there the Allowed-by
+/// line shows the headroom instead, so the two never both appear.
+fn breach_caution(reason: BreachedLimit) -> Option<&'static str> {
     match reason {
-        BreachedLimit::PerTxCap => "This exceeds the per-transaction limit.",
-        BreachedLimit::DailyCap => "This exceeds today's daily limit.",
-        BreachedLimit::OffAllowlist => "This recipient is not on the allow-list.",
-        BreachedLimit::None => "This is held for your approval.",
+        BreachedLimit::PerTxCap => Some("Over the per-transaction cap — held for your approval."),
+        BreachedLimit::DailyCap => Some("Over today's daily limit — held for your approval."),
+        BreachedLimit::OffAllowlist => {
+            Some("Recipient is not on the allow-list — held for your approval.")
+        }
+        BreachedLimit::None => None,
     }
 }
 
@@ -1411,26 +1490,6 @@ fn skeleton_row(raise: gpui::Hsla) -> impl IntoElement {
         .h(px(40.0))
         .rounded(crate::tokens::RADIUS_ROW)
         .bg(raise)
-}
-
-/// The review card's heading block (H1 + muted subtitle).
-fn activity_heading_block(
-    title: &'static str,
-    subtitle: &'static str,
-    fg: gpui::Hsla,
-    muted: gpui::Hsla,
-) -> impl IntoElement {
-    v_flex()
-        .w_full()
-        .gap_1()
-        .child(
-            div()
-                .text_xl()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(fg)
-                .child(title),
-        )
-        .child(div().text_sm().text_color(muted).child(subtitle))
 }
 
 /// The shared column shell for the Activity surface — the same 760px dense-list column the
@@ -1627,6 +1686,43 @@ mod tests {
 
         // No review open → None (⌘Enter opens a review instead of resolving anything).
         assert_eq!(approve_target(None, &both), None);
+    }
+
+    #[test]
+    fn routed_agent_review_still_cannot_blind_approve_a_settled_record() {
+        // #185 regression: the agent-approval now renders through the ONE shared Review, but the
+        // no-blind-approve guard is UNCHANGED — approve resolves ONLY a still-pending reviewed
+        // record. If the reviewed agent Tx settles under a background poll while its review is open,
+        // it leaves the pending set, so `approve_target` returns None and ⌘Enter re-opens a review
+        // rather than resolving blind. `record()` builds Agent-origin Tx records — exactly the
+        // payload now routed through the shared review.
+        let reviewed_id = B256::repeat_byte(0x0A);
+        let other_id = B256::repeat_byte(0x0B);
+        // The feed after a poll settled the reviewed row: 0x0A still EXISTS but as a settled row,
+        // while a different row 0x0B is still pending.
+        let feed = vec![
+            record(
+                0x0A,
+                ActivityLifecycle::Decided { approved: true },
+                BreachedLimit::PerTxCap,
+                true,
+            ),
+            record(
+                0x0B,
+                ActivityLifecycle::Proposed,
+                BreachedLimit::DailyCap,
+                false,
+            ),
+        ];
+        let pending = activity_pending(&feed);
+        // Reviewing the now-settled 0x0A → resolve NOTHING, and never the still-pending 0x0B.
+        assert_eq!(
+            approve_target(Some(reviewed_id), &pending),
+            None,
+            "a reviewed agent record that settled must not be approvable, nor fall back to another row",
+        );
+        // The still-pending 0x0B is resolvable only when IT is the reviewed record.
+        assert_eq!(approve_target(Some(other_id), &pending), Some(other_id));
     }
 
     #[test]

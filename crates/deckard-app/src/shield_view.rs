@@ -50,8 +50,6 @@ pub static SHIELD_VIEW: CommitView = CommitView {
     compose_hint_dynamic: Some(shield_compose_hint),
 
     // --- review ---
-    review_title: "Review deposit",
-    review_subtitle: "Confirm what leaves, where it goes, and the fee, then shield with ⌘↵.",
     // The Railgun fee + the net private receipt, computed from the proposal's gross value.
     extra_rows: &[
         MoneyRow {
