@@ -849,7 +849,12 @@ pub(crate) fn meta_obj(mark: AnyElement, name: &str, sub: &str, theme: &Theme) -
         .gap_3()
         .child(mark)
         .child(
+            // `flex_1` so the text column fills the row's remaining width: a `truncate` sub whose
+            // min-content is 0 would otherwise let the column shrink to the (shorter) name and clip
+            // the wider mono address to a second ellipsis (the E2 masthead bug, #192). Now a short
+            // address renders in full and only genuinely over-wide content clamps.
             v_flex()
+                .flex_1()
                 .min_w_0()
                 .gap_0p5()
                 .child(
