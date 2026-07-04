@@ -3287,8 +3287,18 @@ impl Render for Shell {
                     // rail. The rail is a fixed-width `flex_shrink_0` sibling (never collapsible),
                     // so the main column between them stays `flex_1` + `min_w_0` and content can
                     // run off neither edge — the no-horizontal-overflow invariant.
+                    //
+                    // `flex_1` + `min_h_0` (not `size_full`): the row must fill exactly the space
+                    // BELOW the fixed title bar and never grow past it. Otherwise an over-tall
+                    // surface (the wallet home, whose internal scroll is imperfect) stretches the
+                    // row, pushing the sidebar's footer (Activity + Settings) and the status strip
+                    // off the bottom on some surfaces but not others — the jarring "Settings comes
+                    // and goes" bug. Clamped here, over-tall content scrolls inside the middle
+                    // column and the three panes stay full-height on every surface.
                     h_flex()
-                        .size_full()
+                        .w_full()
+                        .flex_1()
+                        .min_h_0()
                         .child(self.render_sidebar(cx))
                         .child(
                             // Fill the full pane height (like the sidebar's `.h_full()`): `h_flex`
