@@ -23,6 +23,7 @@ mod settings;
 mod settings_view;
 mod shell;
 mod shell_chrome;
+mod shell_rail;
 mod shield_view;
 mod signer;
 mod swap;
@@ -222,11 +223,15 @@ fn main() {
             // 6. Open the window. `TitleBar::title_bar_options()` makes the title
             //    bar transparent + insets the traffic lights so `Shell`'s custom
             //    `TitleBar` element draws edge-to-edge underneath.
-            let bounds = Bounds::centered(None, size(px(880.0), px(620.0)), cx);
+            // Three-pane shell (E3, #183): 248px sidebar + main + a 300px always-on right
+            // metadata rail. The default + minimum widths give the centered 460px confirm card
+            // (`tokens::CONFIRM_W`) room to breathe beside both chrome columns (248 + 300 + 460 +
+            // padding), so a value move never clips at app width — the three-pane no-overflow AC.
+            let bounds = Bounds::centered(None, size(px(1200.0), px(760.0)), cx);
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitleBar::title_bar_options()),
-                window_min_size: Some(size(px(560.0), px(420.0))),
+                window_min_size: Some(size(px(1100.0), px(560.0))),
                 ..Default::default()
             };
 

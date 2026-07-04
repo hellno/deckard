@@ -393,7 +393,9 @@ pub(crate) fn action_tag(kind: ActionKind, raise: Hsla, border: Hsla, text: Hsla
 
 /// The state a [`status_glyph`] carries.
 #[derive(Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // reason: variants selected per row/receipt by E6/E7 (#186/#187).
+// reason: `Confirmed` is wired by the E3 transaction rail (#183); `Failed`/`Pending`/`Live`/
+// `Neutral` land with the E6/E7 feed + full receipt (#186/#187).
+#[allow(dead_code)]
 pub(crate) enum StatusGlyph {
     /// Confirmed / approved / executed — a `success` check.
     Confirmed,
@@ -410,7 +412,6 @@ pub(crate) enum StatusGlyph {
 /// The Lucide icon for a [`StatusGlyph`]. Pure so it is unit-testable. No `clock` ships in the
 /// icon set, so `Pending`/`Live` use the loader ring — the DESIGN "clock-ring = pending" intent
 /// (a ring, not a checkmark); the color separates awaiting-you (amber) from an agent (cyan).
-#[allow(dead_code)] // reason: the icon half of `status_glyph`; consumed via `status_glyph`.
 fn status_icon(state: StatusGlyph) -> IconName {
     match state {
         StatusGlyph::Confirmed => IconName::CircleCheck,
@@ -426,7 +427,6 @@ fn status_icon(state: StatusGlyph) -> IconName {
 /// The icon shape backs the color, so it survives grayscale.
 // reason: consumed by the v4 Activity feed + Transaction receipt (E6/E7, #186/#187); E1 lands one
 // glyph set so the feed + receipt stop re-rolling per-file status SVGs.
-#[allow(dead_code)]
 pub(crate) fn status_glyph(state: StatusGlyph, theme: &Theme) -> AnyElement {
     let is_dark = theme.is_dark();
     let tone = match state {
@@ -442,32 +442,35 @@ pub(crate) fn status_glyph(state: StatusGlyph, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
-/// A [`kv_row`] value: mono by default, sans for a human phrase ("Ethereum · mainnet"), or
-/// `success`-tinted for a verified / OK state.
-#[allow(dead_code)] // reason: variants selected per fact by the rail / Review (E3/E5).
+/// A [`kv_row`] value: mono by default, sans for a human phrase ("Ethereum · mainnet"),
+/// `success`-tinted for a verified / OK state, or `warn`-tinted for a loud trust downgrade
+/// ("Not verified" — DESIGN §Trust rule 9: a downgrade is never rendered quiet).
 pub(crate) enum KvValue<'a> {
     Mono(&'a str),
     Sans(&'a str),
     Ok(&'a str),
+    Warn(&'a str),
 }
 
 /// The ONE key/value row (DESIGN §Widget vocabulary): label-left `text.muted`, value-right (mono
-/// `text.primary`, or sans, or `success`), the row clamped so a long value truncates rather than
-/// overflowing. Shared by clear-signing quiet-facts, the policy ledger, and the metadata rail.
+/// `text.primary`, or sans, or `success`, or `warn` for a loud downgrade), the row clamped so a long
+/// value truncates rather than overflowing. Shared by clear-signing quiet-facts, the policy ledger,
+/// and the metadata rail.
 // reason: consumed by the v4 metadata rail (E3, #183) + the Review quiet facts (E5, #185).
-#[allow(dead_code)]
 pub(crate) fn kv_row(
     label: &str,
     value: KvValue,
     muted: Hsla,
     primary: Hsla,
     success: Hsla,
+    warn: Hsla,
     mono: SharedString,
 ) -> AnyElement {
     let (text, is_mono, color) = match value {
         KvValue::Mono(v) => (v, true, primary),
         KvValue::Sans(v) => (v, false, primary),
         KvValue::Ok(v) => (v, false, success),
+        KvValue::Warn(v) => (v, false, warn),
     };
     h_flex()
         .w_full()
@@ -539,7 +542,9 @@ pub(crate) fn page_header(
 
 /// Who a shared-Review request came FROM (DESIGN §The request-origin model): the human, an agent,
 /// or a dapp. The verb is the human's action (`You are sending`); agents `propose`, dapps `request`.
-#[allow(dead_code)] // reason: constructed per request by the shared Review (E5, #185) + rail (E3).
+// reason: `You`/`Agent` are wired by the E3 request rail (#183); `Dapp` lands with the browser
+// bridge origin (ADR-0001 / #44).
+#[allow(dead_code)]
 pub(crate) enum Origin<'a> {
     /// The human principal — a round identity mark (`account` seeds it) + amber `You are {verb}`.
     You { account: &'a str, verb: &'a str },
@@ -605,7 +610,6 @@ fn trust_badge(trust: Trust, theme: &Theme) -> AnyElement {
 /// signal color; the agent mark is the bordered cyan squircle ([`agent_mark`], handle-aware).
 /// `You` is amber, an agent is cyan, a dapp is neutral.
 // reason: consumed by the ONE shared Review (E5, #185) + the rail's compact clear-signing (E3).
-#[allow(dead_code)]
 pub(crate) fn origin_header(origin: Origin, trust: Option<Trust>, theme: &Theme) -> AnyElement {
     let is_dark = theme.is_dark();
     let amber = crate::theme::amber(is_dark);
@@ -775,7 +779,6 @@ pub(crate) fn balance_diff(rows: &[DiffRow], theme: &Theme) -> AnyElement {
 /// collapsible; contextual to the focused object"). A fixed-width column — a titled 48px head over
 /// a scrollable body. E3 fills `body` with `meta_section` / `meta_obj` / `kv_row` blocks.
 // reason: consumed by the three-pane shell (E3, #183) — home / request / transaction rail bodies.
-#[allow(dead_code)]
 pub(crate) fn meta_rail(title: &str, body: AnyElement, theme: &Theme) -> AnyElement {
     let border = theme.border;
     let rail_bg = theme.sidebar; // bg.rail
@@ -819,7 +822,6 @@ pub(crate) fn meta_rail(title: &str, body: AnyElement, theme: &Theme) -> AnyElem
 /// A ruled sub-section inside [`meta_rail`] (DESIGN: a `.metasec` — a top hairline + an optional
 /// `section_label` + body). Groups a set of `kv_row`s under a quiet label.
 // reason: consumed by the three-pane shell rail bodies (E3, #183).
-#[allow(dead_code)]
 pub(crate) fn meta_section(label: Option<&str>, body: AnyElement, theme: &Theme) -> AnyElement {
     let border = theme.border;
     let muted = theme.muted_foreground;
@@ -837,7 +839,6 @@ pub(crate) fn meta_section(label: Option<&str>, body: AnyElement, theme: &Theme)
 /// The identity object at the top of a rail body (DESIGN: a `.metaobj` — a caller-built `mark` +
 /// name (600) + a mono sub-line, e.g. the truncated address or `shield · confirmed`).
 // reason: consumed by the three-pane shell rail bodies (E3, #183).
-#[allow(dead_code)]
 pub(crate) fn meta_obj(mark: AnyElement, name: &str, sub: &str, theme: &Theme) -> AnyElement {
     let fg = theme.foreground;
     let muted = theme.muted_foreground;
@@ -848,7 +849,12 @@ pub(crate) fn meta_obj(mark: AnyElement, name: &str, sub: &str, theme: &Theme) -
         .gap_3()
         .child(mark)
         .child(
+            // `flex_1` so the text column fills the row's remaining width: a `truncate` sub whose
+            // min-content is 0 would otherwise let the column shrink to the (shorter) name and clip
+            // the wider mono address to a second ellipsis (the E2 masthead bug, #192). Now a short
+            // address renders in full and only genuinely over-wide content clamps.
             v_flex()
+                .flex_1()
                 .min_w_0()
                 .gap_0p5()
                 .child(

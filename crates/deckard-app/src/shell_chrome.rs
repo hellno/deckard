@@ -40,22 +40,24 @@ impl Shell {
         }
     }
 
-    /// The entity the breadcrumb names (E2, #182): the agent handle on the agent home, "Personal"
-    /// on the project home, otherwise the wallet's name — the wallet is the entity every action
-    /// surface (Send/Receive/Shield/Swap/Settings) acts on. Drops the old `Personal ›` prefix and
-    /// the literal word Wallet. `is_agent` picks the cyan agent mark over the neutral identity mark.
+    /// The entity the breadcrumb names (E2, #182): the agent handle on the agent home, otherwise
+    /// the wallet's name — the wallet is the entity every action surface (Send/Receive/Shield/
+    /// Swap/Settings) acts on. Drops the old `Personal ›` prefix and the literal word Wallet (the
+    /// Projects layer is gone as of E3, #183). `is_agent` picks the cyan agent mark over the
+    /// neutral identity mark.
     fn breadcrumb_entity(&self) -> (String, bool) {
         match (self.surface, self.selection) {
             (Surface::Home, Selection::Agent) => (self.agent_handle(), true),
-            (Surface::Home, Selection::Project) => ("Personal".to_string(), false),
             _ => (self.wallet_name(), false),
         }
     }
 
-    /// The hand-built sidebar tree: a PROJECTS label, one project row, a Wallets group + one
-    /// named wallet row, an Agents group + the first-class agent row (its cyan `agent_mark` +
-    /// handle + status), a flex spacer, an Activity ledger row, and a footer gear that opens
-    /// Settings. Neutral throughout except the agent's cyan mark.
+    /// The hand-built sidebar tree — a single column of the account's real entities (DESIGN §IA,
+    /// E3 #183: **no Projects layer**). Top-level groups are the things that actually exist:
+    /// **Wallets** (named wallet row + balance), **Agents** (the first-class cyan `agent_mark` +
+    /// handle + status), and **Connections** (dapp origins — a reserved, list-only slot; deep
+    /// connection management is deferred, ADR-0001 / #44). A flex spacer, then the footer Activity
+    /// ledger row + the gear that opens Settings. Neutral throughout except the agent's cyan mark.
     pub fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let fg = theme.foreground;
@@ -72,8 +74,6 @@ impl Shell {
         let needs_you_count = crate::activity_view::activity_pending(&self.activity).len();
         let activity_active = self.surface == Surface::Activity;
 
-        let project_selected =
-            self.surface == Surface::Home && self.selection == Selection::Project;
         let wallet_selected = self.surface == Surface::Home && self.selection == Selection::Wallet;
         let agent_selected = self.surface == Surface::Home && self.selection == Selection::Agent;
         let agent = theme::agent(is_dark);
@@ -105,34 +105,7 @@ impl Shell {
             .bg(theme.sidebar)
             .border_r_1()
             .border_color(border)
-            // PROJECTS header.
-            .child(group_label("PROJECTS"))
-            // Project row.
-            .child(
-                div()
-                    .id("nav-project")
-                    .mx_2()
-                    .px_2()
-                    .py_1p5()
-                    .rounded_md()
-                    .when(project_selected, |e| e.bg(lift))
-                    .cursor_pointer()
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap_2()
-                            .child(crate::widgets::identity_mark(
-                                "Personal",
-                                crate::tokens::MARK_SM,
-                                crate::tokens::RADIUS_ROW,
-                                id_square,
-                                fg,
-                            ))
-                            .child(div().text_sm().text_color(fg).child("Personal")),
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| this.select(Selection::Project, cx))),
-            )
-            // Wallets group.
+            // Wallets group (DESIGN §IA — the first top-level entity; no Projects parent above it).
             .child(group_label("Wallets"))
             .child(
                 div()
@@ -209,6 +182,19 @@ impl Shell {
                     )
                     .on_click(cx.listener(|this, _, _, cx| this.select(Selection::Agent, cx))),
             )
+            // Connections group — dapp origins (DESIGN §IA). A reserved, list-only slot: the
+            // request-origin model exists, but deep connection management is deferred (ADR-0001 /
+            // #44), so the group announces itself with a quiet empty state until a bridged dapp
+            // origin appears. Non-interactive on purpose — nothing to select here yet.
+            .child(group_label("Connections"))
+            .child(
+                div().mx_2().px_2().py_1p5().child(
+                    div()
+                        .text_sm()
+                        .text_color(muted)
+                        .child("No connected sites yet"),
+                ),
+            )
             // Spacer pushes the footer rows to the bottom.
             .child(div().flex_1())
             // Activity ledger — a sibling of Settings (bottom): the full cross-agent record AND
@@ -267,7 +253,7 @@ impl Shell {
     }
 
     /// The 44px breadcrumb bar: `[mark] <entity>` on the left — the entity the current view is
-    /// about (`Meridian`, the agent `Kyoto`, or `Personal`), plus `› <view>` on an action surface
+    /// about (the wallet `Meridian` or the agent `Kyoto`), plus `› <view>` on an action surface
     /// (`Meridian › Send`). Identity is named (E2, #182): no `Personal ›` prefix, no literal Wallet.
     /// The neutral network pill + ⌘K affordance + theme toggle sit on the right.
     pub fn render_breadcrumb(&self, cx: &mut Context<Self>) -> impl IntoElement {
