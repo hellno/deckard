@@ -402,6 +402,7 @@ impl Shell {
         let border = theme.border;
         let danger = theme.danger;
         let success = theme.success;
+        let warn = theme.warning; // kv_row's loud-downgrade tone (unused by the Sans facts here)
         let is_dark = theme.is_dark();
         let mono = theme.mono_font_family.clone();
         let flow = (view.flow)(self);
@@ -469,6 +470,7 @@ impl Shell {
                 muted,
                 fg,
                 success,
+                warn,
                 mono.clone(),
             ))
             .child(kv_row(
@@ -477,6 +479,7 @@ impl Shell {
                 muted,
                 fg,
                 success,
+                warn,
                 mono.clone(),
             ));
         for row in view.extra_rows {

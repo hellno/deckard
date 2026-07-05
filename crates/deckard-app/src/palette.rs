@@ -211,11 +211,6 @@ impl Shell {
                 ))
                 .child(div().text_color(muted).child(name))
             }
-            Selection::Project => row
-                .child(crate::widgets::identity_mark(
-                    "Personal", sm, radius, id_square, fg,
-                ))
-                .child(div().text_color(muted).child("Personal")),
             Selection::Agent => {
                 let handle = self.agent_handle();
                 row.child(crate::widgets::agent_mark(

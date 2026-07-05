@@ -33,6 +33,23 @@ struct Holding {
     max_frac: usize,
 }
 
+/// The agent's per-transaction Send cap as an HONEST display string (DESIGN §Trust: the UI must
+/// never claim a fence the engine doesn't set). `per_tx_cap_for` returns `None` in two opposite
+/// cases, so a bare `unwrap_or(0)` would print a false "0 ETH": no Send rule at all (send is
+/// denied) vs. a Send rule with no per-tx ceiling (capped only by the daily budget). Spell both out
+/// instead of collapsing them to zero. Shared so the wallet-home card, the wallet rail, and the
+/// agent rail all read the same fence.
+pub(crate) fn per_tx_cap_display(p: &deckard_contract::Policy) -> String {
+    use deckard_contract::IntentKind;
+    if p.approval_for(IntentKind::Send).is_none() {
+        return "denied".to_string();
+    }
+    match p.per_tx_cap_for(IntentKind::Send) {
+        Some(cap) => format!("{} ETH", deckard_core::format_amount(cap, 18, 6)),
+        None => "no limit".to_string(),
+    }
+}
+
 /// The agent policy card's rows, built from the daemon's LIVE policy — the same fence
 /// `deckard_policy_get` shows an MCP client. Pure so the mapping is testable: an empty
 /// allowlist honestly reads "any", the approval mode is spelled out, and a STOP
@@ -45,12 +62,7 @@ pub(crate) fn agent_policy_rows(
     use deckard_contract::{Allowlist, ApprovalMode, IntentKind};
     let eth = |wei: U256| format!("{} ETH", deckard_core::format_amount(wei, 18, 6));
     vec![
-        (
-            "Per-transaction cap",
-            eth(p
-                .per_tx_cap_for(IntentKind::Send)
-                .unwrap_or(deckard_core::U256::ZERO)),
-        ),
+        ("Per-transaction cap", per_tx_cap_display(p)),
         ("Daily budget", format!("{} / day", eth(p.daily_cap_wei))),
         (
             "Spent today",
@@ -596,95 +608,6 @@ impl Shell {
             );
         }
         col.into_any_element()
-    }
-
-    /// Project home — the aggregate-of-one for the demo's single project: the
-    /// wallet's balance plus a one-line composition (1 wallet · 1 agent). Real
-    /// multi-wallet aggregation is fast-follow.
-    pub fn render_project_home(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let fg = theme.foreground;
-        let muted = theme.muted_foreground;
-        let border = theme.border;
-        let mono: SharedString = theme.mono_font_family.clone();
-        let id_square = theme::identity_square(theme.is_dark());
-        let masked = self.mask;
-
-        let native_wei = self.portfolio.as_ref().map(|p| p.native_wei);
-
-        div()
-            .size_full()
-            .p_8()
-            // TODO(scroll): restore a scrollable main pane via a Stateful
-            // `div().id(..).overflow_y_scroll()` (the agent draft mis-ordered
-            // gpui-component's `overflow_y_scrollbar`). Content is short for now.
-            .child(
-                v_flex()
-                    .items_start()
-                    .max_w(px(680.0))
-                    .gap_6()
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap_3()
-                            .child(identity_mark("Personal", px(28.0), px(6.0), id_square, fg))
-                            .child(
-                                div()
-                                    .text_xl()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(fg)
-                                    .child("Personal"),
-                            ),
-                    )
-                    .child(
-                        v_flex()
-                            .w_full()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .id("project-balance-hero")
-                                    .cursor_pointer()
-                                    .text_3xl()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .map(|el| match native_wei {
-                                        Some(wei) => el.child(money(
-                                            wei,
-                                            18,
-                                            4,
-                                            Some("ETH"),
-                                            masked,
-                                            mono.clone(),
-                                            fg,
-                                            muted,
-                                        )),
-                                        None => el
-                                            .font_family(mono.clone())
-                                            .text_color(muted)
-                                            .child("Syncing…"),
-                                    })
-                                    .on_click(cx.listener(|this, _, _, cx| this.toggle_mask(cx))),
-                            )
-                            .children(native_wei.map(|_| {
-                                allocation_bar(
-                                    vec![AllocSegment {
-                                        label: "Public".into(),
-                                        fraction: 1.0,
-                                        tone: id_square,
-                                    }],
-                                    masked,
-                                    border,
-                                    muted,
-                                    fg,
-                                )
-                            })),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(muted)
-                            .child("1 wallet · 1 agent"),
-                    ),
-            )
     }
 }
 
