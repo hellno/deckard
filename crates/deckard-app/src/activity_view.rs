@@ -319,7 +319,6 @@ impl Shell {
     /// The feed: heading + STOP control + (loading skeleton / error / empty / day-grouped rows).
     fn render_activity_feed(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let fg = theme.foreground;
         let muted = theme.muted_foreground;
         let raise = theme.secondary;
         let danger = theme.danger;
@@ -382,7 +381,7 @@ impl Shell {
         // the panic brake is always on screen no matter how far the log scrolls. Only the post-STOP
         // banner + the feed body scroll beneath it. (Use the Copy color locals, not `theme`, so its
         // cx borrow doesn't outlive the cx-mutable `activity_heading`/`activity_group` calls above.)
-        let heading = self.activity_heading(fg, muted, cx);
+        let heading = self.activity_heading(muted, cx);
         let mut scroll_body = v_flex().w_full().gap_4();
         if self.activity_stopped {
             scroll_body = scroll_body.child(stopped_banner(danger, raise));
@@ -414,80 +413,46 @@ impl Shell {
         )
     }
 
-    /// The page heading row: H1 + a persistent session-scope sub-line on the left, the STOP
-    /// control on the right (amber when idle, escalating to red when armed).
-    fn activity_heading(
-        &self,
-        fg: gpui::Hsla,
-        muted: gpui::Hsla,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    /// The page heading row (golden ref `.acthead`): a quiet uppercase `ACTIVITY` label on one
+    /// baseline with the STOP control pushed to the right — no hero title, no explainer subtitle.
+    /// The kill-switch carries the state (grey when no agent runs, amber when one does, red armed).
+    fn activity_heading(&self, muted: gpui::Hsla, cx: &mut Context<Self>) -> impl IntoElement {
         h_flex()
             .w_full()
-            .items_start()
+            .items_center()
             .justify_between()
             .gap_4()
-            .child(
-                v_flex()
-                    .min_w_0()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_xl()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(fg)
-                            .child("Activity"),
-                    )
-                    .child(div().text_sm().text_color(muted).child(format!(
-                        "What {} and you did this session. Watch it, and stop it.",
-                        self.agent_handle()
-                    ))),
-            )
+            .child(crate::widgets::section_label("Activity", muted))
             .child(self.activity_stop_control(cx))
     }
 
-    /// The STOP control — the always-reachable panic brake. Amber outline "STOP" when idle (a
-    /// human "where you are" action); a red outline "Confirm STOP — revoke & lock signing · Esc to
-    /// cancel" once armed. **Click-to-arm** (NOT hold): two deliberate clicks (or ⌘K → "STOP") fire
-    /// it — never a single click, since it zeroizes the key. Esc disarms (handled in
-    /// `on_activity_key`).
+    /// The STOP control — the shared kill-switch treatment (`widgets::stop_brake`), driven by the
+    /// agent-active + arm state. Three states: **Idle** ("No agents running", grey, disabled) when
+    /// nothing runs; **Ready** ("Stop all agents", amber) while an agent is live — a human "your
+    /// call" action; **Armed** ("Confirm STOP…", red) after the first press. **Click-to-arm** (NOT
+    /// hold): two deliberate clicks (or ⌘K → "STOP") fire it — never a single click, since it
+    /// zeroizes the key. Esc disarms (handled in `on_activity_key`). "Agent live" = a policy exists
+    /// and hasn't been revoked — the same signal the rail reads. STOP stays reachable via ⌘K even
+    /// when this header marker is the disabled idle variant.
     fn activity_stop_control(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let amber = theme::amber(theme.is_dark());
-        let danger = theme.danger;
+        use crate::widgets::BrakeState;
+        // `has_active_agent` is the ONE shared predicate (also read by the wallet-home presence
+        // row), so the two surfaces never disagree; `brake_state` folds it with the arm flag.
+        let state = crate::widgets::brake_state(self.activity_stop_arming, self.has_active_agent());
+        let brake = crate::widgets::stop_brake(state, cx.theme());
 
-        if self.activity_stop_arming {
-            // Armed: escalate from the amber idle outline to a red outline + label — a clear
-            // "this is the irreversible one" signal, using only the theme's `danger` color.
-            div()
-                .id("activity-stop")
-                .flex_shrink_0()
-                .px_3()
-                .py_1p5()
-                .rounded(crate::tokens::RADIUS_ROW)
-                .border_1()
-                .border_color(danger)
-                .text_color(danger)
-                .text_sm()
-                .font_weight(FontWeight::SEMIBOLD)
-                .cursor_pointer()
-                .child("Confirm STOP: revoke & lock signing · Esc to cancel")
-                .on_click(cx.listener(|this, _, _, cx| this.stop_button_clicked(cx)))
+        if matches!(state, BrakeState::Idle) {
+            // Idle is a disabled marker (golden ref `.killswitch.idle`: `cursor:default`, no
+            // handler) — the brake only arms and zeroizes while an agent is actually live.
+            div().flex_shrink_0().child(brake).into_any_element()
         } else {
             div()
                 .id("activity-stop")
                 .flex_shrink_0()
-                .px_3()
-                .py_1p5()
-                .rounded(crate::tokens::RADIUS_ROW)
-                .border_1()
-                .border_color(amber)
-                .text_color(amber)
-                .text_sm()
-                .font_weight(FontWeight::SEMIBOLD)
                 .cursor_pointer()
-                .child("STOP")
+                .child(brake)
                 .on_click(cx.listener(|this, _, _, cx| this.stop_button_clicked(cx)))
+                .into_any_element()
         }
     }
 
