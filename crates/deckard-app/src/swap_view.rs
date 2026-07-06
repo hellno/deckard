@@ -32,12 +32,14 @@ use gpui_component::{
     v_flex, ActiveTheme, Disableable, Icon, IconName,
 };
 
+use deckard_contract::Rule;
 use deckard_core::{tokens_for, Address, U256};
 
 use crate::commit_view::{CommitView, HonestyLine};
 use crate::money::money;
 use crate::shell::{Shell, Surface};
 use crate::theme;
+use crate::widgets::{origin_header, Origin};
 
 /// The Swap surface descriptor. Unlike Send/Shield it does NOT feed `render_commit` (Swap's
 /// compose + review are bespoke — see [`Shell::render_swap`]); it carries the copy, ids, glyph tone,
@@ -66,8 +68,6 @@ pub static SWAP_VIEW: CommitView = CommitView {
     compose_hint_dynamic: None,
 
     // --- review (read by `commit_heading` on the review arm) ---
-    review_title: "Review swap",
-    review_subtitle: "Confirm what you sell, the minimum you receive, and where it goes, then swap with ⌘↵.",
     // The bespoke review card builds its own token-denominated rows; the generic ETH money rows
     // don't apply.
     extra_rows: &[],
@@ -457,9 +457,32 @@ impl Shell {
         let fg = theme.foreground;
         let muted = theme.muted_foreground;
         let border = theme.border;
+        let danger = theme.danger;
         let mark_fill = theme::identity_square(theme.is_dark());
         let mono = theme.mono_font_family.clone();
         let chain_id = self.chain_id();
+
+        // The request-origin rail — a self-initiated swap is You (amber "You are swapping"). Built
+        // now, while `theme` is borrowed; the `self.*(cx)` calls below re-borrow it. This rail is
+        // the ONLY thing that differs across origins — the review body is the shared surface.
+        let wallet_name = self.wallet_name();
+        let origin_rail = origin_header(
+            Origin::You {
+                account: &wallet_name,
+                verb: "swapping",
+            },
+            None,
+            theme,
+        );
+        // The **Allowed by** line for a swap: the Swap rule permitted it. A swap ALWAYS asks (it
+        // never auto-allows), so there is no numeric cap-after the daily line could truthfully claim
+        // — the label alone is the honest authority (never a claim the engine doesn't back). `None`
+        // when the policy is unavailable or carries no swap rule.
+        let swap_rule_label = self
+            .agent_policy
+            .as_ref()
+            .and_then(|p| p.rules.iter().find(|r| matches!(r, Rule::Swap { .. })))
+            .map(|r| r.label());
 
         // Pull the bound figures off the last quote (the quote that produced this proposal). The
         // proposal's `intent` carries the swap's value, but the token-denominated sell/buy figures
@@ -562,7 +585,17 @@ impl Shell {
             .into_any_element(),
         );
         if let Some(valid) = valid_row {
-            rows.push(kv_text_row("Valid until", valid, mono, muted, muted).into_any_element());
+            rows.push(
+                kv_text_row("Valid until", valid, mono.clone(), muted, muted).into_any_element(),
+            );
+        }
+        // The Allowed-by authority line — the Swap rule that permitted it (a swap always asks, so no
+        // numeric cap-after to claim). Omitted when no policy / no swap rule.
+        if let Some(label) = swap_rule_label {
+            rows.push(
+                kv_text_row("Allowed by", label.to_string(), mono.clone(), fg, muted)
+                    .into_any_element(),
+            );
         }
 
         let mut kvlist = v_flex()
@@ -584,12 +617,9 @@ impl Shell {
             v_flex()
                 .w_full()
                 .gap_4()
-                .child(self.commit_heading(
-                    &SWAP_VIEW,
-                    SWAP_VIEW.review_title,
-                    SWAP_VIEW.review_subtitle,
-                    cx,
-                ))
+                // The shared request-origin rail — the ONLY cross-origin difference. The swap keeps
+                // its native two-token body below it (per E5: same rail, honest native content).
+                .child(origin_rail)
                 // A faint reminder of the human-readable summary the proposal snapshot carries
                 // (e.g. "0.05 WETH → at least 92.1 COW"), so the list matches what was reviewed.
                 .child(
@@ -598,6 +628,8 @@ impl Shell {
                         .text_color(muted)
                         .child(proposal.recipient.clone()),
                 )
+                // The ONE danger line for every value move (DESIGN §Clear-signing).
+                .child(crate::widgets::error_line(danger, "This can't be undone."))
                 .child(kvlist)
                 .child(self.commit_honesty_swap(cx))
                 .children(self.swap.error.as_ref().map(|e| error_line(e, cx)))

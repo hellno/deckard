@@ -84,6 +84,7 @@ pub fn test_policy() -> Policy {
             },
             Rule::Shield {
                 approval: ApprovalMode::OverCap,
+                per_tx_cap_wei: None,
             },
             Rule::Swap {
                 tokens: Allowlist::Any,

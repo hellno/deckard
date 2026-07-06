@@ -122,6 +122,7 @@ pub fn demo_policy() -> Policy {
             },
             Rule::Shield {
                 approval: ApprovalMode::OverCap,
+                per_tx_cap_wei: None,
             },
             Rule::Swap {
                 tokens: Allowlist::Any, // any token; swap tools land in the MCP child (#26)

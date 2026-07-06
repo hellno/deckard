@@ -40,6 +40,7 @@ fn demo_signer() -> MockSigner {
             // Shield rule MUST be `OverCap` (within cap ⇒ no card ⇒ Allow), not Always.
             Rule::Shield {
                 approval: ApprovalMode::OverCap,
+                per_tx_cap_wei: None,
             },
             Rule::Swap {
                 tokens: Allowlist::Any, // any token (this harness exercises sends, not swaps)

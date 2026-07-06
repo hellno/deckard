@@ -500,9 +500,14 @@ fn rule_json(rule: &Rule) -> serde_json::Value {
             "per_tx_cap_eth": per_tx_cap_wei.map(format_wei_as_eth),
             "recipients": allowlist_json(recipients),
         }),
-        Rule::Shield { approval } => json!({
+        Rule::Shield {
+            approval,
+            per_tx_cap_wei,
+        } => json!({
             "action": "shield",
             "approval": approval_mode_str(*approval),
+            "per_tx_cap_wei": per_tx_cap_wei.map(|c| c.to_string()),
+            "per_tx_cap_eth": per_tx_cap_wei.map(format_wei_as_eth),
         }),
         Rule::Unshield {
             approval,

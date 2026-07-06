@@ -126,9 +126,15 @@ pub enum Rule {
         per_tx_cap_wei: Option<U256>,
         recipients: Allowlist,
     },
-    /// Railgun deposit to one's own 0zk balance — value moves to self, so no recipient set and
-    /// no per-tx cap.
-    Shield { approval: ApprovalMode },
+    /// Railgun deposit to one's own 0zk balance — value moves to self, so no recipient set. It
+    /// DOES carry an optional per-tx cap: a shield still moves value off the public balance, and
+    /// the daily wall alone let a large deposit (0.15 ETH under a stated 0.1 per-move cap)
+    /// auto-broadcast (#185). `evaluate` enforces this cap on the shield path exactly as it does
+    /// for `Send`/`Unshield`.
+    Shield {
+        approval: ApprovalMode,
+        per_tx_cap_wei: Option<U256>,
+    },
     /// Railgun withdraw back to a public balance. Forward-compat; not yet reachable (see the
     /// type-level note above).
     Unshield {
@@ -180,10 +186,17 @@ impl Serialize for Rule {
                 }
                 map.end()
             }
-            Rule::Shield { approval } => {
-                let mut map = serializer.serialize_map(Some(2))?;
+            Rule::Shield {
+                approval,
+                per_tx_cap_wei,
+            } => {
+                let len = 2 + usize::from(per_tx_cap_wei.is_some());
+                let mut map = serializer.serialize_map(Some(len))?;
                 map.serialize_entry("action", "shield")?;
                 map.serialize_entry("approval", approval)?;
+                if let Some(cap) = per_tx_cap_wei {
+                    map.serialize_entry("per_tx_cap_wei", cap)?;
+                }
                 map.end()
             }
             Rule::Unshield {
@@ -331,13 +344,13 @@ impl<'de> Deserialize<'de> for Rule {
                         })
                     }
                     "shield" => {
-                        reject(per_tx_cap_wei.is_some(), "per_tx_cap_wei")?;
                         reject(recipients.is_some(), "recipients")?;
                         reject(tokens.is_some(), "tokens")?;
                         reject(targets.is_some(), "targets")?;
                         Ok(Rule::Shield {
                             approval: approval
                                 .ok_or_else(|| M::Error::missing_field("approval"))?,
+                            per_tx_cap_wei,
                         })
                     }
                     "unshield" => {
@@ -530,6 +543,24 @@ impl core::fmt::Display for PolicyError {
 
 impl std::error::Error for PolicyError {}
 
+/// The inputs for the shared Review's **Allowed by** authority line (DESIGN §Clear-signing) —
+/// produced by [`Policy::authority_for`] so the UI renders the *same* rule + cap the engine
+/// enforces, never a recomputed figure that could drift. All wei; the UI formats.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Authority {
+    /// The label of the rule that governs the action ([`Rule::label`]) — the line's subject.
+    pub rule_label: &'static str,
+    /// The one global daily ceiling (the "of $Y" total).
+    pub daily_cap_wei: U256,
+    /// What remains of the daily ceiling AFTER this move (the "$X"): `daily_cap − (spent + value)`,
+    /// saturating at zero.
+    pub daily_remaining_after_wei: U256,
+    /// `true` when the move trips a cap (per-tx OR daily) — re-derives [`evaluate`]'s cap test so
+    /// the UI knows the "daily left after this" clause is a breach the danger line owns, not calm
+    /// headroom. Pinned to `evaluate`'s verdict by a unit test so the two can't drift.
+    pub over_cap: bool,
+}
+
 impl Rule {
     /// This rule's action as its wire tag — used for duplicate-detection error messages and
     /// to match a rule against an [`IntentKind`].
@@ -540,6 +571,19 @@ impl Rule {
             Rule::Unshield { .. } => "unshield",
             Rule::Swap { .. } => "swap",
             Rule::ContractCall { .. } => "contract_call",
+        }
+    }
+
+    /// A human label for the rule — the subject of the shared Review's **Allowed by** authority
+    /// line (`Send rule`, `Shield rule`, …). One source so the UI never invents a rule name, and
+    /// the label it shows names the exact rule `evaluate` matched.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Rule::Send { .. } => "Send rule",
+            Rule::Shield { .. } => "Shield rule",
+            Rule::Unshield { .. } => "Unshield rule",
+            Rule::Swap { .. } => "Swap rule",
+            Rule::ContractCall { .. } => "Contract-call rule",
         }
     }
 
@@ -583,13 +627,14 @@ impl Policy {
         self.rules.iter().find(|rule| rule.matches_kind(&kind))
     }
 
-    /// The per-tx cap carried by the rule for `kind`, if any. Only `Send`/`Unshield` rules
-    /// carry one; every other action (and a no-rule) yields `None`.
+    /// The per-tx cap carried by the rule for `kind`, if any. `Send`/`Shield`/`Unshield` rules can
+    /// carry one; every other action (and a no-rule) yields `None`. Shield joined this set in #185
+    /// so a large deposit can't slip past the per-move cap on the daily wall alone.
     pub fn per_tx_cap_for(&self, kind: IntentKind) -> Option<U256> {
         match self.rule_for(kind)? {
-            Rule::Send { per_tx_cap_wei, .. } | Rule::Unshield { per_tx_cap_wei, .. } => {
-                *per_tx_cap_wei
-            }
+            Rule::Send { per_tx_cap_wei, .. }
+            | Rule::Shield { per_tx_cap_wei, .. }
+            | Rule::Unshield { per_tx_cap_wei, .. } => *per_tx_cap_wei,
             _ => None,
         }
     }
@@ -613,7 +658,7 @@ impl Policy {
     pub fn approval_for(&self, kind: IntentKind) -> Option<ApprovalMode> {
         match self.rule_for(kind)? {
             Rule::Send { approval, .. }
-            | Rule::Shield { approval }
+            | Rule::Shield { approval, .. }
             | Rule::Unshield { approval, .. }
             | Rule::ContractCall { approval, .. } => Some(*approval),
             Rule::Swap { .. } => None,
@@ -631,6 +676,27 @@ impl Policy {
                 _ => None,
             })
             .unwrap_or(&DENY_ALL)
+    }
+
+    /// The **Allowed by** authority-line inputs for a proposed `(kind, value)` — the rule that
+    /// governs the action plus the daily budget remaining AFTER the move (see [`Authority`]). The
+    /// UI renders these verbatim, so its cap figure is the *same* one [`evaluate`] enforces and can
+    /// never drift. Returns `None` when no rule governs `kind` (default-deny — there is no authority
+    /// to cite; the review shows the deny instead). Used only for the native-value paths
+    /// (`Send`/`Shield`/`Unshield`); a swap always asks and cites its `Swap rule` via [`Rule::label`]
+    /// directly, since `evaluate_order` enforces no numeric cap the daily line could truthfully claim.
+    pub fn authority_for(&self, kind: IntentKind, value: U256) -> Option<Authority> {
+        let rule = self.rule_for(kind.clone())?;
+        let projected = self.spent_today_wei.saturating_add(value);
+        // Mirror `evaluate`'s cap test (per-tx OR daily) — a unit test pins the two together.
+        let over_daily = projected > self.daily_cap_wei;
+        let over_pertx = self.per_tx_cap_for(kind).is_some_and(|cap| projected > cap);
+        Some(Authority {
+            rule_label: rule.label(),
+            daily_cap_wei: self.daily_cap_wei,
+            daily_remaining_after_wei: self.daily_cap_wei.saturating_sub(projected),
+            over_cap: over_pertx || over_daily,
+        })
     }
 }
 
@@ -728,7 +794,7 @@ pub fn evaluate(intent: &Intent, policy: &Policy) -> Decision {
 fn rule_approval(rule: &Rule) -> ApprovalMode {
     match rule {
         Rule::Send { approval, .. }
-        | Rule::Shield { approval }
+        | Rule::Shield { approval, .. }
         | Rule::Unshield { approval, .. }
         | Rule::ContractCall { approval, .. } => *approval,
         Rule::Swap { .. } => ApprovalMode::Always,
@@ -882,6 +948,7 @@ mod evaluate_order_tests {
                 },
                 Rule::Shield {
                     approval: ApprovalMode::OverCap,
+                    per_tx_cap_wei: None,
                 },
             ],
         }
@@ -1070,6 +1137,7 @@ mod evaluate_order_tests {
         let p = Policy {
             rules: vec![Rule::Shield {
                 approval: ApprovalMode::Never,
+                per_tx_cap_wei: None,
             }],
             ..base_policy()
         };
@@ -1118,6 +1186,7 @@ mod message_signing_tests {
             spent_today_wei: U256::ZERO,
             rules: vec![Rule::Shield {
                 approval: ApprovalMode::Never,
+                per_tx_cap_wei: None,
             }],
         }
     }
@@ -1241,6 +1310,7 @@ mod policy_v2_tests {
         // A policy with only a Shield rule denies a Send with the NEW default-deny tag.
         let p = policy_with(vec![Rule::Shield {
             approval: ApprovalMode::Never,
+            per_tx_cap_wei: None,
         }]);
         assert_eq!(
             evaluate(&send_intent(Address::repeat_byte(0x22), 10), &p),
@@ -1297,6 +1367,7 @@ mod policy_v2_tests {
             },
             Rule::Shield {
                 approval: ApprovalMode::Never,
+                per_tx_cap_wei: None,
             },
             Rule::Swap {
                 tokens: Allowlist::Any,
@@ -1331,6 +1402,7 @@ mod policy_v2_tests {
             },
             Rule::Shield {
                 approval: ApprovalMode::Never,
+                per_tx_cap_wei: None,
             },
             Rule::Swap {
                 tokens: Allowlist::Only(vec![Address::repeat_byte(0xCC)]),
@@ -1371,8 +1443,145 @@ mod policy_v2_tests {
     fn swap_tokens_floor_is_deny_all_with_no_swap_rule() {
         let p = policy_with(vec![Rule::Shield {
             approval: ApprovalMode::Never,
+            per_tx_cap_wei: None,
         }]);
         assert_eq!(p.swap_tokens(), &Allowlist::DenyAll);
+    }
+
+    // ── #185 cap-enforced-on-shields (TRUST-CRITICAL) ─────────────────────────────────────────
+    // A Shield now carries a per-tx cap, and `evaluate` (the ONE gate the mock AND the daemon
+    // call) enforces it on the shield path exactly as it does for a Send. The bug this locks
+    // shut: a 0.15 deposit auto-broadcast under a stated 0.1 per-move cap because
+    // `per_tx_cap_for(Shield)` returned `None` and the per-tx check silently short-circuited.
+
+    /// A Shield intent with the non-empty calldata `calldata_ok` requires. `to`/`chain_id` are
+    /// immaterial to `evaluate` (shields carry no recipient allowlist), so only `value` varies.
+    fn shield_intent(value: u64) -> Intent {
+        Intent {
+            chain_id: 1,
+            to: Address::repeat_byte(0x33),
+            token: None,
+            value: U256::from(value),
+            calldata: Bytes::from_static(&[0x01, 0x02, 0x03, 0x04]),
+            kind: IntentKind::Shield,
+        }
+    }
+
+    /// A demo-shaped shield rule: `over_cap` approval + a per-tx cap, under a high daily wall so
+    /// the per-tx cap is the ONLY fence that can trip (proving per-tx enforcement on the shield
+    /// path, not the daily wall).
+    fn shield_cap_policy(per_tx: u64) -> Policy {
+        Policy {
+            daily_cap_wei: U256::from(1_000_000u64),
+            ..policy_with(vec![Rule::Shield {
+                approval: ApprovalMode::OverCap,
+                per_tx_cap_wei: Some(U256::from(per_tx)),
+            }])
+        }
+    }
+
+    #[test]
+    fn shield_over_per_tx_cap_needs_approval() {
+        // THE regression: a shield OVER the stated per-move cap ASKS, never auto-broadcasts.
+        let p = shield_cap_policy(100);
+        assert!(
+            matches!(
+                evaluate(&shield_intent(150), &p),
+                Decision::NeedsApproval { .. }
+            ),
+            "a shield over the per-tx cap must be held for approval, not auto-allowed (#185)"
+        );
+    }
+
+    #[test]
+    fn shield_within_per_tx_cap_allows() {
+        // The other half: a within-cap shield still auto-allows (the fix doesn't over-block).
+        let p = shield_cap_policy(100);
+        assert_eq!(evaluate(&shield_intent(50), &p), Decision::Allow);
+        // Boundary: exactly at the cap is within (the check is strictly `>`).
+        assert_eq!(evaluate(&shield_intent(100), &p), Decision::Allow);
+    }
+
+    #[test]
+    fn shield_over_per_tx_cap_denies_under_never_mode() {
+        // With `never` approval there is no card to authorise an over-cap move, so it DENIES
+        // (fail-closed) rather than silently broadcasting.
+        let p = Policy {
+            daily_cap_wei: U256::from(1_000_000u64),
+            ..policy_with(vec![Rule::Shield {
+                approval: ApprovalMode::Never,
+                per_tx_cap_wei: Some(U256::from(100u64)),
+            }])
+        };
+        assert_eq!(
+            evaluate(&shield_intent(150), &p),
+            Decision::Deny {
+                reason: deny_reasons::OVER_CAP.into()
+            }
+        );
+    }
+
+    #[test]
+    fn shield_per_tx_cap_is_read_by_the_accessor() {
+        // Locks the `per_tx_cap_for` arm that was the bug: it must now return the shield rule's cap.
+        let p = shield_cap_policy(100);
+        assert_eq!(
+            p.per_tx_cap_for(IntentKind::Shield),
+            Some(U256::from(100u64))
+        );
+    }
+
+    #[test]
+    fn authority_for_over_cap_matches_evaluate() {
+        // Pin `authority_for.over_cap` (the UI's "is this a breach?" signal) to `evaluate`'s
+        // verdict across a value matrix, so the Allowed-by line can never claim headroom the
+        // engine doesn't back (the honest-enforced-cap invariant).
+        let p = shield_cap_policy(100);
+        for value in [1u64, 50, 100, 101, 150, 1_000_000, 2_000_000] {
+            let auth = p
+                .authority_for(IntentKind::Shield, U256::from(value))
+                .expect("shield rule governs the kind");
+            let asks = matches!(
+                evaluate(&shield_intent(value), &p),
+                Decision::NeedsApproval { .. }
+            );
+            assert_eq!(
+                auth.over_cap, asks,
+                "authority_for.over_cap must equal evaluate's ask-verdict at value {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn authority_for_reports_daily_remaining_after_the_move() {
+        // The "$X of $Y daily left after this" figures come straight off the policy, so the UI
+        // never recomputes cap math. Y = daily cap; X = daily cap − (spent + value).
+        let p = Policy {
+            daily_cap_wei: U256::from(1000u64),
+            spent_today_wei: U256::from(200u64),
+            ..policy_with(vec![Rule::Shield {
+                approval: ApprovalMode::OverCap,
+                per_tx_cap_wei: Some(U256::from(500u64)),
+            }])
+        };
+        let auth = p
+            .authority_for(IntentKind::Shield, U256::from(300u64))
+            .unwrap();
+        assert_eq!(auth.rule_label, "Shield rule");
+        assert_eq!(auth.daily_cap_wei, U256::from(1000u64));
+        // 1000 − (200 + 300) = 500 left after this move.
+        assert_eq!(auth.daily_remaining_after_wei, U256::from(500u64));
+        assert!(
+            !auth.over_cap,
+            "300 is within the 500 per-tx and 1000 daily caps"
+        );
+    }
+
+    #[test]
+    fn authority_for_is_none_without_a_governing_rule() {
+        // Default-deny: no rule for the kind ⇒ no authority to cite (the review shows the deny).
+        let p = policy_with(vec![]);
+        assert_eq!(p.authority_for(IntentKind::Shield, U256::from(1u64)), None);
     }
 }
 
@@ -1503,6 +1712,12 @@ mod rule_serde_tests {
             },
             Rule::Shield {
                 approval: ApprovalMode::Never,
+                per_tx_cap_wei: None,
+            },
+            // #185: a Shield WITH a per-tx cap must also survive CBOR (the new wire field).
+            Rule::Shield {
+                approval: ApprovalMode::OverCap,
+                per_tx_cap_wei: Some(U256::from(7u64)),
             },
             Rule::Unshield {
                 approval: ApprovalMode::Always,
@@ -1522,6 +1737,36 @@ mod rule_serde_tests {
             assert_eq!(back, rule, "rule did not survive a CBOR round-trip");
         }
     }
+
+    #[test]
+    fn shield_per_tx_cap_json_shape_and_omission() {
+        // #185: the shield rule's optional per-tx cap emits as a 0x-hex string when present and is
+        // OMITTED when `None` (matching Send/Unshield), and decodes back to the same value.
+        let capped = Rule::Shield {
+            approval: ApprovalMode::OverCap,
+            per_tx_cap_wei: Some(U256::from(5u64)),
+        };
+        let json: serde_json::Value = serde_json::to_value(&capped).unwrap();
+        assert_eq!(json["action"], "shield");
+        assert_eq!(json["per_tx_cap_wei"], "0x5");
+        let back: Rule = serde_json::from_value(json).unwrap();
+        assert_eq!(back, capped);
+
+        let uncapped: Rule =
+            serde_json::from_str(r#"{"action":"shield","approval":"never"}"#).unwrap();
+        assert_eq!(
+            uncapped,
+            Rule::Shield {
+                approval: ApprovalMode::Never,
+                per_tx_cap_wei: None,
+            }
+        );
+        let uncapped_json: serde_json::Value = serde_json::to_value(&uncapped).unwrap();
+        assert!(
+            uncapped_json.get("per_tx_cap_wei").is_none(),
+            "a None shield per_tx_cap_wei must be omitted, got {uncapped_json}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1529,10 +1774,11 @@ mod demo_shape_check {
     use super::*;
     #[test]
     fn demo_json_from_the_plan_decodes_and_validates() {
-        // The exact policy.demo.json shape PR1 specifies (plan §policy.demo.json).
+        // The exact policy.demo.json shape (#185: the shield rule now carries a per-tx cap so a
+        // large deposit can't auto-broadcast past the stated per-move limit).
         let json = r#"{ "version":1, "default":"deny",
             "daily_cap_wei":"500000000000000000", "auto_shield_min_wei":"10000000000000000",
-            "rules":[ {"action":"shield","approval":"over_cap"},
+            "rules":[ {"action":"shield","approval":"over_cap","per_tx_cap_wei":"100000000000000000"},
                       {"action":"send","approval":"over_cap","per_tx_cap_wei":"100000000000000000","recipients":"any"},
                       {"action":"swap","tokens":"any"} ] }"#;
         let p: Policy = serde_json::from_str(json).expect("demo policy decodes");
@@ -1543,5 +1789,12 @@ mod demo_shape_check {
         );
         assert_eq!(p.recipients_for(IntentKind::Send), &Allowlist::Any);
         assert_eq!(p.swap_tokens(), &Allowlist::Any);
+        // #185: the demo shield rule is now capped at 0.1 ETH per move (equal to the send cap),
+        // so a 0.15 ETH shield asks instead of auto-broadcasting.
+        assert_eq!(
+            p.per_tx_cap_for(IntentKind::Shield),
+            Some(U256::from(100_000_000_000_000_000u128)),
+            "the demo shield rule carries the 0.1 ETH per-tx cap (#185)"
+        );
     }
 }

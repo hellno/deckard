@@ -1,24 +1,24 @@
-//! commit_view — the generic "compose → review → done" renderer that drives every
-//! [`CommitFlow`](crate::commit_flow) surface (Send now; Shield joins in Step 2). A single
-//! [`CommitView`] descriptor (a `&'static` table of copy, button ids, the heading glyph, and a
-//! few per-surface hooks) feeds [`Shell::render_commit`], which renders the shared compose →
-//! review → done surface. The review step is the editorial transaction-as-hero clear-signing
-//! statement (DESIGN §Clear-signing review): action label, oversized mono amount, recipient,
-//! danger/caution lines, then quiet supporting facts — driven entirely by the descriptor.
+//! commit_view — the generic "compose → review → done" renderer that drives every self-initiated
+//! [`CommitFlow`](crate::commit_flow) surface (Send + Shield; Swap reuses the confirm + shell). A
+//! single [`CommitView`] descriptor (a `&'static` table of copy, button ids, the heading glyph, and
+//! a few per-surface hooks) feeds [`Shell::render_commit`], which renders the shared compose →
+//! review → done surface.
 //!
-//! The clear-signing contract is unchanged from `shield_view`/`send_view`: plain language, exact
-//! mono figures, danger early, and confirm is a hold (never a tap) — the hand-built
-//! [`Shell::hold_to_confirm`] sweep animates an amber fill over [`SHIELD_HOLD`] as the action
-//! signs (amber = the human-confirm signal).
+//! The review step is the ONE shared clear-signing Review (DESIGN §Clear-signing — E5, #185),
+//! rendered for EVERY origin (here a self Send/Shield; an agent proposal and a dapp request route
+//! through the same body from `activity_view`). Only the request-origin **rail** changes; the body
+//! is identical: `origin_header` → the transaction-as-hero amount ([`tx_hero`]) → the full recipient
+//! ([`tx_recipient`]) → the one danger line "This can't be undone." → amber cautions → the quiet
+//! facts (From · Network · fee/net · **Allowed by** the rule + cap-after, via [`Shell::review_authority_row`]).
 //!
-//! Step 1 migrates ONLY Send onto this renderer; Shield still uses its flat `shield_*` fields and
-//! `shield_view.rs`. The descriptor already carries the slots Shield needs (optional fee/net rows,
-//! a variable honesty-line list, an optional conditional compose-hint hook) so Step 2 is a pure
-//! descriptor + handler swap with no renderer changes.
+//! Confirm is the platform-aware `⌘↵` key-cap (DESIGN §The confirm pattern — a deliberate click or
+//! chord, NOT a hold; the arm-delay gates it), rendered by [`Shell::hold_to_confirm`] and reused by
+//! Swap's bespoke review. The clear-signing contract is unchanged: plain language, exact mono
+//! figures, danger early (amber = the human-confirm signal).
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, ClipboardItem, Context, FontWeight, Hsla, InteractiveElement, IntoElement,
+    div, px, AnyElement, ClipboardItem, Context, FontWeight, Hsla, InteractiveElement, IntoElement,
     ParentElement, SharedString, StatefulInteractiveElement, Styled,
 };
 use gpui_component::{
@@ -28,11 +28,13 @@ use gpui_component::{
     v_flex, ActiveTheme, Disableable, Icon, IconName,
 };
 
+use deckard_contract::IntentKind;
 use deckard_core::U256;
 
 use crate::commit_flow::{CommitFlow, Proposal};
 use crate::money::money;
 use crate::shell::Shell;
+use crate::widgets::{key_cap, kv_row, origin_header, KeyCap, KvValue, Origin};
 
 /// A single label/value money row in the review's quiet supporting-facts list: label left
 /// (muted), value right (mono). One signature shared by every commit surface.
@@ -54,6 +56,74 @@ fn kv_money_row(
                 .text_sm()
                 .child(money(wei, 18, 6, Some("ETH"), false, mono, fg, muted)),
         )
+}
+
+/// The transaction-as-hero amount block shared by every Tx-shaped Review — a self Send/Shield
+/// (`render_commit_review`) AND an agent's proposed Tx (`render_activity_review`). A tiny action
+/// label, then the amount as the oversized mono hero (integer `fg`, decimals + ticker dimmed by
+/// color, no size step). ONE builder so the self review and the agent review render the amount
+/// identically — the "one review, header-rail-only difference" invariant (DESIGN §Clear-signing).
+/// Never masked: at the moment of authorization you must SEE the figure you are approving.
+pub(crate) fn tx_hero(
+    noun: &str,
+    value: U256,
+    unit: Option<&str>,
+    mono: SharedString,
+    fg: Hsla,
+    muted: Hsla,
+) -> gpui::AnyElement {
+    v_flex()
+        .w_full()
+        .gap_1()
+        .child(crate::widgets::section_label(noun, muted))
+        .child(
+            div()
+                .text_size(crate::tokens::TEXT_TX_HERO)
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(money(value, 18, 6, unit, false, mono, fg, muted)),
+        )
+        .into_any_element()
+}
+
+/// The security-critical recipient block shared by every Tx-shaped Review: a tiny `To` label +
+/// identicon + the FULL address (every character, `fg`, not dimmed, wraps for a long 0zk address) —
+/// maximal distinguishability at the moment of authorization. ONE builder so the self review and
+/// the agent review show the destination identically.
+pub(crate) fn tx_recipient(
+    recipient: &str,
+    mono: SharedString,
+    fg: Hsla,
+    muted: Hsla,
+    id_fill: Hsla,
+) -> gpui::AnyElement {
+    let r = recipient.trim();
+    v_flex()
+        .w_full()
+        .gap_2()
+        .child(crate::widgets::section_label("To", muted))
+        .child(
+            h_flex()
+                .w_full()
+                .items_start()
+                .gap_2()
+                .child(crate::widgets::identity_mark(
+                    r,
+                    px(16.0),
+                    px(4.0),
+                    id_fill,
+                    fg,
+                ))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .font_family(mono)
+                        .text_sm()
+                        .text_color(fg)
+                        .child(SharedString::from(r.to_string())),
+                ),
+        )
+        .into_any_element()
 }
 
 /// A money figure derived from the proposal's gross value, rendered as one quiet supporting-fact
@@ -106,8 +176,9 @@ pub struct CommitView {
     pub compose_hint_dynamic: Option<fn(&Shell, recipient_raw: &str) -> &'static str>,
 
     // --- review ---
-    pub review_title: &'static str,
-    pub review_subtitle: &'static str,
+    // (No review title/subtitle: the shared Review leads with the request-origin rail, not a
+    // heading — DESIGN §Clear-signing. The action verb lives in the hero's `SENDING`/`SHIELDING`
+    // label, derived from `hold_label_busy`.)
     /// Quiet supporting-fact money rows, demoted between hairlines below the hero (Shield's fee +
     /// net). Empty for Send, which has nothing to demote.
     pub extra_rows: &'static [MoneyRow],
@@ -254,12 +325,71 @@ impl Shell {
         )
     }
 
-    /// Review: the clear-signing statement (DESIGN §Clear-signing review — transaction-as-hero).
-    /// NOT a bordered card: a tiny action label, then the AMOUNT as the oversized mono hero
-    /// (dimmed decimals), then `TO` + the recipient via `truncated_address`, then the danger /
-    /// caution lines, then the quiet supporting facts (any `extra_rows`) demoted between
-    /// hairlines, then the unchanged hold-to-confirm + Edit. Rendered from the proposal SNAPSHOT —
-    /// never the live input.
+    /// The shared Review's **Allowed by** authority line (DESIGN §Clear-signing): the rule that
+    /// permits this move + the daily budget left AFTER it, read from the daemon's live policy via
+    /// [`Policy::authority_for`](deckard_contract::Policy::authority_for) so the figure is the SAME
+    /// one `evaluate` enforces — the UI never recomputes cap math, so it can't drift. Returns `None`
+    /// (line omitted) when the policy is unavailable, no rule governs the action, or the move is
+    /// OVER cap: there is then no truthful headroom to cite, and the danger line carries that story
+    /// (never show an enforcement claim the engine doesn't back). Shared by every Tx-shaped origin.
+    pub(crate) fn review_authority_row(
+        &self,
+        kind: IntentKind,
+        value: U256,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let auth = self.agent_policy.as_ref()?.authority_for(kind, value)?;
+        if auth.over_cap {
+            return None;
+        }
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
+        let primary = theme.foreground;
+        let mono = theme.mono_font_family.clone();
+        let remaining = deckard_core::format_amount(auth.daily_remaining_after_wei, 18, 4);
+        let total = deckard_core::format_amount(auth.daily_cap_wei, 18, 4);
+        Some(
+            h_flex()
+                .w_full()
+                .items_baseline()
+                .justify_between()
+                .gap_4()
+                .py_1p5()
+                .text_size(crate::tokens::TEXT_BODY)
+                .child(div().flex_shrink_0().text_color(muted).child("Allowed by"))
+                .child(
+                    h_flex()
+                        .min_w_0()
+                        .items_baseline()
+                        .gap_1()
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_color(primary)
+                                .child(SharedString::from(auth.rule_label)),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .font_family(mono)
+                                .text_color(muted)
+                                .child(SharedString::from(format!(
+                                    "· {remaining} of {total} ETH daily left after this"
+                                ))),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Review: the ONE shared clear-signing statement (DESIGN §Clear-signing — transaction-as-hero),
+    /// rendered here for a self-initiated Send/Shield. NOT a bordered card: the request-origin rail
+    /// (`You are sending`, amber) — the ONLY thing that changes across origins — then the AMOUNT as
+    /// the oversized mono hero, then `TO` + the full recipient, one danger line `This can't be
+    /// undone.`, the descriptor's amber cautions, then the quiet facts (From · Network · any
+    /// fee/net · **Allowed by**) below a hairline, then the ⌘↵ key-cap confirm + Edit. Rendered from
+    /// the proposal SNAPSHOT — never the live input.
     fn render_commit_review(
         &self,
         view: &'static CommitView,
@@ -271,102 +401,116 @@ impl Shell {
         let muted = theme.muted_foreground;
         let border = theme.border;
         let danger = theme.danger;
+        let success = theme.success;
+        let warn = theme.warning; // kv_row's loud-downgrade tone (unused by the Sans facts here)
         let is_dark = theme.is_dark();
         let mono = theme.mono_font_family.clone();
         let flow = (view.flow)(self);
 
         let gross = proposal.intent.value;
+        let kind = proposal.intent.kind.clone();
         let recipient = proposal.recipient.clone();
 
         // The action label noun ("Sending" / "Shielding") — derived from the descriptor's own
         // busy verb (the `&'static` `CommitView` is shared with the off-limits swap descriptor, so
         // a new noun field can't be added; the busy label is the descriptor's authoritative verb).
         let noun = view.hold_label_busy.trim_end_matches('…');
+        let verb = noun.to_lowercase();
 
-        // The transaction-as-hero block: a tiny action label, then the amount as the oversized
-        // mono hero (integer `fg`, decimals + ticker dimmed by color via `money`, no size step).
-        let hero = v_flex()
+        // Quiet-fact inputs (owned; no theme borrow) — the From identity and the network name.
+        let wallet_name = self.wallet_name();
+        let from_value = format!(
+            "{} · {}",
+            wallet_name,
+            crate::widgets::short_addr(&self.wallet_address_string())
+        );
+        let network_name = deckard_core::for_chain(self.chain_id())
+            .map(|c| c.network_name)
+            .unwrap_or("—");
+
+        // The request-origin rail: a self-initiated move is always You (amber "You are sending").
+        // This rail is the ONLY thing that differs across origins — the body below is identical.
+        let origin_rail = origin_header(
+            Origin::You {
+                account: &wallet_name,
+                verb: &verb,
+            },
+            None,
+            theme,
+        );
+        // `theme` is not borrowed past this point — the `self.*(cx)` calls below re-borrow it.
+
+        // The **Allowed by** authority line (rule + cap-after from the live policy). Built now,
+        // rendered inside the quiet facts; `None` when there's no truthful headroom to claim.
+        let authority = self.review_authority_row(kind, gross, cx);
+
+        // The transaction-as-hero amount + the security-critical recipient — the shared builders,
+        // so an agent's proposed Tx renders these identically (the "one review" invariant).
+        let hero = tx_hero(noun, gross, Some("ETH"), mono.clone(), fg, muted);
+        let to = tx_recipient(
+            &recipient,
+            mono.clone(),
+            fg,
+            muted,
+            crate::theme::identity_square(is_dark),
+        );
+
+        // The ONE danger line for every value move (DESIGN §Clear-signing) — plain and declarative,
+        // no textbook blockchain explainer. The descriptor's amber cautions follow it.
+        let danger_line = crate::widgets::error_line(danger, "This can't be undone.");
+
+        // Quiet supporting facts, demoted between two hairlines: From · Network · any fee/net rows
+        // (Shield's Railgun fee + private net) · the Allowed-by authority line. State each once.
+        let mut quiet = v_flex()
             .w_full()
-            .gap_1()
-            .child(crate::widgets::section_label(noun, muted))
-            .child(
-                div()
-                    .text_size(crate::tokens::TEXT_TX_HERO)
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(money(
-                        gross,
-                        18,
-                        6,
-                        Some("ETH"),
-                        false,
-                        mono.clone(),
-                        fg,
-                        muted,
-                    )),
-            );
-
-        // The recipient: a tiny `To` label + the identicon + the FULL address. This is the single
-        // most security-critical string at the moment of authorization, so unlike a tight row
-        // (which uses the 6+4 `short_addr`) the confirm shows EVERY character, in `fg` (not dimmed),
-        // and wraps for a long 0zk shield address — maximal distinguishability before signing.
-        let to = v_flex()
-            .w_full()
-            .gap_2()
-            .child(crate::widgets::section_label("To", muted))
-            .child(
-                h_flex()
-                    .w_full()
-                    .items_start()
-                    .gap_2()
-                    .child(crate::widgets::identity_mark(
-                        recipient.trim(),
-                        px(16.0),
-                        px(4.0),
-                        crate::theme::identity_square(is_dark),
-                        fg,
-                    ))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .font_family(mono.clone())
-                            .text_sm()
-                            .text_color(fg)
-                            .child(SharedString::from(recipient.trim().to_string())),
-                    ),
-            );
-
-        // The quiet supporting facts (Shield's Railgun fee + net), demoted between two hairlines.
-        // Empty for a public send, where there is nothing to demote.
-        let facts = (!view.extra_rows.is_empty()).then(|| {
-            let mut col = v_flex().w_full().child(crate::widgets::divider(border));
-            for row in view.extra_rows {
-                col = col.child(kv_money_row(
-                    row.label,
-                    (row.compute)(gross),
-                    mono.clone(),
-                    fg,
-                    muted,
-                ));
-            }
-            col.child(crate::widgets::divider(border))
-        });
+            .child(crate::widgets::divider(border))
+            .child(kv_row(
+                "From",
+                KvValue::Sans(&from_value),
+                muted,
+                fg,
+                success,
+                warn,
+                mono.clone(),
+            ))
+            .child(kv_row(
+                "Network",
+                KvValue::Sans(network_name),
+                muted,
+                fg,
+                success,
+                warn,
+                mono.clone(),
+            ));
+        for row in view.extra_rows {
+            quiet = quiet.child(kv_money_row(
+                row.label,
+                (row.compute)(gross),
+                mono.clone(),
+                fg,
+                muted,
+            ));
+        }
+        let quiet = quiet
+            .children(authority)
+            .child(crate::widgets::divider(border));
 
         self.commit_shell(
             view,
             v_flex()
                 .w_full()
                 .gap_4()
-                .child(self.commit_heading(view, view.review_title, view.review_subtitle, cx))
+                .child(origin_rail)
                 .child(hero)
                 .child(to)
+                .child(danger_line)
                 .child(self.commit_honesty(view, cx))
                 .children(
                     flow.error
                         .as_ref()
                         .map(|e| crate::widgets::error_line(danger, e.clone())),
                 )
-                .children(facts)
+                .child(quiet)
                 .child(self.hold_to_confirm(view, cx))
                 .child(
                     Button::new(view.edit_button_id)
@@ -500,17 +644,17 @@ impl Shell {
         let fg = theme.foreground;
         let border = theme.border;
         let fill = theme.muted; // bg.raise2 — the neutral primary fill
-        let base = theme.background;
         let mono = theme.mono_font_family.clone();
         let amber = crate::theme::amber(theme.is_dark());
         let muted = theme.muted_foreground;
         let flow = (view.flow)(self);
         let busy = flow.busy;
 
-        // The key-cap arms ~450ms after the review appears (the spam-guard). Dim it until then so a
-        // too-early click / ⌘↵ reads as "not ready yet" instead of a silently-dead button. The
-        // arm timer (`arm_commit`) wakes a re-render at the boundary so it visibly brightens.
-        let keycap_color = if self.commit_armed() { amber } else { muted };
+        // The key-cap arms ~450ms after the review appears (the spam-guard): `key_cap`'s `armed`
+        // flag renders it amber once `commit_armed()`, dim before, so a too-early click / ⌘↵ reads
+        // as "not ready yet" rather than a silently-dead button. The arm timer (`arm_commit`) wakes
+        // a re-render at the boundary so it visibly brightens.
+        let armed = self.commit_armed();
 
         let label = if busy {
             view.hold_label_busy
@@ -518,28 +662,11 @@ impl Shell {
             view.hold_label_idle
         };
 
-        // A keyboard-first key-cap confirm (DESIGN.md v2 §The confirm pattern). A deliberate
-        // click — or ⌘↵ — confirms; this is NOT a hold (the press-and-hold gesture was an
-        // anti-pattern). The ⌘↵ chord plus a short arm-delay (gated in the confirm handler)
-        // keep it spam-proof. The confirm handler is `on_hold_start` (kept as the trigger slot).
-        let keycap = move |g: &'static str| {
-            div()
-                .min_w(px(24.0))
-                .h(px(24.0))
-                .px_1()
-                .rounded(crate::tokens::RADIUS_ROW)
-                .bg(base)
-                .border_1()
-                .border_color(keycap_color)
-                .flex()
-                .items_center()
-                .justify_center()
-                .font_family(mono.clone())
-                .text_xs()
-                .text_color(keycap_color)
-                .child(g)
-        };
-
+        // A keyboard-first key-cap confirm (DESIGN.md §The confirm pattern) via the shared,
+        // platform-aware `key_cap` widget (⌘↵ on macOS, Ctrl↵ on Linux, the chord as ONE cap). A
+        // deliberate click — or ⌘↵ — confirms; this is NOT a hold (the press-and-hold gesture was an
+        // anti-pattern). The ⌘↵ chord plus the arm-delay keep it spam-proof. The confirm handler is
+        // `on_hold_start` (kept as the trigger slot).
         div()
             .id(view.hold_id)
             .w_full()
@@ -561,7 +688,7 @@ impl Shell {
             )
             .child(div().flex_1())
             .when(!busy, |b| {
-                b.child(h_flex().gap_1().child(keycap("⌘")).child(keycap("↵")))
+                b.child(key_cap(KeyCap::CmdEnter, armed, border, muted, amber, mono))
             })
             .on_click(cx.listener(|this, _, _, cx| (view.on_hold_start)(this, cx)))
     }

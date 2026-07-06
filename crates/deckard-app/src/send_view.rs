@@ -36,22 +36,15 @@ pub static SEND_VIEW: CommitView = CommitView {
     compose_hint_dynamic: None,
 
     // --- review ---
-    review_title: "Review transfer",
-    review_subtitle: "Confirm the amount and the destination address, then send with ⌘↵.",
     // No Railgun fee / private net line for a public send.
     extra_rows: &[],
-    honesty: &[
-        HonestyLine {
-            text: "This transfer is public on Ethereum and can't be undone.",
-            emphasized: true,
-            danger: true,
-        },
-        HonestyLine {
-            text: "Double-check the destination address: funds sent to the wrong address are lost.",
-            emphasized: false,
-            danger: true,
-        },
-    ],
+    // The shared Review renders the ONE canonical danger line ("This can't be undone.") itself, so
+    // the descriptor carries only the surface-specific amber caution below it (DESIGN §Clear-signing).
+    honesty: &[HonestyLine {
+        text: "Double-check the destination address; funds sent to the wrong address are lost.",
+        emphasized: true,
+        danger: false,
+    }],
     hold_id: "send-hold",
     hold_label_idle: "Send",
     hold_label_busy: "Sending…",

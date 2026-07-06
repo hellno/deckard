@@ -4,7 +4,7 @@
   "daily_cap_wei": "500000000000000000",
   "auto_shield_min_wei": "10000000000000000",
   "rules": [
-    { "action": "shield", "approval": "over_cap" },
+    { "action": "shield", "approval": "over_cap", "per_tx_cap_wei": "100000000000000000" },
     { "action": "send", "approval": "over_cap", "per_tx_cap_wei": "100000000000000000", "recipients": "any" },
     { "action": "swap", "tokens": "any" }
   ]

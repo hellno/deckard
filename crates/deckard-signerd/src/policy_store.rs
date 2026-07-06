@@ -44,6 +44,7 @@ pub fn default_policy() -> Policy {
         rules: vec![
             Rule::Shield {
                 approval: ApprovalMode::Never,
+                per_tx_cap_wei: None,
             },
             Rule::Send {
                 approval: ApprovalMode::Always,
@@ -86,6 +87,7 @@ pub fn shield_only_policy() -> Policy {
         spent_today_wei: U256::ZERO,
         rules: vec![Rule::Shield {
             approval: ApprovalMode::Never,
+            per_tx_cap_wei: None,
         }],
     }
 }
@@ -105,6 +107,7 @@ pub fn ask_me_everything_policy() -> Policy {
         rules: vec![
             Rule::Shield {
                 approval: ApprovalMode::Always,
+                per_tx_cap_wei: None,
             },
             Rule::Send {
                 approval: ApprovalMode::Always,
@@ -430,7 +433,7 @@ mod tests {
     fn shield_only_allows_only_shield() {
         let p = shield_only_policy();
         match p.rule_for(IntentKind::Shield) {
-            Some(Rule::Shield { approval }) => assert_eq!(*approval, ApprovalMode::Never),
+            Some(Rule::Shield { approval, .. }) => assert_eq!(*approval, ApprovalMode::Never),
             other => panic!("expected an auto-allow Shield rule, got {other:?}"),
         }
         assert!(
@@ -449,7 +452,7 @@ mod tests {
     fn ask_me_everything_cards_every_action() {
         let p = ask_me_everything_policy();
         match p.rule_for(IntentKind::Shield) {
-            Some(Rule::Shield { approval }) => assert_eq!(*approval, ApprovalMode::Always),
+            Some(Rule::Shield { approval, .. }) => assert_eq!(*approval, ApprovalMode::Always),
             other => panic!("expected an always-card Shield rule, got {other:?}"),
         }
         match p.rule_for(IntentKind::Send) {

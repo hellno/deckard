@@ -34,44 +34,51 @@ pub fn humanize_read_error(raw: &str) -> String {
 
 /// Map a daemon deny/`reason` tag to a calm, user-facing line (the wire tags are terse +
 /// machine-readable; the UI shouldn't show `chain_mismatch` raw).
+///
+/// The **shared** tags (broadcast/session/process — reachable by Send, Shield, AND swap-fallthrough)
+/// are worded action-neutrally ("the transaction…"), so a plain Send never reads as a "deposit".
+/// Only the genuinely shield-only tags (`shield_to_mismatch`, `erc20_unsupported_v1`) keep shield
+/// wording, since a send/swap can't reach them. Swaps still route swap-specific tags through
+/// [`humanize_swap_deny`] first.
 pub fn humanize_deny(reason: &str) -> String {
     // The broadcast error carries a variable RPC suffix, so match it by prefix.
     if reason.starts_with("broadcast_failed") {
-        return "the deposit couldn't be broadcast — check your network, then review again".into();
+        return "the transaction couldn't be broadcast — check your network, then review again"
+            .into();
     }
     match reason {
         "locked" => "unlock your wallet first".into(),
         "revoked" => "the signer is paused (STOP is active)".into(),
         "chain_mismatch" => {
-            "the signer is on a different chain than this deposit — reconcile the chain first"
+            "the signer is on a different chain than this transaction — reconcile the chain first"
                 .into()
         }
         "over_cap" | "cap_exceeded" => "it exceeds the agent's spending cap".into(),
         "off_allowlist" => "the recipient isn't on the allowlist".into(),
-        "undecodable" => "the deposit calldata didn't validate".into(),
+        "undecodable" => "the transaction calldata didn't validate".into(),
+        // Shield-only: a send/swap never targets the Railgun contract, so keep the deposit wording.
         "shield_to_mismatch" => {
             "the deposit doesn't target the Railgun contract for this chain".into()
         }
-        "not_approved" => "this deposit hasn't been approved yet — review it again".into(),
-        "unknown_request" => {
-            "the signer session was reset — review the deposit again".into()
-        }
+        "not_approved" => "this transaction hasn't been approved yet — review it again".into(),
+        "unknown_request" => "the signer session was reset — review the transaction again".into(),
+        // Shield-only: v1 only shields native ETH.
         "erc20_unsupported_v1" => "only native-ETH shields are supported in v1".into(),
         "unsupported_v1" => "that action isn't supported in v1".into(),
         "broadcast_timeout" => {
-            "the network didn't confirm in time — your deposit may already be in flight, so check your activity before retrying"
+            "the network didn't confirm in time — your transaction may already be in flight, so check your activity before retrying"
                 .into()
         }
-        "already_executed" => "this deposit was already submitted".into(),
+        "already_executed" => "this transaction was already submitted".into(),
         other => other.to_string(),
     }
 }
 
-/// Map a daemon deny `reason` to calm, **swap-specific** copy (#25). [`humanize_deny`] is
-/// deposit/shield-worded ("the deposit…"), which reads wrong on a swap, so the swap path routes
-/// its denies here. The swap-only policy/admission tags get distinct copy; anything else falls
-/// through to [`humanize_deny`] so the shared session/process tags (`locked`, `chain_mismatch`,
-/// `broadcast_*`, …) keep their single source of truth.
+/// Map a daemon deny `reason` to calm, **swap-specific** copy (#25). The swap-only policy/admission
+/// tags (order/approve) read wrong under [`humanize_deny`], so the swap path routes its denies here
+/// for distinct copy; anything else falls through to [`humanize_deny`] so the shared session/process
+/// tags (`locked`, `chain_mismatch`, `broadcast_*`, …) keep their single source of truth (now
+/// action-neutral, so the fallthrough reads correctly for a swap too).
 pub fn humanize_swap_deny(reason: &str) -> String {
     match reason {
         // --- order admission (deckard-contract::evaluate_order) ---
@@ -145,7 +152,7 @@ mod tests {
         );
         assert_eq!(
             humanize_deny("chain_mismatch"),
-            "the signer is on a different chain than this deposit — reconcile the chain first"
+            "the signer is on a different chain than this transaction — reconcile the chain first"
         );
         // The two-tag arm collapses to one line.
         assert_eq!(
@@ -162,19 +169,20 @@ mod tests {
         );
         assert_eq!(
             humanize_deny("undecodable"),
-            "the deposit calldata didn't validate"
+            "the transaction calldata didn't validate"
         );
+        // Shield-only tag: legitimately keeps deposit wording.
         assert_eq!(
             humanize_deny("shield_to_mismatch"),
             "the deposit doesn't target the Railgun contract for this chain"
         );
         assert_eq!(
             humanize_deny("not_approved"),
-            "this deposit hasn't been approved yet — review it again"
+            "this transaction hasn't been approved yet — review it again"
         );
         assert_eq!(
             humanize_deny("unknown_request"),
-            "the signer session was reset — review the deposit again"
+            "the signer session was reset — review the transaction again"
         );
         assert_eq!(
             humanize_deny("erc20_unsupported_v1"),
@@ -186,19 +194,45 @@ mod tests {
         );
         assert_eq!(
             humanize_deny("broadcast_timeout"),
-            "the network didn't confirm in time — your deposit may already be in flight, so check your activity before retrying"
+            "the network didn't confirm in time — your transaction may already be in flight, so check your activity before retrying"
         );
         assert_eq!(
             humanize_deny("already_executed"),
-            "this deposit was already submitted"
+            "this transaction was already submitted"
         );
+    }
+
+    #[test]
+    fn shared_deny_tags_are_action_neutral_not_deposit_worded() {
+        // A plain Send reuses `humanize_deny`, so the multi-flow tags (broadcast/session/process)
+        // must NOT read "deposit" — a send isn't a deposit. Only the genuinely shield-only tags
+        // keep shield wording (a send/swap can't reach them).
+        for tag in [
+            "broadcast_failed",
+            "broadcast_failed: connection refused",
+            "chain_mismatch",
+            "undecodable",
+            "not_approved",
+            "unknown_request",
+            "broadcast_timeout",
+            "already_executed",
+        ] {
+            let line = humanize_deny(tag).to_lowercase();
+            assert!(
+                !line.contains("deposit"),
+                "{tag} must be action-neutral, not deposit-worded: {line}"
+            );
+        }
+        // The shield-only tags legitimately keep shield/deposit wording.
+        assert!(humanize_deny("shield_to_mismatch").contains("deposit"));
+        assert!(humanize_deny("erc20_unsupported_v1").contains("shields"));
     }
 
     #[test]
     fn humanize_deny_matches_broadcast_failed_by_prefix() {
         // The broadcast error carries a variable RPC suffix, so any `broadcast_failed*` maps to
         // the same calm line.
-        let line = "the deposit couldn't be broadcast — check your network, then review again";
+        let line = "the transaction couldn't be broadcast — check your network, then review again";
         assert_eq!(humanize_deny("broadcast_failed"), line);
         assert_eq!(
             humanize_deny("broadcast_failed: connection refused (http://localhost:8545)"),

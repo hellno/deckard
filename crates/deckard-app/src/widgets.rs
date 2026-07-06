@@ -284,7 +284,7 @@ pub(crate) enum KeyCap {
 
 /// The primary-modifier label for `os` (pass `std::env::consts::OS`): `⌘` on macOS, `Ctrl`
 /// everywhere else. A pure fn so the platform mapping is unit-testable without a window.
-#[allow(dead_code)] // reason: the platform half of `key_cap`; consumed by E5/E6 via `key_cap`.
+/// The platform half of `key_cap`, now consumed by the shared Review (E5) via `key_cap`.
 fn primary_mod_label(os: &str) -> &'static str {
     if os == "macos" {
         "⌘"
@@ -294,7 +294,7 @@ fn primary_mod_label(os: &str) -> &'static str {
 }
 
 /// The glyphs a [`KeyCap`] renders for `os`. Pure (no rendering) so it is unit-testable.
-#[allow(dead_code)] // reason: the label half of `key_cap`; consumed by E5/E6 via `key_cap`.
+/// The label half of `key_cap`, now consumed by the shared Review (E5) via `key_cap`.
 fn key_cap_label(cap: KeyCap, os: &str) -> String {
     match cap {
         KeyCap::CmdEnter => format!("{}↵", primary_mod_label(os)),
@@ -308,9 +308,8 @@ fn key_cap_label(cap: KeyCap, os: &str) -> String {
 /// `std::env::consts::OS`), the `⌘↵` chord as ONE cap. `armed` renders the amber border + amber
 /// text (no fill) of the live confirm; at rest it is `border.strong` + `text.muted`. The one
 /// key-cap so no view hardcodes a `⌘`/`Ctrl` glyph.
-// reason: the v4 confirm button (E5, #185) + activity / needs-you key hints (E6, #186) consume
-// this; E1 lands the shared, platform-aware glyph so no later view re-rolls it.
-#[allow(dead_code)]
+// Consumed by the v4 confirm button (E5, #185 — the shared Review's ⌘↵) and, later, activity /
+// needs-you key hints (E6, #186); the one platform-aware glyph so no view re-rolls a ⌘/Ctrl.
 pub(crate) fn key_cap(
     cap: KeyCap,
     armed: bool,
@@ -456,7 +455,8 @@ pub(crate) enum KvValue<'a> {
 /// `text.primary`, or sans, or `success`, or `warn` for a loud downgrade), the row clamped so a long
 /// value truncates rather than overflowing. Shared by clear-signing quiet-facts, the policy ledger,
 /// and the metadata rail.
-// reason: consumed by the v4 metadata rail (E3, #183) + the Review quiet facts (E5, #185).
+// Consumed by the Review quiet facts (E5, #185 — From / Network / Allowed by) AND the v4 metadata
+// rail (E3, #183).
 pub(crate) fn kv_row(
     label: &str,
     value: KvValue,
@@ -542,9 +542,8 @@ pub(crate) fn page_header(
 
 /// Who a shared-Review request came FROM (DESIGN §The request-origin model): the human, an agent,
 /// or a dapp. The verb is the human's action (`You are sending`); agents `propose`, dapps `request`.
-// reason: `You`/`Agent` are wired by the E3 request rail (#183); `Dapp` lands with the browser
-// bridge origin (ADR-0001 / #44).
-#[allow(dead_code)]
+/// Constructed per request by the shared Review (E5, #185 — You / Agent / Dapp, the last for a dapp
+/// message) and the E3 request rail (#183, You / Agent). Every variant is now built, so no allow.
 pub(crate) enum Origin<'a> {
     /// The human principal — a round identity mark (`account` seeds it) + amber `You are {verb}`.
     You { account: &'a str, verb: &'a str },
@@ -565,7 +564,7 @@ pub(crate) enum Trust {
 }
 
 /// The small state-color trust badge for the [`origin_header`] rail.
-#[allow(dead_code)] // reason: the badge half of `origin_header`; consumed via `origin_header`.
+/// The badge half of `origin_header`, consumed via `origin_header` (E5, #185).
 fn trust_badge(trust: Trust, theme: &Theme) -> AnyElement {
     let is_dark = theme.is_dark();
     // The tint is hue-keyed (DESIGN §Opacity): the amber caution reads weaker at equal alpha, so it
@@ -609,7 +608,8 @@ fn trust_badge(trust: Trust, theme: &Theme) -> AnyElement {
 /// fooled by. A dapp/external origin is a neutral identity + a state-color badge, NEVER a third
 /// signal color; the agent mark is the bordered cyan squircle ([`agent_mark`], handle-aware).
 /// `You` is amber, an agent is cyan, a dapp is neutral.
-// reason: consumed by the ONE shared Review (E5, #185) + the rail's compact clear-signing (E3).
+// Consumed by the ONE shared Review (E5, #185) for every origin (self Send/Shield/Swap, an agent
+// proposal, a dapp request) AND the rail's compact clear-signing (E3, #183).
 pub(crate) fn origin_header(origin: Origin, trust: Option<Trust>, theme: &Theme) -> AnyElement {
     let is_dark = theme.is_dark();
     let amber = crate::theme::amber(is_dark);
