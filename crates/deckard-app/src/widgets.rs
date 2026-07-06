@@ -878,8 +878,7 @@ pub(crate) fn meta_obj(mark: AnyElement, name: &str, sub: &str, theme: &Theme) -
 }
 
 /// The STOP brake state (DESIGN §Widget vocabulary + §Agent model).
-#[derive(Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // reason: driven by agent-active + arm state in the Activity header (E6, #186).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum BrakeState {
     /// An agent is active, not yet armed — amber, `Stop all agents`.
     Ready,
@@ -893,9 +892,22 @@ pub(crate) enum BrakeState {
 /// across Activity + the agent surface. Text-only (no `power` icon ships, and the app's existing
 /// STOP is text), the always-reachable panic brake; the view owns the `⌘↵`/Esc arm handlers and
 /// the STOP-zeroizes-the-key logic — this renders only its state.
-// reason: consumed by the v4 Activity header + agent surface (E6, #186) to replace the two
-// hand-rolled STOP controls with one widget.
-#[allow(dead_code)]
+/// Map the two view flags to a brake state. **Arming wins over everything** — once you've started
+/// a STOP you can always confirm it, even if the agent goes away underneath you — then Ready only
+/// while an agent is actually live, else the disabled Idle marker. Pure so the precedence is
+/// unit-testable and can't silently drift under a refactor.
+pub(crate) fn brake_state(arming: bool, has_active_agent: bool) -> BrakeState {
+    if arming {
+        BrakeState::Armed
+    } else if has_active_agent {
+        BrakeState::Ready
+    } else {
+        BrakeState::Idle
+    }
+}
+
+// reason: consumed by the v4 Activity header (E6, #186); the agent surface keeps its own
+// hand-rolled STOP until #167 folds it onto this widget too.
 pub(crate) fn stop_brake(state: BrakeState, theme: &Theme) -> AnyElement {
     let is_dark = theme.is_dark();
     let amber = crate::theme::amber(is_dark);
@@ -906,7 +918,7 @@ pub(crate) fn stop_brake(state: BrakeState, theme: &Theme) -> AnyElement {
     let (label, edge, text, fill) = match state {
         BrakeState::Ready => ("Stop all agents", amber, amber, Some(amber_tint)),
         BrakeState::Armed => (
-            "Confirm STOP",
+            "Confirm STOP: revoke & lock signing · Esc to cancel",
             danger,
             danger,
             Some(danger.opacity(crate::tokens::ALPHA_TINT)),
@@ -951,6 +963,17 @@ mod tests {
         // Routine forward step is a bare Enter; a literal key is passed through.
         assert_eq!(key_cap_label(KeyCap::Enter, "macos"), "↵");
         assert_eq!(key_cap_label(KeyCap::Key("X"), "linux"), "X");
+    }
+
+    #[test]
+    fn brake_state_arm_beats_agent_state() {
+        // Arming wins even if the agent went away underneath you — you can always confirm a STOP
+        // you started (the irreversible one must never get stuck half-armed).
+        assert_eq!(brake_state(true, true), BrakeState::Armed);
+        assert_eq!(brake_state(true, false), BrakeState::Armed);
+        // Not arming: amber Ready only while an agent is live, else the disabled Idle marker.
+        assert_eq!(brake_state(false, true), BrakeState::Ready);
+        assert_eq!(brake_state(false, false), BrakeState::Idle);
     }
 
     #[test]

@@ -262,6 +262,9 @@ impl Shell {
                                     .on_click(cx.listener(|this, _, _, cx| this.open_swap(cx))),
                             ),
                     )
+                    // The one-line "Waiting on you" strip (E6, #186): a calm caught-up line, or
+                    // an amber "N waiting for you · Review →" that jumps to the Activity queue.
+                    .child(self.render_waiting_strip(cx))
                     // Holdings, or a state.
                     .child(self.render_holdings(first_sync, has_tokens, holdings, cx))
                     // Compact agent presence — ONE clickable agent row that opens the agent
@@ -312,7 +315,11 @@ impl Shell {
                 format!("{pct}%"),
             ))
         });
+        // `has_policy` drives the GAUGE/chevron layout (a gauge exists whenever a policy does, even
+        // a revoked one). `has_active_agent` drives the STATUS word — a revoked agent reads "idle",
+        // not "acting", so this row agrees with the Activity kill-switch (both read one predicate).
         let has_policy = self.agent_policy.is_some();
+        let has_active_agent = self.has_active_agent();
 
         // The agent presence is a SECTION, not a card (DESIGN editorial rule: no bordered/filled
         // box to group content). A top hairline + margin sets it off from the holdings above.
@@ -349,8 +356,9 @@ impl Shell {
                             .text_color(fg)
                             .child(agent_handle),
                     )
-                    // Status: "acting" (cyan) when the policy is live, a muted "idle" otherwise.
-                    .child(if has_policy {
+                    // Status: "acting" (cyan) while the agent is live, a muted "idle" once it's
+                    // revoked or absent — the same predicate the Activity kill-switch reads.
+                    .child(if has_active_agent {
                         div().text_xs().text_color(agent).child("acting")
                     } else {
                         div().text_xs().text_color(muted).child("idle")
@@ -514,6 +522,71 @@ impl Shell {
                 "Private balance is shown in ETH, after the 0.25% fee, and read from the network without independent verification.",
             ))
             .into_any_element()
+    }
+
+    /// The one-line "Waiting on you" strip (golden ref `.waitstrip`, E6 #186): a calm caught-up
+    /// line when nothing is pending, or an amber "N waiting for you · Review →" that jumps to the
+    /// Activity queue when the agent (or a dapp) has left requests for you. ONE line, hairline top
+    /// and bottom — never a stacked band (the full triage band lives in Activity as NEEDS YOU). The
+    /// count is `activity_pending`, the exact set the Activity NEEDS YOU band shows.
+    fn render_waiting_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let amber = theme::amber(theme.is_dark());
+        let muted = theme.muted_foreground;
+        let success = theme.success;
+        let hairline = theme.border;
+        let pending = crate::activity_view::activity_pending(&self.activity).len();
+
+        let row = h_flex()
+            .w_full()
+            .items_center()
+            .gap_2p5()
+            .py_3()
+            .border_t_1()
+            .border_b_1();
+
+        if pending == 0 {
+            // Caught up: a quiet success dot + one muted line, bordered by the plain hairline.
+            row.border_color(hairline)
+                .child(div().size(px(6.0)).rounded_full().bg(success))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(muted)
+                        .child("Nothing waiting for you."),
+                )
+                .into_any_element()
+        } else {
+            // Pending: amber dot + "N waiting for you", a right-anchored "Review →" that opens the
+            // Activity queue, and amber-tinted top/bottom edges (the human-attention signal).
+            let lead = if pending == 1 {
+                "1 waiting for you".to_string()
+            } else {
+                format!("{pending} waiting for you")
+            };
+            row.border_color(amber.opacity(0.45))
+                .child(div().size(px(6.0)).rounded_full().bg(amber))
+                .child(
+                    div()
+                        .flex_1()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(amber)
+                        .child(lead),
+                )
+                .child(
+                    div()
+                        .id("home-waiting-review")
+                        .flex_shrink_0()
+                        .cursor_pointer()
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(amber)
+                        .child("Review →")
+                        .on_click(cx.listener(|this, _, _, cx| this.open(Surface::Activity, cx))),
+                )
+                .into_any_element()
+        }
     }
 
     /// The holdings region: skeleton on first sync, empty-state when nothing held,

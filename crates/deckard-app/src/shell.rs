@@ -1422,6 +1422,15 @@ impl Shell {
         crate::names::default_agent_handle(0).to_string()
     }
 
+    /// Whether an agent is live right now: a policy exists and hasn't been revoked. The ONE source
+    /// for "is the agent acting" — the wallet-home presence row ("acting" vs "idle") and the
+    /// Activity kill-switch (amber "Stop all agents" vs the disabled "No agents running") both read
+    /// it, so the two surfaces can never contradict each other. A revoked policy reads as not-live,
+    /// matching the rail's "stopped" and the daemon's `revoked` flag.
+    pub(crate) fn has_active_agent(&self) -> bool {
+        matches!(self.agent_policy.as_ref(), Some(p) if !p.revoked)
+    }
+
     /// The chain the daemon signs for (resolved once at startup). The swap surface reads it to
     /// pick the curated token list, the orderbook base, and the per-chain swatch.
     pub fn chain_id(&self) -> u64 {
