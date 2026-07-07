@@ -377,6 +377,16 @@ impl Daemon {
             }
             SignerRequest::PendingList => SignerResponse::Pending(self.pending_list()),
             SignerRequest::ActivityFeed => SignerResponse::Activity(self.activity_feed()),
+            // Capability discovery (#31). Answered in EVERY state — note this arm reads no
+            // `self.state`, so it replies identically whether `Locked` or `Unlocked` — and reveals
+            // ONLY the wire spec_version + capability names + impl_name (no vault state, no policy
+            // contents, no key material). Built from the single-source registry so the daemon's
+            // answer can never drift from the mock's (parity by construction).
+            SignerRequest::Hello => {
+                SignerResponse::Hello(deckard_contract::capabilities::hello_info(
+                    deckard_contract::capabilities::IMPL_SIGNERD,
+                ))
+            }
         }
     }
 

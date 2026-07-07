@@ -106,6 +106,16 @@ impl MockSigner {
         Bytes::from(vec![0xCD_u8; 65])
     }
 
+    /// Answer capability discovery (#31) exactly as the daemon does. Built from the single-source
+    /// [`crate::capabilities::hello_info`], tagged with the mock's `impl_name` — so its
+    /// `spec_version` + `capabilities` are byte-identical to the daemon's `Hello` reply (parity by
+    /// construction) and only `impl_name` differs. State-independent, like the daemon's arm: the
+    /// answer is the same whether the mock is `revoked` (its `Locked` stand-in) or not.
+    #[must_use]
+    pub fn hello(&self) -> crate::rpc::HelloInfo {
+        crate::capabilities::hello_info(crate::capabilities::IMPL_MOCK)
+    }
+
     /// Set the injected unix-secs clock used by `propose_order` (setup helper for the
     /// `valid_to` horizon check). Mirrors the daemon's `now_unix()` being made injectable.
     pub fn set_now(&self, now: u64) {
@@ -486,6 +496,23 @@ mod tests {
     use crate::intent::IntentKind;
     use crate::policy::{Allowlist, ApprovalMode, Effect, Rule, POLICY_VERSION};
     use alloy_primitives::Bytes;
+
+    /// #31 parity: the mock answers `Hello` from the SAME single-source registry the daemon uses,
+    /// so its capabilities + spec_version are byte-identical to the daemon's reply — only
+    /// `impl_name` differs — and the answer is state-independent (revoking, the mock's `Locked`
+    /// stand-in, does not change it).
+    #[test]
+    fn hello_matches_the_single_source_registry() {
+        let mock = MockSigner::new(policy(50, 1000, 0, ApprovalMode::OverCap));
+        let info = mock.hello();
+        let daemon = crate::capabilities::hello_info(crate::capabilities::IMPL_SIGNERD);
+        assert_eq!(info.capabilities, daemon.capabilities);
+        assert_eq!(info.spec_version, daemon.spec_version);
+        assert_eq!(info.impl_name, crate::capabilities::IMPL_MOCK);
+        assert_ne!(info.impl_name, daemon.impl_name);
+        mock.revoke_all();
+        assert_eq!(mock.hello(), info, "Hello must not depend on mock state");
+    }
 
     // --- builders -------------------------------------------------------------------
 
