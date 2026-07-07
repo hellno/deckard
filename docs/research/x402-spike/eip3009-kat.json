@@ -1,0 +1,22 @@
+{
+  "digest": "0x89d2449c668159cd27d97439dcfe47a3a6e3fc1edb7608de1e6bf0e8cb83200f",
+  "domain": {
+    "chainId": 11155111,
+    "name": "USDC",
+    "verifyingContract": "0x1c7d4b196cb0c7b01d743fbc6116a902379c7238",
+    "version": "2"
+  },
+  "eip712_type": "TransferWithAuthorization(address from,address to,uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce)",
+  "message": {
+    "from": "0x06b92bd300c5cf9a8ecc64d7b9c51163d6b177a1",
+    "nonce": "0x1111111111111111111111111111111111111111111111111111111111111111",
+    "to": "0x791668cb0cb50d90dfb1ee215de4cefa3eab953e",
+    "validAfter": "0",
+    "validBefore": "4102444800",
+    "value": "1000000"
+  },
+  "note": "EIP-3009 TransferWithAuthorization KAT for Circle USDC on Ethereum Sepolia (fork). deckard #206.",
+  "signature": "0x3e1236afdad74fe2d1a105ded05a462280867fc614a665b9a5177affcce2c0876ea60a2a4fc85adc8df553a28fe616c5943a5e1361b74f6091c843569a0924de1b",
+  "signer": "0x06b92bd300c5cf9a8ecc64d7b9c51163d6b177a1",
+  "type_hash": "0x7c7c6cdb67a18743f49ec6fa9b35f50d52ed05cbed4cc592e13b44501c1a2267"
+}
