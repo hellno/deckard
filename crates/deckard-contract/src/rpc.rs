@@ -94,6 +94,16 @@ pub enum SignerRequest {
     /// so the GUI can show what the agent *did*, not only what is pending. The handler expires
     /// stale rows first, so the feed never shows a lapsed card as still pending.
     ActivityFeed,
+    /// Capability discovery (#31) → [`SignerResponse::Hello`]\([`HelloInfo`]\). The daemon
+    /// answers with the wire `spec_version`, the capability NAMES it understands, and a free-form
+    /// `impl_name`. Answered in **every** state, including `Locked`: it reveals no vault state, no
+    /// policy contents, and no key material.
+    ///
+    /// This is the newest variant on purpose. An **old** daemon that predates it fails to decode
+    /// the unknown enum variant and returns the existing frame-decode error — that loud rejection
+    /// *is* the backward-compatibility valve (evolution rules #1/#3), and it already ships. No
+    /// existing frame changes; the round-trip fixtures prove the freeze holds.
+    Hello,
 }
 
 /// `deckard-signerd` → `deckard-mcp`. One variant per request shape.
@@ -121,6 +131,35 @@ pub enum SignerResponse {
     Pending(Vec<PendingRecord>),
     /// Reply to `ActivityFeed`: the activity ledger, newest-first.
     Activity(Vec<ActivityRecord>),
+    /// Reply to [`SignerRequest::Hello`]: the capability-discovery [`HelloInfo`].
+    Hello(HelloInfo),
+}
+
+/// The answer to [`SignerRequest::Hello`] — wire-contract capability discovery (#31).
+///
+/// Reveals only three things, none of them sensitive: the wire's date-`spec_version`, the
+/// capability NAMES this build understands, and a free-form `impl_name`. It carries **no** vault
+/// state, **no** policy contents, and **no** key material, which is why the daemon answers it in
+/// every state including `Locked`.
+///
+/// The single source of truth for the contents is [`crate::capabilities`] — both the real daemon
+/// and every mock build this via [`crate::capabilities::hello_info`], so a capability name can
+/// never drift between implementations. Adding a capability is one edit there (never a
+/// `spec_version` bump); see the evolution rules in `docs/build/40-wire-evolution.md`.
+///
+/// **Feature detection reads `capabilities` ONLY.** `impl_name` is informational; per evolution
+/// rule #1 no code path may branch on it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HelloInfo {
+    /// Wire spec date-version, `YYYY-MM-DD`. Bumped **only** on a breaking change (rule #2):
+    /// additive capabilities ship under a new name here, never a version bump.
+    pub spec_version: String,
+    /// The capability names this build understands (e.g. `core`, `mcp.v0.1`). A new request
+    /// *kind* ships as a new NAME in this list; names are never reused, renamed, or retyped.
+    pub capabilities: Vec<String>,
+    /// Which implementation answered (`deckard-signerd`, a mock, …). Informational ONLY — never
+    /// a feature-detection signal, never branched on.
+    pub impl_name: String,
 }
 
 /// A read-only Railgun grant: the 0zk `address` + the `viewing_key` (hex). NOT the spending

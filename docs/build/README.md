@@ -21,6 +21,7 @@ live on mainnet, agent-driven (Claude Desktop via MCP), shielded via Railgun, ve
 | [`30-mcp-shape.md`](30-mcp-shape.md) | The **agent surface** (one binary = CLI + MCP server, key-less) **and the freeze-first contract**. Contract + daemon socket built; the `deckard-mcp` binary is not yet. |
 | [`31-agent-quickstart.md`](31-agent-quickstart.md) | The **canonical agent-facing quickstart**: install one-liner, the 6 `mcp.v0.1` tools, policy fields, every deny reason with its fix, demo constants. The tool list is drift-guarded by a test in `deckard-mcp`. |
 | [`32-agent-loop-prompt.md`](32-agent-loop-prompt.md) | The **first agent demo runner** (#61): a Claude Desktop MCP prompt that loops — poll balance → detect a deposit → shield within the policy → execute — idempotent via the agent's own context, backpressure on over-cap (the human approves in the Activity feed, #60), STOP-aware. |
+| [`40-wire-evolution.md`](40-wire-evolution.md) | The **wire-contract evolution rules** (#31): `Hello` capability discovery, the five additive-evolution rules, and the capability registry (`core`, `mcp.v0.1`). The keystone for new request kinds (7702, x402 #32/#34, dapp-origin #198/#204). Registry mirrored in `deckard-contract/src/capabilities.rs`. |
 
 ## Build order (what gates what)
 

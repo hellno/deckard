@@ -22,6 +22,7 @@
 //! way: a bare number literal above `u64::MAX` — routine for wei (> ~18.4 ETH) — is parsed
 //! as a float and rejected on decode. CBOR has no such limit.
 
+pub mod capabilities;
 pub mod clear_signing;
 pub mod decision;
 pub mod deny_reasons;
@@ -53,7 +54,7 @@ pub use policy::{
 pub use read_status::ReadStatus;
 pub use rpc::{
     ActivityLifecycle, ActivityRecord, ApprovalRisk, ApprovalStatus, BalanceReport, BreachedLimit,
-    ExecuteResult, PendingPayloadView, PendingRecord, ProposalOrigin, RailgunViewGrant,
+    ExecuteResult, HelloInfo, PendingPayloadView, PendingRecord, ProposalOrigin, RailgunViewGrant,
     SignMessageResult, SignOrderResult, SignerRequest, SignerResponse, StatusView, UnlockOutcome,
 };
 pub use shield_status::ShieldStatus;
@@ -414,6 +415,9 @@ mod roundtrip_tests {
         });
         roundtrip(&SignerRequest::PendingList);
         roundtrip(&SignerRequest::ActivityFeed);
+        // The additive capability-discovery request (#31): a unit variant, so it frames as a bare
+        // CBOR/JSON tag exactly like the other unit requests above.
+        roundtrip(&SignerRequest::Hello);
     }
 
     #[test]
@@ -474,6 +478,11 @@ mod roundtrip_tests {
             lifecycle: ActivityLifecycle::Executed,
         }));
         roundtrip(&SignerResponse::Ack);
+        // The additive capability-discovery reply (#31): built from the single-source registry so
+        // the wire shape is exactly what every implementation returns.
+        roundtrip(&SignerResponse::Hello(capabilities::hello_info(
+            capabilities::IMPL_SIGNERD,
+        )));
         roundtrip(&SignerResponse::Policy(sample_policy()));
         roundtrip(&SignerResponse::Address(Address::repeat_byte(0x11)));
         roundtrip(&SignerResponse::Balance(BalanceReport {
@@ -753,5 +762,191 @@ mod roundtrip_tests {
         };
         assert!(!failed.is_spendable());
         assert!(failed.is_terminal());
+    }
+}
+
+/// The five wire-evolution rules (#31), proven at the contract layer. These are the definitive
+/// proofs the rules hold; `deckard-signerd/tests/hello.rs` adds the daemon-socket half (Hello
+/// answered while `Locked`, and the daemon surviving a bad frame with nothing signed).
+///
+/// - **E1** — the `Hello` reply shape.
+/// - **E2** — existing frames encode byte-identically after adding `Hello` (freeze holds).
+/// - **E3** — an unknown enum variant is rejected LOUDLY (that rejection is the compat valve).
+/// - **E4** — an unknown struct key is ignored (the additive counterpart to E3).
+#[cfg(test)]
+mod wire_evolution {
+    use super::*;
+    use serde::Serialize;
+
+    /// E1: the `Hello` answer — `spec_version` is a real `YYYY-MM-DD`, and `capabilities` is a
+    /// superset of the baseline `{core, mcp.v0.1}`. Feature detection needs nothing else; no code
+    /// branches on `impl_name`. Both the daemon and every mock build this from the same registry,
+    /// so proving the builder's shape here proves the shape of every implementation's reply.
+    #[test]
+    fn e1_hello_reply_shape() {
+        let info = capabilities::hello_info(capabilities::IMPL_SIGNERD);
+
+        // spec_version matches ^\d{4}-\d{2}-\d{2}$ (validated without a regex dependency).
+        let parts: Vec<&str> = info.spec_version.split('-').collect();
+        assert_eq!(parts.len(), 3, "spec_version must be YYYY-MM-DD");
+        assert_eq!(parts[0].len(), 4, "year must be 4 digits");
+        assert_eq!(parts[1].len(), 2, "month must be 2 digits");
+        assert_eq!(parts[2].len(), 2, "day must be 2 digits");
+        assert!(
+            parts.iter().all(|p| p.bytes().all(|b| b.is_ascii_digit())),
+            "spec_version must be all digits + dashes: {:?}",
+            info.spec_version
+        );
+
+        // capabilities ⊇ {core, mcp.v0.1}.
+        assert!(
+            info.capabilities
+                .iter()
+                .any(|c| c == capabilities::CAP_CORE),
+            "capabilities must include `core`"
+        );
+        assert!(
+            info.capabilities
+                .iter()
+                .any(|c| c == capabilities::CAP_MCP_V0_1),
+            "capabilities must include `mcp.v0.1`"
+        );
+
+        assert_eq!(info.impl_name, capabilities::IMPL_SIGNERD);
+    }
+
+    /// E2: adding the `Hello` variant did not perturb the encoding of any existing frame — the
+    /// freeze holds, so an old-peer replay of a pre-`Hello` frame is byte-identical.
+    ///
+    /// The wire enums are externally tagged, so every variant is keyed by NAME; a sibling variant
+    /// appended at the end cannot shift an existing variant's bytes. The real freeze proof is the
+    /// hand-verifiable golden bytes below — for the unit requests (a bare CBOR text string of the
+    /// variant name) and for a data-carrying frame (`Balance`, a `{tag: {field}}` map). The
+    /// `signer_request_roundtrip` / `signer_response_roundtrip` fixtures complement this by
+    /// asserting each value re-encodes deterministically; they were *extended* with the new `Hello`
+    /// value, and every pre-existing assertion in them is unchanged.
+    #[test]
+    fn e2_existing_frames_are_byte_identical() {
+        // A unit variant frames as one CBOR text string: 0x60|len, then the ASCII name.
+        fn cbor_of(req: &SignerRequest) -> Vec<u8> {
+            let mut b = Vec::new();
+            ciborium::into_writer(req, &mut b).expect("cbor encode");
+            b
+        }
+
+        // Golden bytes for three pre-existing unit requests, computed by hand from the CBOR spec
+        // (major type 3 = text string). If `Hello` (or anything) ever shifts these, the freeze is
+        // broken and this fails.
+        assert_eq!(
+            cbor_of(&SignerRequest::PolicyGet),
+            b"\x69PolicyGet",
+            "PolicyGet frame changed — freeze broken"
+        );
+        assert_eq!(
+            cbor_of(&SignerRequest::RevokeAll),
+            b"\x69RevokeAll",
+            "RevokeAll frame changed — freeze broken"
+        );
+        assert_eq!(
+            cbor_of(&SignerRequest::ActivityFeed),
+            b"\x6CActivityFeed",
+            "ActivityFeed frame changed — freeze broken"
+        );
+
+        // The golden bytes are the REAL encoding (decode them back), not a tautology, and the new
+        // `Hello` frame slots in as just another unit-tag text string next to them.
+        let policy_get: SignerRequest =
+            ciborium::from_reader(&b"\x69PolicyGet"[..]).expect("golden decodes");
+        assert_eq!(policy_get, SignerRequest::PolicyGet);
+        assert_eq!(cbor_of(&SignerRequest::Hello), b"\x65Hello");
+
+        // A data-carrying frame is pinned too: `Balance { shielded: true }` is the externally-tagged
+        // map `{"Balance": {"shielded": true}}` → CBOR `A1 67 "Balance" A1 68 "shielded" F5` (F5 =
+        // true). Golden-pinned so a field/variant reshuffle can't silently change it, and it never
+        // leaks the new variant's tag into its own bytes.
+        let balance = cbor_of(&SignerRequest::Balance { shielded: true });
+        assert_eq!(
+            balance, b"\xA1\x67Balance\xA1\x68shielded\xF5",
+            "Balance frame changed — freeze broken"
+        );
+        assert!(
+            !balance.windows(5).any(|w| w == b"Hello"),
+            "the Hello tag leaked into an unrelated frame"
+        );
+    }
+
+    /// E3: the backward-compat valve. A hypothetical FUTURE wire is a superset of today's
+    /// requests; an old decoder (today's [`SignerRequest`]) must reject a variant it has never
+    /// heard of LOUDLY — a decode `Err`, never a silent misparse and never a panic. That loud
+    /// rejection is exactly how an old daemon answers a new request kind (rules #1/#3). Because
+    /// the decode fails before any value materialises, nothing downstream can act on it — nothing
+    /// is signed (the daemon-socket half of that is pinned in `deckard-signerd/tests/hello.rs`).
+    #[test]
+    fn e3_unknown_variant_is_rejected_loudly() {
+        // A future superset: one new unit kind, one new data-carrying kind.
+        #[derive(Serialize)]
+        enum FutureRequest {
+            QuantumSend,
+            Teleport { to: u64 },
+        }
+
+        // CBOR (the daemon UDS wire): both an unknown unit tag and an unknown struct tag error.
+        let mut unit = Vec::new();
+        ciborium::into_writer(&FutureRequest::QuantumSend, &mut unit).unwrap();
+        assert!(
+            ciborium::from_reader::<SignerRequest, _>(&unit[..]).is_err(),
+            "an unknown unit variant must be rejected, not silently accepted"
+        );
+
+        let mut data = Vec::new();
+        ciborium::into_writer(&FutureRequest::Teleport { to: 7 }, &mut data).unwrap();
+        assert!(
+            ciborium::from_reader::<SignerRequest, _>(&data[..]).is_err(),
+            "an unknown data variant must be rejected"
+        );
+
+        // JSON (the MCP wire) must reject it too.
+        let json = serde_json::to_vec(&FutureRequest::QuantumSend).unwrap();
+        assert!(
+            serde_json::from_slice::<SignerRequest>(&json).is_err(),
+            "an unknown variant must be rejected on the JSON surface too"
+        );
+    }
+
+    /// E4: the additive counterpart to E3. A future producer adds a field to a wire struct; an
+    /// old decoder (today's [`HelloInfo`]) must IGNORE the unknown key and still decode — the wire
+    /// structs carry no `deny_unknown_fields`, on purpose (rule #3). This is what lets a newer
+    /// daemon grow a `HelloInfo` field without breaking older clients.
+    #[test]
+    fn e4_unknown_struct_key_is_ignored() {
+        // A HelloInfo a newer daemon emits, with a field this build has never heard of.
+        #[derive(Serialize)]
+        struct HelloInfoPlus {
+            spec_version: String,
+            capabilities: Vec<String>,
+            impl_name: String,
+            future_field: u64,
+        }
+        let plus = HelloInfoPlus {
+            spec_version: "2099-01-01".to_string(),
+            capabilities: vec![capabilities::CAP_CORE.to_string()],
+            impl_name: "deckard-future".to_string(),
+            future_field: 42,
+        };
+
+        // CBOR: the extra key is skipped, the known fields decode.
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&plus, &mut cbor).unwrap();
+        let back: HelloInfo = ciborium::from_reader(&cbor[..])
+            .expect("an extra CBOR key must be ignored, not rejected");
+        assert_eq!(back.spec_version, "2099-01-01");
+        assert_eq!(back.impl_name, "deckard-future");
+        assert_eq!(back.capabilities, vec![capabilities::CAP_CORE.to_string()]);
+
+        // JSON: same rule on the MCP surface.
+        let json = serde_json::to_vec(&plus).unwrap();
+        let back2: HelloInfo =
+            serde_json::from_slice(&json).expect("an extra JSON key must be ignored, not rejected");
+        assert_eq!(back2.impl_name, "deckard-future");
     }
 }

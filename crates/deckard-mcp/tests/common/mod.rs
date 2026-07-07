@@ -292,6 +292,15 @@ impl MockState {
             // The MCP surface never reads the activity feed (it's a GUI-only surface); the mock
             // just answers an empty ledger so the request shape stays covered.
             SignerRequest::ActivityFeed => SignerResponse::Activity(Vec::new()),
+            // Capability discovery (#31): built from the SAME single-source registry the real
+            // daemon uses, so the mock advertises identical capabilities + spec_version (only
+            // impl_name differs). This is the parity that lets the MCP harness stand in for the
+            // daemon on a `Hello` probe.
+            SignerRequest::Hello => {
+                SignerResponse::Hello(deckard_contract::capabilities::hello_info(
+                    deckard_contract::capabilities::IMPL_MOCK,
+                ))
+            }
         }
     }
 
