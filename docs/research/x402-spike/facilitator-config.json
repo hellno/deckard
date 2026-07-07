@@ -1,0 +1,14 @@
+{
+  "port": 8080,
+  "host": "127.0.0.1",
+  "chains": {
+    "eip155:11155111": {
+      "eip1559": true,
+      "signers": ["0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"],
+      "rpc": [{ "http": "http://127.0.0.1:8545" }]
+    }
+  },
+  "schemes": [
+    { "id": "v2-eip155-exact", "chains": "eip155:*" }
+  ]
+}

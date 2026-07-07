@@ -1,0 +1,27 @@
+# Reference / throwaway spike crate (deckard #206). NOT a deckard workspace member — it lives
+# outside the workspace on purpose so the no-new-deps DoD rule stays intact. Build it standalone
+# (needs network to fetch the x402-rs git dep):
+#
+#     cd docs/research/x402-spike/digest-cmp && cargo run
+#
+# It compares deckard's hand-rolled `alloy sol!` EIP-3009 digest/signature against x402-rs's own
+# `TransferWithAuthorization` type, byte-for-byte, and writes the KAT vector to /tmp/x402-spike/.
+# Empty table: opt this crate OUT of the surrounding deckard workspace so it builds standalone
+# and never becomes a deckard dependency.
+[workspace]
+
+[package]
+name = "digest-cmp"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# The reference implementation we compare against (x402-rs's own EIP-3009 type).
+x402-chain-eip155 = { git = "https://github.com/x402-rs/x402-rs", features = ["client", "telemetry"] }
+# Mirror deckard-core's toolchain: hand-roll the typed data via alloy sol! + eip712.
+alloy-primitives = "1.6"
+alloy-sol-types = { version = "1.6", features = ["json"] }
+alloy-signer = "2.0"
+alloy-signer-local = "2.0"
+serde_json = "1.0"

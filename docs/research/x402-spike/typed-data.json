@@ -1,0 +1,33 @@
+{
+  "types": {
+    "EIP712Domain": [
+      {"name":"name","type":"string"},
+      {"name":"version","type":"string"},
+      {"name":"chainId","type":"uint256"},
+      {"name":"verifyingContract","type":"address"}
+    ],
+    "TransferWithAuthorization": [
+      {"name":"from","type":"address"},
+      {"name":"to","type":"address"},
+      {"name":"value","type":"uint256"},
+      {"name":"validAfter","type":"uint256"},
+      {"name":"validBefore","type":"uint256"},
+      {"name":"nonce","type":"bytes32"}
+    ]
+  },
+  "primaryType": "TransferWithAuthorization",
+  "domain": {
+    "name": "USDC",
+    "version": "2",
+    "chainId": 11155111,
+    "verifyingContract": "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"
+  },
+  "message": {
+    "from": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+    "to": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+    "value": "1000000",
+    "validAfter": "0",
+    "validBefore": "4102444800",
+    "nonce": "0x1111111111111111111111111111111111111111111111111111111111111111"
+  }
+}
