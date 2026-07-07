@@ -15,7 +15,7 @@ use gpui_component::{
 
 use deckard_core::{tokens_for, U256};
 
-use crate::money::money;
+use crate::money::{money, money_cell};
 use crate::shell::{Shell, Surface};
 use crate::theme;
 use crate::widgets::{
@@ -31,6 +31,64 @@ struct Holding {
     raw: U256,
     decimals: u8,
     max_frac: usize,
+}
+
+// The holdings ledger's three right-hand numeric columns (DESIGN §Holdings table). Fixed widths are
+// shared by the header and every row so the columns can't drift; the `Balance`/`Value` cells align
+// on the decimal point via `money::money_cell`. Layout widths (not type sizes) — outside the token
+// scale, like the rail/gauge widths elsewhere. Sized so the integer side of a cell (`width -
+// FRAC_SEAM_W`) clears ~10 mono chars — every realistic curated-token balance. We deliberately do NOT
+// clip the cell: an absurdly-large integer overflows into adjacent whitespace (cosmetic, the decimal
+// seam stays fixed so alignment holds) rather than getting its leading digits hidden — never lie
+// about how much money there is (E4 §honesty).
+const HOLD_BALANCE_W: gpui::Pixels = px(140.0);
+const HOLD_DELTA_W: gpui::Pixels = px(60.0);
+const HOLD_VALUE_W: gpui::Pixels = px(140.0);
+
+/// The wallet-home hero meta line's verification claim (E4, #184) — TRUST-CRITICAL honesty
+/// (DESIGN §Trust rule 9: "Never fake verified"). The label `verified on mainnet` is asserted ONLY
+/// when a real Helios-verified read backs it, and the chain registry only ever grants the verified
+/// tier on chain 1 — so every other state (a testnet/fork read, an unsynced/failed read, or no read
+/// yet) reads the loud `unverified`. Pure + `pub(crate)` so the mapping is unit-testable and the home
+/// and (future) rail can't drift on what counts as verified.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum VerifiedClaim {
+    /// A Helios-consensus-verified mainnet read — the ONLY verified state. Rendered `success`.
+    Mainnet,
+    /// Still cryptographically verified but off the happy path (EL failover / community checkpoint);
+    /// a downgrade, so it's the loud `warn`, never rendered quiet.
+    Degraded,
+    /// No verified read is possible: a testnet/fork, an unsynced/stale/failed read, or none yet. The
+    /// loud `warn` `unverified` — we never fake a verified look for a read we cannot prove.
+    Unverified,
+}
+
+impl VerifiedClaim {
+    /// Map the live `(chain, read status)` to an honest claim. A `Verified` read is only trusted as
+    /// `Mainnet` when the chain actually IS mainnet (defence in depth: the registry already pins the
+    /// verified tier to chain 1, so a `Verified` off chain 1 is treated as `Unverified`, never faked).
+    pub(crate) fn from_read(chain_id: u64, status: Option<&deckard_core::ReadStatus>) -> Self {
+        let mainnet = deckard_core::verification(chain_id) == deckard_core::Verification::Mainnet;
+        match status {
+            Some(deckard_core::ReadStatus::Verified) if mainnet => Self::Mainnet,
+            Some(deckard_core::ReadStatus::Degraded { .. }) if mainnet => Self::Degraded,
+            _ => Self::Unverified,
+        }
+    }
+
+    /// The honest label for the hero meta line.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Mainnet => "verified on mainnet",
+            Self::Degraded => "verified · degraded",
+            Self::Unverified => "unverified",
+        }
+    }
+
+    /// Only a fully-verified mainnet read reads as the `success` signal; every downgrade is `warn`.
+    pub(crate) fn is_verified(self) -> bool {
+        matches!(self, Self::Mainnet)
+    }
 }
 
 /// The agent's per-transaction Send cap as an HONEST display string (DESIGN §Trust: the UI must
@@ -226,6 +284,9 @@ impl Shell {
                         h_flex()
                             .w_full()
                             .items_center()
+                            // Left-anchored, never centered (E4, #184; DESIGN §wallet home): the
+                            // action cluster reads from the left edge under the hero.
+                            .justify_start()
                             .gap_2p5()
                             // Shield (the privacy hero) is the ONE neutral primary CTA. Send /
                             // Receive / Swap follow as a ghost cluster set off by a thin vertical
@@ -383,6 +444,8 @@ impl Shell {
         let fg = theme.foreground;
         let muted = theme.muted_foreground;
         let border = theme.border;
+        let success = theme.success;
+        let warn = theme.warning;
         let mono: SharedString = theme.mono_font_family.clone();
         let masked = self.mask;
         let is_dark = theme.is_dark();
@@ -471,18 +534,46 @@ impl Shell {
             ),
         };
 
-        // Label the hero honestly: a real Total once private is known, otherwise public-only
-        // (so the big figure is never read as "public + 0" while the private side syncs).
+        // Label the hero honestly only when the big figure is public-only (private still syncing) —
+        // so it's never read as "public + 0". Once private is known the figure IS the Total, now
+        // conveyed by the meta line + the Private/Public legend below, so no redundant "Total" caption.
         let caption = match (private_wei, snap.is_some()) {
-            (Some(_), _) => "Total",
+            (Some(_), _) => "",
             (None, true) => "Public · private balance still syncing",
             (None, false) => "",
         };
+
+        // The hero meta line (E4, #184; DESIGN §wallet home): `$… · synced … · verified on mainnet`.
+        // HONEST fallbacks (DESIGN §Trust): the USD slot is an explicit `—` because the app has NO
+        // price feed (never a fabricated fiat number), and the verification claim is `verified on
+        // mainnet` ONLY for a real verified read — a fork/testnet or unsynced read reads the loud
+        // `unverified`. `synced` mirrors the rail's honest `block N` / `syncing…`.
+        let claim = VerifiedClaim::from_read(self.chain_id(), self.read_status.as_ref());
+        let synced = match self.synced_block {
+            Some(b) => format!("synced block {b}"),
+            None => "syncing…".to_string(),
+        };
+        let sep = || div().text_color(muted).child("·");
+        let meta = h_flex()
+            .w_full()
+            .items_center()
+            .gap_2()
+            .text_xs()
+            .child(div().font_family(mono.clone()).text_color(muted).child("—"))
+            .child(sep())
+            .child(div().text_color(muted).child(synced))
+            .child(sep())
+            .child(
+                div()
+                    .text_color(if claim.is_verified() { success } else { warn })
+                    .child(claim.label()),
+            );
 
         v_flex()
             .w_full()
             .gap_3()
             .child(hero)
+            .child(meta)
             .children((!caption.is_empty()).then(|| div().text_xs().text_color(muted).child(caption)))
             .child(bar)
             .child(
@@ -527,6 +618,7 @@ impl Shell {
     ) -> impl IntoElement {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
+        let border = theme.border;
         let mono: SharedString = theme.mono_font_family.clone();
         let masked = self.mask;
 
@@ -573,6 +665,44 @@ impl Shell {
         // The ledger heading (DESIGN §Holdings table): a tiny muted section label, not a
         // card title. Grouping is whitespace + the per-row hairline below.
         col = col.child(div().pb_1().child(section_label("Holdings", muted)));
+        // Column headers — Asset · Balance · 24h · $ Value (E4, #184). Aligned to the row columns via
+        // the shared `HOLD_*_W` widths + identical `px_4`/`gap_2`, so the header can't drift off its
+        // column. Numeric labels are right-aligned over their columns.
+        col = col.child(
+            h_flex()
+                .w_full()
+                .items_center()
+                .gap_2()
+                .px_4()
+                .pb_1()
+                // The golden ref's `.lhead` carries a bottom hairline setting the header off the rows.
+                .border_b_1()
+                .border_color(border)
+                .text_xs()
+                .text_color(muted)
+                .child(div().flex_1().min_w_0().child("Asset"))
+                .child(
+                    h_flex()
+                        .w(HOLD_BALANCE_W)
+                        .flex_shrink_0()
+                        .justify_end()
+                        .child("Balance"),
+                )
+                .child(
+                    h_flex()
+                        .w(HOLD_DELTA_W)
+                        .flex_shrink_0()
+                        .justify_end()
+                        .child("24h"),
+                )
+                .child(
+                    h_flex()
+                        .w(HOLD_VALUE_W)
+                        .flex_shrink_0()
+                        .justify_end()
+                        .child("Value"),
+                ),
+        );
         for h in holdings {
             col = col.child(render_row(
                 theme.foreground,
@@ -590,23 +720,20 @@ impl Shell {
                 mono.clone(),
             ));
         }
-        if !has_tokens {
-            col = col.child(
-                div()
-                    .text_xs()
-                    .text_color(muted)
-                    .pt_1()
-                    .child("Only listed tokens are shown. Lesser-known tokens may be missing."),
-            );
+        let listed_note = if !has_tokens {
+            "Only listed tokens are shown. Lesser-known tokens may be missing."
         } else {
-            col = col.child(
-                div()
-                    .text_xs()
-                    .text_color(muted)
-                    .pt_1()
-                    .child("Listed tokens only."),
-            );
-        }
+            "Listed tokens only."
+        };
+        col = col.child(div().text_xs().text_color(muted).pt_1().child(listed_note));
+        // Honest footnote for the empty 24h / $ Value columns: the app has no price feed, so those
+        // columns show an explicit — rather than a fabricated fiat number (E4 §honesty, DESIGN §Trust).
+        col = col.child(
+            div()
+                .text_xs()
+                .text_color(muted)
+                .child("24h change and $ value need a price feed — not wired yet."),
+        );
         col.into_any_element()
     }
 }
@@ -766,20 +893,24 @@ fn render_row(
     h_flex()
         .w_full()
         .items_center()
-        .justify_between()
+        .gap_2()
         .px_4()
         .py_3()
         // DESIGN §Holdings table: tight rows, hairline row separators only —
         // no per-row card frame, no fill.
         .border_b_1()
         .border_color(border)
+        // Asset — the token mark + name/ticker, growing to fill the row's left.
         .child(
             h_flex()
+                .flex_1()
+                .min_w_0()
                 .items_center()
                 .gap_3()
                 .child(
                     div()
                         .size(px(34.0))
+                        .flex_shrink_0()
                         // DESIGN §Radii: a desaturated token SQUARE (6px), not a
                         // round identicon (round is reserved for the human principal).
                         .rounded(crate::tokens::RADIUS_ROW)
@@ -797,6 +928,7 @@ fn render_row(
                 )
                 .child(
                     v_flex()
+                        .min_w_0()
                         .gap_0p5()
                         .child(
                             div()
@@ -808,9 +940,40 @@ fn render_row(
                         .child(div().text_xs().text_color(muted).child(symbol)),
                 ),
         )
-        .child(div().text_sm().child(money(
-            raw, decimals, max_frac, None, masked, mono, fg, muted,
-        )))
+        // Balance — mono, decimal-point-aligned across rows (E4, #184).
+        .child(
+            div()
+                .w(HOLD_BALANCE_W)
+                .flex_shrink_0()
+                .text_sm()
+                .child(money_cell(
+                    raw,
+                    decimals,
+                    max_frac,
+                    masked,
+                    mono.clone(),
+                    fg,
+                    muted,
+                )),
+        )
+        // 24h change — HONEST "—": the app keeps no price history, so it never fabricates a delta.
+        .child(
+            h_flex()
+                .w(HOLD_DELTA_W)
+                .flex_shrink_0()
+                .justify_end()
+                .text_xs()
+                .child(div().font_family(mono.clone()).text_color(muted).child("—")),
+        )
+        // $ Value — HONEST "—": no price feed, so never a fabricated fiat number (E4 §honesty).
+        .child(
+            h_flex()
+                .w(HOLD_VALUE_W)
+                .flex_shrink_0()
+                .justify_end()
+                .text_sm()
+                .child(div().font_family(mono).text_color(muted).child("—")),
+        )
 }
 
 #[cfg(test)]
@@ -887,5 +1050,61 @@ mod tests {
         assert_eq!(get("Per-transaction cap"), "0.1 ETH"); // config, not a balance
         assert_eq!(get("Recipients"), "1 allowed");
         assert_eq!(get("STOP brake"), "engaged, unlock to re-arm");
+    }
+
+    use deckard_core::ReadStatus;
+
+    const MAINNET: u64 = 1;
+    const SEPOLIA: u64 = 11155111;
+    const ANVIL: u64 = 31337;
+
+    /// TRUST-CRITICAL (DESIGN §Trust rule 9): the hero meta line claims "verified on mainnet" ONLY
+    /// for a real Helios-verified read on chain 1, and reads it as the `success` signal.
+    #[test]
+    fn verified_claim_only_a_verified_mainnet_read_is_verified() {
+        let c = VerifiedClaim::from_read(MAINNET, Some(&ReadStatus::Verified));
+        assert_eq!(c, VerifiedClaim::Mainnet);
+        assert_eq!(c.label(), "verified on mainnet");
+        assert!(c.is_verified());
+    }
+
+    /// A downgrade is never rendered quiet: a still-verified-but-degraded read is loud, NOT the
+    /// `success` "verified on mainnet".
+    #[test]
+    fn verified_claim_degraded_is_a_loud_downgrade() {
+        let c = VerifiedClaim::from_read(MAINNET, Some(&ReadStatus::degraded("EL failover")));
+        assert_eq!(c, VerifiedClaim::Degraded);
+        assert_eq!(c.label(), "verified · degraded");
+        assert!(!c.is_verified());
+    }
+
+    /// An unsynced/stale/failed read and a not-yet-synced read both read the loud "unverified" —
+    /// never a faked verified look.
+    #[test]
+    fn verified_claim_unsynced_and_none_are_unverified() {
+        for status in [Some(ReadStatus::unsynced("head stale")), None] {
+            let c = VerifiedClaim::from_read(MAINNET, status.as_ref());
+            assert_eq!(c, VerifiedClaim::Unverified);
+            assert_eq!(c.label(), "unverified");
+            assert!(!c.is_verified());
+        }
+    }
+
+    /// HONESTY off mainnet: a fork/testnet is never "verified on mainnet", even if a read somehow
+    /// reports `Verified` — the claim is pinned to chain 1 (defence in depth over the registry).
+    #[test]
+    fn verified_claim_off_mainnet_is_never_verified() {
+        for chain in [SEPOLIA, ANVIL] {
+            // Even a (spurious) Verified read off chain 1 must not fake the mainnet claim.
+            assert_eq!(
+                VerifiedClaim::from_read(chain, Some(&ReadStatus::Verified)),
+                VerifiedClaim::Unverified,
+            );
+            // The everyday fork case: no verified read at all.
+            assert_eq!(
+                VerifiedClaim::from_read(chain, None),
+                VerifiedClaim::Unverified,
+            );
+        }
     }
 }

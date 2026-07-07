@@ -92,6 +92,9 @@ impl Shell {
             .w_full()
             .gap_2()
             .child(kv("Balance", KvValue::Mono(&balance)))
+            // Value: HONEST "—". The app has no price feed, so the rail's fiat row is an explicit
+            // dash — never a fabricated number (E4, #184; DESIGN §Trust), mirroring the hero meta.
+            .child(kv("Value", KvValue::Sans("—")))
             .child(kv("Synced", KvValue::Sans(&synced)))
             .child(kv("Status", status_kv))
             .child(kv("Network", KvValue::Sans(network)))
@@ -126,18 +129,25 @@ impl Shell {
                 .child(kv("Per-transaction", per_tx_val))
                 .into_any_element();
             col = col.child(meta_section(Some("Agent caps"), caps, theme));
-
-            // The golden ref's trailing composition metasec. Only "Agents" is engine-backed today —
-            // the app models one agent, armed unless a STOP revoked it — so the "Connections" count
-            // is omitted (not invented) until the browser bridge lands (ADR-0001 / #44).
-            let agents = if p.revoked { "1 stopped" } else { "1 active" };
-            let summary = v_flex()
-                .w_full()
-                .gap_2()
-                .child(kv("Agents", KvValue::Sans(agents)))
-                .into_any_element();
-            col = col.child(meta_section(None, summary, theme));
         }
+
+        // The golden ref's trailing composition metasec — ALWAYS present (independent of whether the
+        // policy has landed). Connections: the reserved/empty state — the browser bridge (dapp
+        // connections) is deferred (ADR-0001 / #44), so we render the honest empty "none", NEVER a
+        // fabricated count. Agents: the app models one agent on this wallet; its state follows the
+        // live policy (idle until it lands, active unless a STOP revoked it).
+        let agents = match self.agent_policy.as_ref() {
+            Some(p) if p.revoked => "1 stopped",
+            Some(_) => "1 active",
+            None => "idle",
+        };
+        let summary = v_flex()
+            .w_full()
+            .gap_2()
+            .child(kv("Connections", KvValue::Sans("none")))
+            .child(kv("Agents", KvValue::Sans(agents)))
+            .into_any_element();
+        col = col.child(meta_section(None, summary, theme));
 
         col.into_any_element()
     }
