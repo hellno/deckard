@@ -38,12 +38,13 @@ Both are green. **Go** for #34 on the Sepolia fork.
 
 ### Verdict: hand-roll in `deckard-core`; x402-rs stays a demo binary.
 
-### Evidence: the digest comparison ( `digest-cmp/` )
+### Evidence: the digest comparison
 
 x402-rs does not do anything special to build the EIP-3009 authorization — it declares the same
 Solidity struct via `alloy sol!` and calls `eip712_signing_hash`, which is what
-`deckard-core/src/cow_types.rs` already does for CoW orders. The spike builds the *same* authorization
-two ways and compares:
+`deckard-core/src/cow_types.rs` already does for CoW orders. A throwaway crate (not committed) built
+the *same* authorization two ways — a hand-rolled `alloy sol!` struct vs x402-rs's own
+`TransferWithAuthorization` — and compared them byte-for-byte:
 
 ```
 == EIP-3009 TransferWithAuthorization: hand-roll vs x402-rs ==
@@ -192,9 +193,6 @@ export FACILITATOR_BIN=$PWD/target/debug/x402-facilitator
 
 # 2. From the deckard repo root, run the whole proof (starts anvil + facilitator, asserts, cleans up):
 cd docs/research/x402-spike && ./run.sh
-
-# 3. (Question 1) reproduce the digest comparison + regenerate the KAT:
-cd digest-cmp && cargo run
 ```
 
 Requirements: `foundry` (anvil, cast), `jq`, `curl`. Throwaway keys only; no secrets in any file here.
@@ -207,4 +205,3 @@ Requirements: `foundry` (anvil, cast), `jq`, `curl`. Throwaway keys only; no sec
 | [`facilitator-config.json`](facilitator-config.json) | x402-rs config: the `eip155:11155111 → fork` entry |
 | [`typed-data.json`](typed-data.json) | the EIP-3009 `TransferWithAuthorization` EIP-712 typed-data template |
 | [`eip3009-kat.json`](eip3009-kat.json) | the known-answer vector (domain, message, typehash, digest, signature) for #34 |
-| [`digest-cmp/`](digest-cmp/) | Question-1 harness: hand-roll vs x402-rs, byte-for-byte (standalone; git dep on x402-rs) |
