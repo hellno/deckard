@@ -61,6 +61,13 @@ pub const CAP_CORE: &str = "core";
 /// Defining doc `docs/build/31-agent-quickstart.md` (the tool list is drift-guarded there).
 pub const CAP_MCP_V0_1: &str = "mcp.v0.1";
 
+/// Dapp origin attribution on the wire (#198): this build understands
+/// [`ProposalOrigin::Dapp`](crate::rpc::ProposalOrigin::Dapp) on `Propose` / `ProposeOrder` /
+/// `ProposeMessage`, and echoes it back on pending/activity records. The origin string is
+/// display-only attribution — verbatim, never a trust root, never a policy input. Since
+/// 2026-07-07; defining doc `docs/build/40-wire-evolution.md` (the #198 registry row).
+pub const CAP_ORIGIN_DAPP: &str = "origin.dapp";
+
 // ───────────────────────── Implementation names ─────────────────────────
 // `impl_name` is informational only (rule #1: no code path branches on it). Each implementation
 // reports its own honest name; the capabilities + spec_version are what must match across them.
@@ -74,7 +81,11 @@ pub const IMPL_MOCK: &str = "deckard-mock";
 /// from this one function is what keeps every implementation's answer identical.
 #[must_use]
 pub fn capabilities() -> Vec<String> {
-    vec![CAP_CORE.to_string(), CAP_MCP_V0_1.to_string()]
+    vec![
+        CAP_CORE.to_string(),
+        CAP_MCP_V0_1.to_string(),
+        CAP_ORIGIN_DAPP.to_string(),
+    ]
 }
 
 /// Build the [`HelloInfo`] this build answers `Hello` with, tagged with the caller's `impl_name`.
@@ -118,6 +129,11 @@ mod tests {
         // The baseline registry the issue pins: core + the mcp.v0.1 profile.
         assert!(caps.iter().any(|c| c == CAP_CORE), "core missing");
         assert!(caps.iter().any(|c| c == CAP_MCP_V0_1), "mcp.v0.1 missing");
+        // #198: dapp origin attribution ships as a named capability (rule #2 — no version bump).
+        assert!(
+            caps.iter().any(|c| c == CAP_ORIGIN_DAPP),
+            "origin.dapp missing"
+        );
 
         // Rule #3 hygiene: names are lowercase, whitespace-free, non-empty, and unique.
         for c in &caps {

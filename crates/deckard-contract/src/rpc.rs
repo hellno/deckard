@@ -12,15 +12,26 @@ use crate::policy::Policy;
 use crate::read_status::ReadStatus;
 use crate::swap_order::SwapOrder;
 
-/// WHO proposed a pending record: a foreground human action in the app (`App`), or an
-/// autonomous agent (the MCP sidecar, `Agent`). Drives the Approvals agent header band and
-/// Activity's two-actor chain. `App` is the safe default (the `#[default]` variant) so an
-/// un-tagged proposal never masquerades as an agent.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// WHO proposed a pending record: a foreground human action in the app (`App`), an autonomous
+/// agent (the MCP sidecar, `Agent`), or a browser dapp relayed by the bridge (`Dapp`, #198).
+/// Drives the Approvals agent header band and Activity's two-actor chain. `App` is the safe
+/// default (the `#[default]` variant) so an un-tagged proposal never masquerades as an agent
+/// or a dapp.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProposalOrigin {
     #[default]
     App,
     Agent,
+    /// A browser dapp request relayed by the bridge (#198, capability `origin.dapp`). `origin`
+    /// is the requesting site's web origin exactly as the bridge session keys it (e.g.
+    /// `https://app.example.org`, or the bridge's literal `unknown-origin` fallback) —
+    /// display-only attribution, rendered verbatim, never a trust root, and never an input to
+    /// the policy verdict. Additive per the #31 evolution rules: `App`/`Agent` keep their bare
+    /// text-string frames, this variant frames as the externally-tagged map
+    /// `{"Dapp":{"origin":…}}`, and an old decoder rejects the unknown tag loudly (the valve).
+    Dapp {
+        origin: String,
+    },
 }
 
 /// `deckard-mcp` → `deckard-signerd`. The key-less client only proposes; it never signs.
@@ -43,8 +54,9 @@ pub enum SignerRequest {
         approved: bool,
     },
     /// Policy check, NO signing yet → [`Decision`]. `origin` records WHO proposed (a
-    /// foreground human app action vs an autonomous agent) so the GUI inbox can render the
-    /// agent band / two-actor chain; it never affects the policy verdict.
+    /// foreground human app action, an autonomous agent, or a browser dapp via the bridge) so
+    /// the GUI inbox can render the agent band / dapp attribution / two-actor chain; it never
+    /// affects the policy verdict.
     Propose {
         intent: Intent,
         origin: ProposalOrigin,

@@ -374,6 +374,13 @@ mod roundtrip_tests {
             intent: sample_intent(IntentKind::Send),
             origin: ProposalOrigin::Agent,
         });
+        // #198: a browser dapp's transaction, attributed to the requesting site.
+        roundtrip(&SignerRequest::Propose {
+            intent: sample_intent(IntentKind::Send),
+            origin: ProposalOrigin::Dapp {
+                origin: "https://app.example.org".into(),
+            },
+        });
         roundtrip(&SignerRequest::Execute {
             request_id: B256::repeat_byte(0x02),
         });
@@ -403,6 +410,14 @@ mod roundtrip_tests {
         roundtrip(&SignerRequest::ProposeMessage {
             message: sample_message(),
             origin: ProposalOrigin::Agent,
+        });
+        // #198: a dapp message proposal — the wire origin and the payload's display-only
+        // `SignMessage.origin` are written from the same bridge session, so they agree.
+        roundtrip(&SignerRequest::ProposeMessage {
+            message: sample_message(),
+            origin: ProposalOrigin::Dapp {
+                origin: sample_message().origin,
+            },
         });
         roundtrip(&SignerRequest::SignMessage {
             request_id: B256::repeat_byte(0x09),
@@ -616,8 +631,44 @@ mod roundtrip_tests {
     fn proposal_origin_roundtrip_and_default() {
         roundtrip(&ProposalOrigin::App);
         roundtrip(&ProposalOrigin::Agent);
-        // The safe default is App: an un-tagged proposal must never masquerade as an agent.
+        // #198: the dapp variant carries the site's origin string verbatim — a real web origin
+        // and the bridge's literal `unknown-origin` fallback both round-trip unprettified.
+        roundtrip(&ProposalOrigin::Dapp {
+            origin: "https://app.example.org".into(),
+        });
+        roundtrip(&ProposalOrigin::Dapp {
+            origin: "unknown-origin".into(),
+        });
+        // The safe default is App: an un-tagged proposal must never masquerade as an agent
+        // (or a dapp).
         assert_eq!(ProposalOrigin::default(), ProposalOrigin::App);
+    }
+
+    /// #198: a `Dapp`-origin record rides the existing pending/activity wire structs unchanged —
+    /// the enum variant is the only addition (no struct grew a key).
+    #[test]
+    fn dapp_origin_records_roundtrip() {
+        roundtrip(&PendingRecord {
+            request_id: B256::repeat_byte(0x03),
+            status: ApprovalStatus::Pending,
+            payload: PendingPayloadView::Tx(sample_intent(IntentKind::Send)),
+            remaining_ms: 60_000,
+            origin: ProposalOrigin::Dapp {
+                origin: "https://app.example.org".into(),
+            },
+        });
+        roundtrip(&ActivityRecord {
+            request_id: B256::repeat_byte(0x04),
+            origin: ProposalOrigin::Dapp {
+                origin: "unknown-origin".into(),
+            },
+            payload: PendingPayloadView::Tx(sample_intent(IntentKind::Send)),
+            timestamp_ms: 1,
+            tx_hash: None,
+            lifecycle: ActivityLifecycle::Proposed,
+            reason: BreachedLimit::PerTxCap,
+            auto_allowed: false,
+        });
     }
 
     #[test]
@@ -948,5 +999,91 @@ mod wire_evolution {
         let back2: HelloInfo =
             serde_json::from_slice(&json).expect("an extra JSON key must be ignored, not rejected");
         assert_eq!(back2.impl_name, "deckard-future");
+    }
+
+    /// #198 under rule E2: adding `ProposalOrigin::Dapp` did not perturb the existing origin
+    /// frames — `App`/`Agent` stay bare CBOR text strings, and the new variant's own bytes are
+    /// hand-verifiable (an externally-tagged `{"Dapp":{"origin":…}}` map).
+    #[test]
+    fn e2_proposal_origin_frames_are_byte_identical() {
+        fn cbor_of(origin: &ProposalOrigin) -> Vec<u8> {
+            let mut b = Vec::new();
+            ciborium::into_writer(origin, &mut b).expect("cbor encode");
+            b
+        }
+
+        // The pre-#198 frames, computed by hand from the CBOR spec (major type 3 = text string):
+        // if the new variant ever shifts these, the freeze is broken and this fails.
+        assert_eq!(
+            cbor_of(&ProposalOrigin::App),
+            b"\x63App",
+            "App frame changed — freeze broken"
+        );
+        assert_eq!(
+            cbor_of(&ProposalOrigin::Agent),
+            b"\x65Agent",
+            "Agent frame changed — freeze broken"
+        );
+
+        // The new frame, hand-computed: map(1) { text(4) "Dapp": map(1) { text(6) "origin":
+        // text(23) "https://app.example.org" } }.
+        let dapp = ProposalOrigin::Dapp {
+            origin: "https://app.example.org".into(),
+        };
+        assert_eq!(
+            cbor_of(&dapp),
+            b"\xA1\x64Dapp\xA1\x66origin\x77https://app.example.org",
+            "Dapp frame differs from the hand-computed golden bytes"
+        );
+
+        // The golden bytes are the REAL encoding, not a tautology: they decode back, verbatim.
+        let back: ProposalOrigin =
+            ciborium::from_reader(&b"\xA1\x64Dapp\xA1\x66origin\x77https://app.example.org"[..])
+                .expect("golden decodes");
+        assert_eq!(back, dapp);
+    }
+
+    /// #198 under rule E3: the valve, pointed at the new origin variant. An OLD decoder — one
+    /// built before `Dapp` existed, modelled here as the pre-#198 two-variant enum — must reject
+    /// a `Dapp`-tagged frame LOUDLY on both wire surfaces: a decode `Err`, never a silent
+    /// misparse into `App`/`Agent` and never a panic. Because `origin` is a required field of
+    /// every pending/activity record, an old peer rejects the whole frame — nothing downstream
+    /// can act on a mis-attributed record.
+    #[test]
+    fn e3_old_decoder_rejects_a_dapp_origin() {
+        // The pre-#198 wire enum, byte-identical to what an old daemon/app/sidecar decodes.
+        #[derive(Debug, serde::Deserialize)]
+        enum OldProposalOrigin {
+            #[allow(dead_code)] // reason: decode-only stand-in for the pre-#198 peer.
+            App,
+            #[allow(dead_code)] // reason: decode-only stand-in for the pre-#198 peer.
+            Agent,
+        }
+
+        let dapp = ProposalOrigin::Dapp {
+            origin: "https://app.example.org".into(),
+        };
+
+        // CBOR (the daemon UDS wire).
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&dapp, &mut cbor).unwrap();
+        assert!(
+            ciborium::from_reader::<OldProposalOrigin, _>(&cbor[..]).is_err(),
+            "an old decoder must reject the Dapp tag, not silently accept it"
+        );
+
+        // JSON (the MCP wire).
+        let json = serde_json::to_vec(&dapp).unwrap();
+        assert!(
+            serde_json::from_slice::<OldProposalOrigin>(&json).is_err(),
+            "an old decoder must reject the Dapp tag on the JSON surface too"
+        );
+
+        // And the old frames still decode on the NEW enum — compatibility is one-way additive.
+        let app: ProposalOrigin = ciborium::from_reader(&b"\x63App"[..]).expect("App decodes");
+        assert_eq!(app, ProposalOrigin::App);
+        let agent: ProposalOrigin =
+            ciborium::from_reader(&b"\x65Agent"[..]).expect("Agent decodes");
+        assert_eq!(agent, ProposalOrigin::Agent);
     }
 }

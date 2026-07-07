@@ -66,6 +66,7 @@ there). A name here is permanent (rule #3).
 |---|---|---|---|
 | `core` | stable | 2026-06-05 | [`30-mcp-shape.md`](30-mcp-shape.md) — the frozen `deckard-contract` socket API (unlock / propose / execute / status / revoke_all / policy_get / address / balance / pending / activity). |
 | `mcp.v0.1` | stable | 2026-06-10 | [`31-agent-quickstart.md`](31-agent-quickstart.md) — the key-less MCP sidecar's agent-tool profile over `core` (its tool list is drift-guarded by a test in `deckard-mcp`). |
+| `origin.dapp` | stable | 2026-07-07 | This doc (issue #198) — `ProposalOrigin::Dapp { origin }` on `Propose` / `ProposeOrder` / `ProposeMessage`, echoed back on pending/activity records. The origin string is display-only attribution (rendered verbatim, never a trust root, never a policy input); `App`/`Agent` frames are byte-unchanged and an old decoder rejects the `Dapp` tag with `malformed_request` (the rule-#1 valve). |
 
 ## Adding a capability (the #198 / #204 extension point)
 
@@ -78,9 +79,12 @@ places, mirroring the deny-vocabulary discipline in `deny_reasons`:
 3. **The wire, additively** — a new `SignerRequest` / enum variant is appended; old peers reject it
    via the valve (rule #1). `spec_version` does **not** change (rule #2).
 
-Concretely, **#198** (`ProposalOrigin::Dapp` on the wire) and **#204** register their new origin
-variant as a capability name here, then ship the enum variant additively. An old daemon that receives
-a `Dapp`-tagged frame rejects it with `malformed_request` — the correct, safe degradation.
+Concretely, **#198** (`ProposalOrigin::Dapp` on the wire) shipped exactly this way — the
+`origin.dapp` row above — and **#204** registers its origin variant the same way. An old daemon that
+receives a `Dapp`-tagged frame rejects it with `malformed_request` — the correct, safe degradation.
+(The reverse direction fails equally loudly: an old *client* reading a new daemon's pending/activity
+list that contains one `Dapp`-origin record rejects the whole frame, since `origin` is a required
+field of every record. That is the valve working as designed, not a partial decode.)
 
 ## How the rules are proven (tests)
 
