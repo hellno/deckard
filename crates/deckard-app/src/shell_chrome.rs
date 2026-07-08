@@ -69,9 +69,11 @@ impl Shell {
         let id_square = theme::identity_square(is_dark);
         let amber = theme::amber(is_dark);
         let amber_tint = theme::amber_tint(is_dark);
-        // The live "needs you" count (amber = "awaiting you") — the still-proposed rows in the
-        // Activity feed, which form its NEEDS YOU triage band. Surfaced on the Activity nav row.
-        let needs_you_count = crate::activity_view::activity_pending(&self.activity).len();
+        // The live "needs you" count (amber = "awaiting you") — the requests still waiting on a
+        // human, the same set as Activity's NEEDS YOU triage band. Live from ANY surface (#200):
+        // `waiting_count` reads the fresh feed while Activity is open and the background
+        // pending poll's snapshot everywhere else.
+        let needs_you_count = self.waiting_count();
         let activity_active = self.surface == Surface::Activity;
 
         let wallet_selected = self.surface == Surface::Home && self.selection == Selection::Wallet;

@@ -619,14 +619,16 @@ impl Shell {
     /// line when nothing is pending, or an amber "N waiting for you · Review →" that jumps to the
     /// Activity queue when the agent (or a dapp) has left requests for you. ONE line, hairline top
     /// and bottom — never a stacked band (the full triage band lives in Activity as NEEDS YOU). The
-    /// count is `activity_pending`, the exact set the Activity NEEDS YOU band shows.
+    /// count is `Shell::waiting_count` — the same set the Activity NEEDS YOU band shows, kept live
+    /// off-surface by the background pending poll (#200) so a request that arrives while you sit
+    /// here lights the strip within one poll interval.
     fn render_waiting_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let amber = theme::amber(theme.is_dark());
         let muted = theme.muted_foreground;
         let success = theme.success;
         let hairline = theme.border;
-        let pending = crate::activity_view::activity_pending(&self.activity).len();
+        let pending = self.waiting_count();
 
         let row = h_flex()
             .w_full()
@@ -674,7 +676,15 @@ impl Shell {
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(amber)
                         .child("Review →")
-                        .on_click(cx.listener(|this, _, _, cx| this.open(Surface::Activity, cx))),
+                        // Route through `open_activity` — NOT a raw surface flip. The raw flip
+                        // landed on a stale feed with the feed poller stopped, and (#200) the
+                        // background pending poll SKIPs while Activity is open — so the cue's own
+                        // CTA would bury the very request it announced, with ALL polling halted,
+                        // until it silently expired. `open_activity` refreshes + restarts the
+                        // feed poller, like every other path onto the feed (sidebar, ⌘⇧A, ⌘K).
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.open_activity(window, cx)),
+                        ),
                 )
                 .into_any_element()
         }

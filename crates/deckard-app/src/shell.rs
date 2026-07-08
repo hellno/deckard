@@ -18,7 +18,8 @@ use gpui_component::{
 };
 
 use deckard_contract::{
-    Decision, ExecuteResult, Intent, Policy, ShieldStatus, SignerRequest, SignerResponse,
+    ApprovalStatus, Decision, ExecuteResult, Intent, PendingRecord, Policy, ShieldStatus,
+    SignerRequest, SignerResponse,
 };
 use deckard_core::{
     tokens_for, Address, CowOrderbook, EthProvider, KdfParams, Portfolio, QuoteResponse,
@@ -41,6 +42,13 @@ use crate::{
 
 /// Auto-refresh the public wallet balance every this many seconds while the home view is open.
 const BALANCE_POLL_SECS: u64 = 20;
+
+/// Background pending-approvals poll cadence (#200): how often the app asks the daemon for the
+/// still-pending list while the operator is anywhere BUT the Activity surface (which has its own
+/// ~2s feed poller). A few seconds — well inside the ~120s approval TTL — so a dapp or agent
+/// request raised while the operator is on Home/Settings/a wallet view is seen long before it
+/// silently expires.
+const PENDING_POLL_SECS: u64 = 5;
 
 /// The confirm arm-delay: a clear-signing review must be on screen this long before ⌘↵ / a
 /// click can confirm, so a keypress or click carried over from the previous screen can't approve
@@ -369,6 +377,16 @@ pub struct Shell {
     pub synced_block: Option<u64>,
     /// Handle to the running balance auto-refresh loop; dropped on lock to cancel it.
     poll_task: Option<gpui::Task<()>>,
+    /// Handle to the background pending-approvals poll loop (#200); dropped on lock to cancel it.
+    pending_poll_task: Option<gpui::Task<()>>,
+    /// The still-pending count from the last background `PendingList` poll — the off-surface
+    /// source behind [`Shell::waiting_count`] (the home waiting strip + the sidebar Activity
+    /// badge). `None` until the first poll lands (the cues fall back to the last feed snapshot);
+    /// cleared on lock so a dead session's count can't linger into the next one.
+    polled_pending: Option<usize>,
+    /// True while a background `PendingList` round-trip is in flight, so a slow daemon can't
+    /// stack fetches (the same role `portfolio_loading` plays for the balance poll).
+    pending_poll_inflight: bool,
     /// Bumped on every `retarget`; a slow ENS resolution checks it before applying so a
     /// stale reply for a since-changed target can't clobber the current view.
     view_epoch: u64,
@@ -740,6 +758,9 @@ impl Shell {
             read_status: None,
             synced_block: None,
             poll_task: None,
+            pending_poll_task: None,
+            polled_pending: None,
+            pending_poll_inflight: false,
             view_epoch: 0,
             current_rpc,
             chain_id,
@@ -941,6 +962,16 @@ impl Shell {
         self.synced_block = None;
         // Dropping the task cancels the balance auto-refresh loop.
         self.poll_task = None;
+        // Same for the background pending-approvals poll; its snapshot dies with the session
+        // (the next unlock re-polls immediately, before a stale cue could render).
+        self.pending_poll_task = None;
+        self.polled_pending = None;
+        self.pending_poll_inflight = false;
+        // Supersede any in-flight `ActivityFeed` reply: without this, a fetch started just before
+        // the lock could land afterwards and re-install a dead session's feed snapshot into
+        // `self.activity` — which off-surface `waiting_count` falls back to while `polled_pending`
+        // is None, resurrecting the count this lock just cleared.
+        self.activity_epoch = self.activity_epoch.wrapping_add(1);
         // Dropping the handle closes its channel → the sync worker thread exits.
         self.shielded = None;
         self.railgun_address = None;
@@ -965,6 +996,15 @@ impl Shell {
         self.activity_stopped = false;
         self.activity_stop_arming = false;
         self.activity_reviewing = None;
+        // Drop the feed snapshot too (#200): off-Activity `waiting_count` falls back to this list
+        // when `polled_pending` is None (the window before a session's first background poll). If
+        // it survived the lock, re-unlocking a wallet that had pending rows last session would
+        // flash a phantom amber "N waiting for you" until the first poll lands. Cleared here, the
+        // fallback reads 0 (caught up) — the safe direction. This path never renders the feed (a
+        // plain lock returns to the unlock gate; the STOP feed goes through `stop_revoke_all`, not
+        // `lock`), so clearing it has no visible downside.
+        self.activity = Vec::new();
+        self.activity_selected = 0;
         self.auth = AuthStep::Unlock;
         self.palette_open = false;
         cx.notify();
@@ -1279,6 +1319,7 @@ impl Shell {
         self.kick_railgun_grant(cx);
         self.kick_agent_policy(cx);
         self.start_balance_poll(cx);
+        self.start_pending_poll(cx);
     }
 
     /// Fetch the daemon's live policy for the wallet home's "what the agent may do" fence (off
@@ -1699,8 +1740,16 @@ impl Shell {
 
     /// Select a sidebar entity: switch the selection and reset to its Home view.
     pub fn select(&mut self, sel: Selection, cx: &mut Context<Self>) {
+        let leaving_activity = self.surface == Surface::Activity;
         self.selection = sel;
         self.surface = Surface::Home;
+        // Leaving the feed (#200): re-poll the uncapped pending list now so the home cue reflects
+        // an approve/deny just made on the feed within one round-trip, not up to a full poll
+        // interval later (the background poll skips while Activity is open, so the snapshot is
+        // stale on exit). Lands on Home, so `waiting_count` reads `polled_pending`.
+        if leaving_activity {
+            self.kick_pending_refresh(cx);
+        }
         // The wallet home now carries the "what the agent may do" policy fence — re-fetch the
         // daemon's live policy on every visit so an out-of-band edit to policy.json (or a
         // STOP) shows up without a relaunch.
@@ -1734,7 +1783,17 @@ impl Shell {
         if surface != Surface::Activity {
             self.activity_reviewing = None;
         }
+        // Leaving the Activity feed for another surface (#200): re-poll the uncapped pending list
+        // now so a home/rail cue reflects an approve/deny just made on the feed within a round-trip
+        // rather than up to a full poll interval later (the background poll skips while Activity is
+        // open). `should_kick_pending_on_nav` is the pure, unit-tested transition rule. Set the new
+        // surface FIRST so the reply's `surface == Activity` drop-guard sees the correct (already
+        // left) surface and lets the fresh count land.
+        let leaving_activity = should_kick_pending_on_nav(self.surface, surface);
         self.surface = surface;
+        if leaving_activity {
+            self.kick_pending_refresh(cx);
+        }
         // The confirm arm-delay fails closed: clear it on every nav, then re-arm if we are landing
         // on a clear-signing review that already has a proposal (a re-entered review). A
         // stale-but-elapsed timestamp can never fire a confirm; ⌘↵/click stays gated by a fresh
@@ -2619,6 +2678,17 @@ impl Shell {
                             .map(|r| r.request_id);
                         this.activity = records;
                         let pending = crate::activity_view::activity_pending(&this.activity);
+                        // NOTE (#200): deliberately do NOT reconcile `polled_pending` from this
+                        // feed. The daemon caps `ActivityFeed` at the newest 200 rows while
+                        // `PendingList` is uncapped, so a pending row older than 200 newer records
+                        // is absent here — writing `pending.len()` could undercount to 0 and hide a
+                        // real waiting request (a wrong-direction cue). `polled_pending` therefore
+                        // has ONE source: the uncapped `PendingList` in `kick_pending_refresh`.
+                        // Freshness on leaving the feed (so an approve/deny here doesn't leave a
+                        // stale home cue) comes from a `kick_pending_refresh` fired on the
+                        // Activity→elsewhere nav transition (see `open`/`select`), not from here.
+                        // On the Activity surface `waiting_count` reads this same feed count, so the
+                        // badge still equals the NEEDS YOU band beside it (both inherit the cap).
                         this.activity_selected = selected_id
                             .and_then(|id| pending.iter().position(|r| r.request_id == id))
                             .unwrap_or_else(|| {
@@ -2889,6 +2959,106 @@ impl Shell {
             }
         })
         .detach();
+    }
+
+    /// Start the background pending-approvals poll (#200): a low-cadence, whole-session loop
+    /// that keeps the "waiting on you" cue live from ANY surface — the home waiting strip and
+    /// the sidebar Activity badge — so a dapp or agent request raised while the operator is on
+    /// Home/Settings/a wallet view can't silently expire unseen (approval TTL ~120s). Mirrors
+    /// `start_balance_poll`: stored in `pending_poll_task` (dropped on lock cancels it) and
+    /// epoch-fenced against a fast re-unlock. Each tick is decided by the pure
+    /// [`pending_poll_tick`]: while Activity is open its own ~2s feed poller already refreshes
+    /// (and `refresh_activity` reconciles `polled_pending`), so this loop skips the wire call
+    /// there — the two pollers never double-fetch.
+    fn start_pending_poll(&mut self, cx: &mut Context<Self>) {
+        let epoch = self.auth_epoch;
+        // Fetch once immediately: a request parked before this unlock should light the cue the
+        // moment the shell renders, not one interval later.
+        self.kick_pending_refresh(cx);
+        self.pending_poll_task = Some(cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(Duration::from_secs(PENDING_POLL_SECS))
+                .await;
+            let keep = this.update(cx, |this, cx| {
+                let session_live = this.auth == AuthStep::Ready && this.auth_epoch == epoch;
+                match pending_poll_tick(session_live, this.surface == Surface::Activity) {
+                    PendingPollTick::Stop => false,
+                    PendingPollTick::Skip => true,
+                    PendingPollTick::Fetch => {
+                        this.kick_pending_refresh(cx);
+                        true
+                    }
+                }
+            });
+            if !matches!(keep, Ok(true)) {
+                break;
+            }
+        }));
+    }
+
+    /// Fetch the daemon's uncapped `PendingList` off the UI thread and fold the still-`Pending`
+    /// count into `polled_pending` — the SOLE source of that field and the off-surface fuel for
+    /// [`Shell::waiting_count`]. Sourcing it only here (never from the 200-capped `ActivityFeed`)
+    /// is what keeps the count honest: a pending row older than 200 newer records is absent from
+    /// the feed but present here, so the cue can't undercount to a phantom 0. Passive by design
+    /// (DESIGN trust rules): updates a count and nothing else — never navigates, focuses, or opens
+    /// a review. In-flight-guarded so a slow daemon can't stack round-trips; epoch-fenced so a
+    /// reply landing after lock/re-unlock is dropped. A fetch error keeps the previous snapshot —
+    /// the cue is ambient, and the Activity surface is where a daemon failure gets its loud
+    /// `activity_error` line. Called by the background poll (off-surface) and once on the
+    /// Activity→elsewhere nav transition (so leaving the feed refreshes the cue immediately).
+    fn kick_pending_refresh(&mut self, cx: &mut Context<Self>) {
+        if self.auth != AuthStep::Ready || self.pending_poll_inflight {
+            return;
+        }
+        self.pending_poll_inflight = true;
+        let epoch = self.auth_epoch;
+        let client = self.signer.client();
+        let task = cx.background_spawn(async move { client.pending_list_blocking() });
+        cx.spawn(async move |this, cx| {
+            let res = task.await;
+            this.update(cx, |this, cx| {
+                if this.auth_epoch != epoch {
+                    // Lock/re-unlock already reset the in-flight guard — this reply belongs to
+                    // a dead session; clearing the NEW session's guard here could stack fetches.
+                    return;
+                }
+                this.pending_poll_inflight = false;
+                // On the Activity surface `waiting_count` reads the feed, not `polled_pending`, so
+                // a reply landing here would not change the display — but it could carry an older
+                // snapshot (a background fetch that started off-surface, then the operator entered
+                // Activity). Drop it so `polled_pending` isn't left stale for the next exit; the
+                // nav-transition kick re-fetches on leave. The in-flight guard means only one fetch
+                // is ever outstanding, so this is the single writer and there is no write-ordering
+                // race.
+                if this.surface == Surface::Activity {
+                    return;
+                }
+                if let Ok(records) = res {
+                    let waiting = Some(pending_waiting(&records));
+                    if this.polled_pending != waiting {
+                        this.polled_pending = waiting;
+                        cx.notify();
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The "waiting on you" count behind the everywhere-cues — the home waiting strip and the
+    /// sidebar Activity badge (#200). Dispatch is the pure [`waiting_count`] (unit-tested): on
+    /// the Activity surface the feed itself is the source, so the badge always equals the NEEDS
+    /// YOU band it sits beside; everywhere else the uncapped `PendingList` snapshot wins (the
+    /// feed only refreshes while Activity is open, so off-surface it can be stale in either
+    /// direction), falling back to the last feed snapshot until the first poll lands.
+    pub(crate) fn waiting_count(&self) -> usize {
+        waiting_count(
+            self.surface == Surface::Activity,
+            crate::activity_view::activity_pending(&self.activity).len(),
+            self.polled_pending,
+        )
     }
 
     // --- Action handlers (wired in `render`) ---
@@ -3361,5 +3531,167 @@ impl Render for Shell {
             .on_action(cx.listener(Self::on_palette_prev))
             .on_action(cx.listener(Self::on_confirm_commit))
             .child(body)
+    }
+}
+
+// --- #200: the background pending poll's pure state machine ---
+//
+// The poll/badge decisions live here as pure functions so the trust-relevant invariants are
+// unit-tested: the badge can never contradict the NEEDS YOU band while the feed is on screen,
+// the two pollers never double-fetch, and only a still-`Pending` record counts as waiting.
+
+/// What one tick of the background pending poll should do (see [`Shell::start_pending_poll`]).
+#[derive(Debug, PartialEq, Eq)]
+enum PendingPollTick {
+    /// The unlocked session is over (lock or re-unlock bumped the epoch) — end the loop.
+    Stop,
+    /// The Activity surface is open: its own ~2s feed poller is already refreshing (and
+    /// `refresh_activity` reconciles the snapshot) — keep looping, but don't fetch.
+    Skip,
+    /// Fetch the pending list.
+    Fetch,
+}
+
+/// Decide one background-poll tick from the session + surface state.
+fn pending_poll_tick(session_live: bool, on_activity: bool) -> PendingPollTick {
+    if !session_live {
+        PendingPollTick::Stop
+    } else if on_activity {
+        PendingPollTick::Skip
+    } else {
+        PendingPollTick::Fetch
+    }
+}
+
+/// The waiting-on-a-human count in a `PendingList` snapshot. ONLY `Pending` counts — `Allowed`
+/// no longer needs the human, `Denied`/`Expired` are terminal. The daemon expires stale rows
+/// before listing, so a `Pending` here is genuinely inside its approval window.
+fn pending_waiting(records: &[PendingRecord]) -> usize {
+    records
+        .iter()
+        .filter(|r| matches!(r.status, ApprovalStatus::Pending))
+        .count()
+}
+
+/// Which source feeds the "waiting on you" cues (the home strip + the sidebar Activity badge).
+/// On the Activity surface the feed count wins — the badge sits beside the NEEDS YOU band and
+/// must equal it exactly (the ~2s feed poller keeps it fresh). Everywhere else the background
+/// `PendingList` snapshot wins — off-surface the feed is stale in either direction (missing a
+/// new arrival, or still showing a row that has since settled) — with the last feed snapshot as
+/// the fallback until the first poll lands.
+fn waiting_count(on_activity: bool, feed_pending: usize, polled: Option<usize>) -> usize {
+    if on_activity {
+        feed_pending
+    } else {
+        polled.unwrap_or(feed_pending)
+    }
+}
+
+/// Whether a surface transition should fire an immediate uncapped `PendingList` refresh (#200).
+/// True ONLY when leaving the Activity feed for another surface: while Activity is open the
+/// background pending poll skips (the feed poller owns that surface), so `polled_pending` is stale
+/// on exit — a re-poll here makes the home/rail cue reflect an approve/deny just made on the feed
+/// within a round-trip instead of up to a full poll interval later. Entering Activity, or moving
+/// between two non-Activity surfaces, needs no kick (the background poll already keeps it fresh).
+fn should_kick_pending_on_nav(from: Surface, to: Surface) -> bool {
+    from == Surface::Activity && to != Surface::Activity
+}
+
+#[cfg(test)]
+mod pending_poll_tests {
+    use super::*;
+    use alloy_primitives::{Address, Bytes, B256, U256};
+    use deckard_contract::{IntentKind, PendingPayloadView, ProposalOrigin};
+
+    fn rec(id: u8, status: ApprovalStatus) -> PendingRecord {
+        PendingRecord {
+            request_id: B256::repeat_byte(id),
+            status,
+            payload: PendingPayloadView::Tx(Intent {
+                chain_id: 1,
+                to: Address::repeat_byte(0x22),
+                token: None,
+                value: U256::from(1_u64),
+                calldata: Bytes::new(),
+                kind: IntentKind::Send,
+            }),
+            remaining_ms: 90_000,
+            origin: ProposalOrigin::Agent,
+        }
+    }
+
+    /// The two-pollers contract: while Activity is open its own feed poller refreshes, so the
+    /// background loop must SKIP the wire call (never double-fetch) — but keep looping, so it
+    /// resumes the moment the operator steps off the feed. A dead session ends the loop.
+    #[test]
+    fn background_poll_skips_while_activity_is_open() {
+        assert_eq!(pending_poll_tick(true, false), PendingPollTick::Fetch);
+        assert_eq!(pending_poll_tick(true, true), PendingPollTick::Skip);
+        assert_eq!(pending_poll_tick(false, false), PendingPollTick::Stop);
+        assert_eq!(pending_poll_tick(false, true), PendingPollTick::Stop);
+    }
+
+    /// Only a still-`Pending` record is "waiting for you": `Allowed` no longer needs the human,
+    /// and `Denied`/`Expired` are settled — counting any of them would cry wolf from the badge.
+    #[test]
+    fn only_pending_rows_count_as_waiting() {
+        let records = vec![
+            rec(0x01, ApprovalStatus::Pending),
+            rec(0x02, ApprovalStatus::Allowed),
+            rec(
+                0x03,
+                ApprovalStatus::Denied {
+                    reason: "user_denied".into(),
+                },
+            ),
+            rec(0x04, ApprovalStatus::Expired),
+        ];
+        assert_eq!(pending_waiting(&records), 1);
+        assert_eq!(pending_waiting(&[]), 0);
+    }
+
+    /// On the Activity surface the badge must equal the NEEDS YOU band beside it — the feed
+    /// count wins even when the background snapshot disagrees (it can lag one interval), and
+    /// approving the last row hides the badge in the same refresh.
+    #[test]
+    fn badge_matches_feed_on_activity_surface() {
+        assert_eq!(waiting_count(true, 2, Some(5)), 2);
+        assert_eq!(waiting_count(true, 0, Some(3)), 0);
+        assert_eq!(waiting_count(true, 1, None), 1);
+    }
+
+    /// Off-surface the background snapshot is the truth (#200's whole point): a request that
+    /// arrives while the operator is on Home lights the cue even though the feed snapshot is
+    /// stale-empty — and a stale feed row that settled can't resurrect the strip.
+    #[test]
+    fn background_snapshot_wins_off_surface() {
+        assert_eq!(waiting_count(false, 0, Some(1)), 1);
+        assert_eq!(waiting_count(false, 3, Some(0)), 0);
+    }
+
+    /// Before the first background poll lands the last feed snapshot is all there is — and the
+    /// zero state keeps both cues quiet (strip shows caught-up, badge hidden).
+    #[test]
+    fn feed_fallback_before_first_poll() {
+        assert_eq!(waiting_count(false, 2, None), 2);
+        assert_eq!(waiting_count(false, 0, None), 0);
+    }
+
+    /// Leaving the Activity feed re-polls the uncapped pending list (so an approve/deny on the feed
+    /// refreshes the home/rail cue within a round-trip); every other transition relies on the
+    /// running background poll. This closes the codex feed-cap divergence: `polled_pending` is
+    /// never sourced from the 200-capped feed, only from the uncapped `PendingList` this kicks.
+    #[test]
+    fn kicks_pending_only_when_leaving_activity() {
+        use Surface::*;
+        // Leaving Activity for any other surface → kick.
+        assert!(should_kick_pending_on_nav(Activity, Home));
+        assert!(should_kick_pending_on_nav(Activity, Settings));
+        assert!(should_kick_pending_on_nav(Activity, Send));
+        // Entering Activity, staying on it, or moving between non-Activity surfaces → no kick.
+        assert!(!should_kick_pending_on_nav(Activity, Activity));
+        assert!(!should_kick_pending_on_nav(Home, Activity));
+        assert!(!should_kick_pending_on_nav(Home, Settings));
+        assert!(!should_kick_pending_on_nav(Send, Home));
     }
 }
