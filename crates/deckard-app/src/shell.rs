@@ -3602,13 +3602,13 @@ fn pending_waiting(records: &[PendingRecord]) -> usize {
 /// count (#216), so the badge sits beside the NEEDS YOU band, equals it exactly (the ~2s refresh
 /// keeps it fresh), and can't undercount a request shed from the 200-capped feed. Everywhere else
 /// the background `PendingList` snapshot wins — off-surface the inbox is stale in either direction
-/// (missing a new arrival, or still showing a row that has since settled) — with the last inbox
-/// snapshot (`feed_pending`) as the fallback until the first poll lands.
-fn waiting_count(on_activity: bool, feed_pending: usize, polled: Option<usize>) -> usize {
+/// (missing a new arrival, or still showing a row that has since settled) — with the last on-screen
+/// snapshot as the fallback until the first poll lands.
+fn waiting_count(on_activity: bool, on_screen_pending: usize, polled: Option<usize>) -> usize {
     if on_activity {
-        feed_pending
+        on_screen_pending
     } else {
-        polled.unwrap_or(feed_pending)
+        polled.unwrap_or(on_screen_pending)
     }
 }
 
