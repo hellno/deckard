@@ -524,6 +524,9 @@ mod roundtrip_tests {
                 payload: PendingPayloadView::Order(sample_swap_order()),
                 remaining_ms: 119_000,
                 origin: ProposalOrigin::Agent,
+                // Non-default reason + non-zero timestamp exercise the two new fields end-to-end.
+                reason: BreachedLimit::PerTxCap,
+                timestamp_ms: 1_720_000_000_000,
             },
             PendingRecord {
                 request_id: B256::repeat_byte(0x02),
@@ -531,6 +534,8 @@ mod roundtrip_tests {
                 payload: PendingPayloadView::Tx(sample_intent(IntentKind::Send)),
                 remaining_ms: 0,
                 origin: ProposalOrigin::App,
+                reason: BreachedLimit::None,
+                timestamp_ms: 0,
             },
             PendingRecord {
                 request_id: B256::repeat_byte(0x03),
@@ -538,6 +543,8 @@ mod roundtrip_tests {
                 payload: PendingPayloadView::Message(sample_message()),
                 remaining_ms: 60_000,
                 origin: ProposalOrigin::Agent,
+                reason: BreachedLimit::DailyCap,
+                timestamp_ms: 1_720_000_060_000,
             },
         ]));
     }
@@ -656,6 +663,8 @@ mod roundtrip_tests {
             origin: ProposalOrigin::Dapp {
                 origin: "https://app.example.org".into(),
             },
+            reason: BreachedLimit::OffAllowlist,
+            timestamp_ms: 1_720_000_123_000,
         });
         roundtrip(&ActivityRecord {
             request_id: B256::repeat_byte(0x04),
@@ -706,6 +715,8 @@ mod roundtrip_tests {
             payload: PendingPayloadView::Order(sample_swap_order()),
             remaining_ms: 60_000,
             origin: ProposalOrigin::Agent,
+            reason: BreachedLimit::PerTxCap,
+            timestamp_ms: 1_720_000_200_000,
         });
         roundtrip(&PendingRecord {
             request_id: B256::repeat_byte(0x02),
@@ -719,6 +730,9 @@ mod roundtrip_tests {
             // u64::MAX exercises the wire's full width for the new field.
             remaining_ms: u64::MAX,
             origin: ProposalOrigin::App,
+            // u64::MAX exercises the timestamp field's full wire width too.
+            reason: BreachedLimit::None,
+            timestamp_ms: u64::MAX,
         });
     }
 

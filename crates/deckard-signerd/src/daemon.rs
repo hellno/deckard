@@ -1522,6 +1522,11 @@ impl Daemon {
                     payload: payload_view(&req.payload),
                     remaining_ms,
                     origin: req.origin.clone(),
+                    // Same sources `activity_feed` uses for `ActivityRecord.reason`/`.timestamp_ms`,
+                    // so the uncapped approval inbox (#216) can render the over-cap chip + timestamp
+                    // without re-fetching the (200-capped) feed.
+                    reason: req.breached,
+                    timestamp_ms: req.created_ms,
                 }
             })
             .collect()
@@ -2013,5 +2018,193 @@ mod stop_selection_tests {
             req(PendingPayload::Tx(intent), true, false),
         );
         assert!(select_orders_to_cancel(&reqs, now).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod pending_list_uncap_tests {
+    //! Regression guard for issue #216: the app's "needs you" inbox now reads the UNCAPPED
+    //! `pending_list()` instead of the 200-capped `activity_feed()`. This pins the property that
+    //! fix depends on — a waiting (`Pending`) row must survive `pending_list()` even when the
+    //! request table holds more than [`ACTIVITY_FEED_CAP`] records. If a future change ever added
+    //! the feed's `take(ACTIVITY_FEED_CAP)` (newest-first) here, the oldest waiting row would be
+    //! dropped and this test would fail — the inbox must never be capped. Drives a REAL `Daemon`
+    //! (route (a)) so it exercises the actual `pending_list` mapping — including the `expire_stale`
+    //! call it runs first — no socket, no chain, no async.
+    use super::*;
+
+    /// A hermetic, `Locked` daemon. `config_dir` points at a temp path that holds no
+    /// `policy.json` / spend counter, so both loaders fall back to their safe defaults; `Daemon::new`
+    /// never writes, and neither does `pending_list`/`expire_stale`, so nothing touches disk beyond
+    /// two absent-file reads. `chain_id` is anvil's (a testnet/dev id) but is irrelevant here — the
+    /// inbox mapping never consults the guardrail.
+    fn test_daemon() -> Daemon {
+        let config_dir = std::env::temp_dir().join(format!(
+            "deckard-signerd-pending-list-uncap-test-{}",
+            std::process::id()
+        ));
+        let cfg = Config {
+            rpc_url: "http://127.0.0.1:8545".to_string(),
+            chain_id: 31_337,
+            config_dir,
+            socket_path: std::path::PathBuf::from("/tmp/deckard-signerd-pending-list-uncap.sock"),
+            autonomy_override: false,
+        };
+        Daemon::new(cfg)
+    }
+
+    /// A distinct [`RequestId`] per `n` (the intent is identical, so `request_id_for` would collide —
+    /// we key the map by a synthetic id instead).
+    fn id_for(n: u64) -> RequestId {
+        let mut bytes = [0u8; 32];
+        bytes[24..].copy_from_slice(&n.to_be_bytes());
+        B256::from(bytes)
+    }
+
+    fn tx_intent() -> Intent {
+        Intent {
+            chain_id: 31_337,
+            to: Address::ZERO,
+            token: None,
+            value: U256::ZERO,
+            calldata: Bytes::new(),
+            kind: IntentKind::ContractCall,
+        }
+    }
+
+    /// One record for the request table. `expires_at`/`broadcast` are the two knobs that decide
+    /// whether `expire_stale` (which `pending_list` runs first) touches it.
+    fn record(
+        seq: u64,
+        status: ApprovalStatus,
+        expires_at: Instant,
+        broadcast: Option<B256>,
+        breached: BreachedLimit,
+        created_ms: u64,
+    ) -> PendingReq {
+        PendingReq {
+            payload: PendingPayload::Tx(tx_intent()),
+            status,
+            expires_at,
+            broadcast,
+            signature: None,
+            approved: false,
+            origin: ProposalOrigin::App,
+            created_ms,
+            seq,
+            breached,
+            cancelled: false,
+            auto_allowed: false,
+        }
+    }
+
+    #[test]
+    fn pending_list_surfaces_low_seq_waiting_row_past_feed_cap() {
+        let mut daemon = test_daemon();
+        let future = Instant::now() + Duration::from_secs(3600);
+
+        // The waiting row gets the LOWEST seq (the OLDEST). A newest-first cap (like `activity_feed`)
+        // would drop exactly this one — so its survival is what proves the inbox is uncapped. Its
+        // `expires_at` is safely in the FUTURE so `expire_stale` does NOT flip it to `Expired`.
+        let waiting_id = id_for(0);
+        daemon.requests.insert(
+            waiting_id,
+            record(
+                0,
+                ApprovalStatus::Pending,
+                future,
+                None,
+                BreachedLimit::None,
+                0,
+            ),
+        );
+
+        // ACTIVITY_FEED_CAP + 5 higher-seq SETTLED rows: `Allowed` + already broadcast (executed).
+        // `broadcast.is_some()` keeps `expire_stale` from ever touching them (its guard is
+        // `broadcast.is_none()`), so `expires_at` is irrelevant for them and total records =
+        // 206 > 200, all higher-seq than the waiting row.
+        let settled = ACTIVITY_FEED_CAP + 5;
+        for n in 1..=settled as u64 {
+            daemon.requests.insert(
+                id_for(n),
+                record(
+                    n,
+                    ApprovalStatus::Allowed,
+                    future,
+                    Some(B256::repeat_byte(0xbb)),
+                    BreachedLimit::None,
+                    0,
+                ),
+            );
+        }
+
+        let list = daemon.pending_list();
+
+        // Uncapped: every record comes back, not just the newest ACTIVITY_FEED_CAP.
+        assert_eq!(
+            list.len(),
+            settled + 1,
+            "issue #216: pending_list must return ALL {} records uncapped, got {}",
+            settled + 1,
+            list.len()
+        );
+        assert!(
+            list.len() > ACTIVITY_FEED_CAP,
+            "test must exercise the >{ACTIVITY_FEED_CAP} (past-cap) regime"
+        );
+
+        match list.iter().find(|r| r.request_id == waiting_id) {
+            Some(row) => {
+                assert!(
+                    matches!(row.status, ApprovalStatus::Pending),
+                    "the waiting row must still read as Pending (expire_stale must not mask it)"
+                );
+                assert!(
+                    row.remaining_ms > 0,
+                    "the waiting row's approval TTL is in the future — remaining_ms must be > 0"
+                );
+            }
+            None => panic!(
+                "issue #216: the lowest-seq waiting row was dropped from pending_list — \
+                 the approval inbox must NEVER be capped like the activity feed"
+            ),
+        }
+    }
+
+    #[test]
+    fn pending_list_carries_reason_and_timestamp() {
+        let mut daemon = test_daemon();
+        let future = Instant::now() + Duration::from_secs(3600);
+
+        // A breached, still-pending over-cap card: its `breached`/`created_ms` must round-trip into
+        // the new `PendingRecord.reason`/`.timestamp_ms` fields (mirrors `activity_feed`).
+        let id = id_for(42);
+        daemon.requests.insert(
+            id,
+            record(
+                7,
+                ApprovalStatus::Pending,
+                future,
+                None,
+                BreachedLimit::PerTxCap,
+                123,
+            ),
+        );
+
+        let list = daemon.pending_list();
+        match list.iter().find(|r| r.request_id == id) {
+            Some(row) => {
+                assert_eq!(
+                    row.reason,
+                    BreachedLimit::PerTxCap,
+                    "pending_list must surface the breached fence for the over-cap chip"
+                );
+                assert_eq!(
+                    row.timestamp_ms, 123,
+                    "pending_list must carry the propose-time timestamp"
+                );
+            }
+            None => panic!("the breached pending record must appear in pending_list"),
+        }
     }
 }

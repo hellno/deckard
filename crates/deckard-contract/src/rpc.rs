@@ -264,6 +264,14 @@ pub struct PendingRecord {
     pub remaining_ms: u64,
     /// Who proposed this — drives the agent band + Activity two-actor chain.
     pub origin: ProposalOrigin,
+    /// The breached fence for this proposal (display-only; `None` for a within-cap card).
+    /// Mirrors `ActivityRecord::reason` so the approval INBOX can render the over-cap chip
+    /// without re-fetching the feed. `#[serde(default)]` keeps an older producer decoding.
+    #[serde(default)]
+    pub reason: BreachedLimit,
+    /// Unix epoch **millis**, daemon-stamped at propose time (mirrors `ActivityRecord::timestamp_ms`).
+    #[serde(default)]
+    pub timestamp_ms: u64,
 }
 
 /// Rich per-request status for the agent's poll loop (the `deckard_status` MCP tool).

@@ -8,11 +8,14 @@
 //! allowed within-cap shield executes immediately and never enters the queue, so the daemon must
 //! record what the agent *did*").
 //!
-//! **Inbox + log split.** Still-proposed rows (the things waiting on you) live ONLY in the NEEDS
-//! YOU band — the inbox you triage — and never duplicate into the log. Everything settled (auto-
-//! allowed, approved, denied, executed) falls to the day-grouped LOG. A pending row is selectable
-//! and inline-approvable (select + Enter opens the clear-signing review, ⌘Enter approves, `x`
-//! denies, all scoped to this surface's `key_context("Activity")`).
+//! **Inbox + log split (#216).** The two halves read TWO sources. The NEEDS YOU band — the inbox
+//! you triage — reads the daemon's **uncapped `PendingList`** (`Shell::inbox`), so an old still-
+//! `Pending` approval shed from the 200-capped feed stays counted, selectable and approvable here.
+//! The settled LOG (auto-allowed, approved, denied, executed) reads the capped `ActivityFeed`
+//! (`Shell::activity`), correctly bounded for a log; `activity_settled` filters the feed's own
+//! still-proposed rows out so a pending row never duplicates across the two. A pending row is
+//! selectable and inline-approvable (select + Enter opens the clear-signing review, ⌘Enter
+//! approves, `x` denies, all scoped to this surface's `key_context("Activity")`).
 //!
 //! **Two-signal fidelity (DESIGN §The actor model).** State is a small circular **glyph** that
 //! carries the color (green check = approved/executed, red x = denied/revoked); the outcome
@@ -29,9 +32,10 @@
 //! daily, never a hardcoded cite). A header STOP control is the always-reachable panic brake.
 //!
 //! Render is `&self`; mutation flows through the `cx.listener` closures (open review / approve /
-//! deny / STOP arm+confirm). The surface reads `self.activity`, `self.activity_selected`,
-//! `self.activity_reviewing`, `self.activity_loading`, `self.activity_error`,
-//! `self.activity_stop_arming`, `self.activity_stopped`, and `self.mask`.
+//! deny / STOP arm+confirm). The surface reads `self.inbox` (the NEEDS YOU source), `self.activity`
+//! (the settled LOG source), `self.activity_selected`, `self.activity_reviewing`,
+//! `self.activity_loading`, `self.activity_error`, `self.activity_stop_arming`,
+//! `self.activity_stopped`, and `self.mask`.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -48,9 +52,9 @@ use gpui_component::{
 };
 
 use deckard_contract::{
-    ActivityLifecycle, ActivityRecord, ApprovalRisk, BreachedLimit, Intent, IntentKind,
-    MessageSigningRisk, PendingPayloadView, ProposalOrigin, RequestId, SignMessage,
-    SignMessageKind,
+    ActivityLifecycle, ActivityRecord, ApprovalRisk, ApprovalStatus, BreachedLimit, Intent,
+    IntentKind, MessageSigningRisk, PendingPayloadView, PendingRecord, ProposalOrigin, RequestId,
+    SignMessage, SignMessageKind,
 };
 
 use crate::money::money;
@@ -287,10 +291,17 @@ fn is_proposed(record: &ActivityRecord) -> bool {
     matches!(record.lifecycle, ActivityLifecycle::Proposed)
 }
 
-/// **The approvable subset** of the feed (the NEEDS YOU inbox), in feed (newest-first) order.
-/// `activity_selected` indexes into this; only these rows are selectable/approvable.
-pub(crate) fn activity_pending(records: &[ActivityRecord]) -> Vec<&ActivityRecord> {
-    records.iter().filter(|r| is_proposed(r)).collect()
+/// **The approvable inbox** (the NEEDS YOU band), in `PendingList` order. Reads the daemon's
+/// UNCAPPED pending snapshot (`Shell::inbox`), so an old still-`Pending` approval shed from the
+/// 200-capped feed stays reachable here (#216); `activity_selected` indexes into this, and only
+/// these rows are selectable/approvable. The daemon expires stale rows before listing, so a
+/// `Pending` here is genuinely inside its approval window — the same guarantee `pending_waiting`
+/// (the off-surface cue) relies on.
+pub(crate) fn inbox_pending(records: &[PendingRecord]) -> Vec<&PendingRecord> {
+    records
+        .iter()
+        .filter(|r| matches!(r.status, ApprovalStatus::Pending))
+        .collect()
 }
 
 /// The record id that **approve** (⌘Enter) is allowed to resolve: ONLY a still-pending,
@@ -303,14 +314,15 @@ pub(crate) fn activity_pending(records: &[ActivityRecord]) -> Vec<&ActivityRecor
 /// refuses, the fail-safe direction).
 pub(crate) fn approve_target(
     reviewing: Option<RequestId>,
-    pending: &[&ActivityRecord],
+    pending: &[&PendingRecord],
 ) -> Option<RequestId> {
     reviewing.filter(|id| pending.iter().any(|r| r.request_id == *id))
 }
 
 /// **The settled subset** of the feed (the LOG), in feed (newest-first) order — every row that is
-/// no longer waiting on a human (auto-allowed, approved, denied, executed). A proposed row lives
-/// ONLY in `activity_pending`, so the two subsets partition the feed with no duplication.
+/// no longer waiting on a human (auto-allowed, approved, denied, executed). This drops the feed's
+/// own still-proposed rows, which are triaged in the NEEDS YOU band from the uncapped inbox
+/// ([`inbox_pending`], #216) — so a proposed row is never duplicated into the log.
 fn activity_settled(records: &[ActivityRecord]) -> Vec<&ActivityRecord> {
     records.iter().filter(|r| !is_proposed(r)).collect()
 }
@@ -334,14 +346,14 @@ fn activity_feed_groups<'a>(
 }
 
 impl Shell {
-    /// The Activity surface: dispatch to the inline clear-signing review when one is open (and
-    /// its record is still proposed in the latest snapshot), otherwise the feed.
+    /// The Activity surface: dispatch to the inline clear-signing review when one is open (and its
+    /// record is still `Pending` in the latest INBOX snapshot, #216), otherwise the feed.
     pub fn render_activity(&self, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(reviewing) = self.activity_reviewing {
             if let Some(record) = self
-                .activity
+                .inbox
                 .iter()
-                .find(|r| r.request_id == reviewing && is_proposed(r))
+                .find(|r| r.request_id == reviewing && matches!(r.status, ApprovalStatus::Pending))
             {
                 return self.render_activity_review(record, cx).into_any_element();
             }
@@ -373,7 +385,7 @@ impl Shell {
                 format!("Can't reach the signer. {err}"),
             )
         } else {
-            let pending = activity_pending(&self.activity);
+            let pending = inbox_pending(&self.inbox);
             let settled = activity_settled(&self.activity);
             if pending.is_empty() && settled.is_empty() {
                 // Empty: one calm muted line, no illustration (DESIGN §Required states → Empty).
@@ -390,7 +402,7 @@ impl Shell {
                 // selectable/inline-approvable. Its row index IS the pending-subset index, so the
                 // selected lift and the keyboard `activity_selected` line up.
                 if !pending.is_empty() {
-                    list = list.child(self.activity_needs_you(&pending, selected_id, now, cx));
+                    list = list.child(self.activity_needs_you(&pending, selected_id, cx));
                 } else {
                     // Nothing waiting, but there is history: a quiet "you're caught up" line above
                     // the log (no Needs-you band).
@@ -489,21 +501,22 @@ impl Shell {
         }
     }
 
-    /// The **NEEDS YOU** band: the triage inbox of still-proposed rows over a quiet uppercase
-    /// header. The row index IS the pending-subset index, so the selected lift agrees with the
-    /// keyboard `activity_selected`; `selected_id` is the highlighted pending row.
+    /// The **NEEDS YOU** band: the triage inbox of still-`Pending` rows from the uncapped inbox
+    /// (#216) over a quiet uppercase header. The row index IS the inbox-subset index, so the
+    /// selected lift agrees with the keyboard `activity_selected`; `selected_id` is the highlighted
+    /// pending row. Renders each `&PendingRecord` via [`Self::activity_pending_row`] (never the
+    /// feed's `activity_row`, which is the LOG's settled-`ActivityRecord` renderer).
     fn activity_needs_you(
         &self,
-        rows: &[&ActivityRecord],
+        rows: &[&PendingRecord],
         selected_id: Option<RequestId>,
-        now: u64,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let amber = theme::amber(cx.theme().is_dark());
 
         let mut band = v_flex().w_full();
         for record in rows.iter() {
-            band = band.child(self.activity_row("needs-you-row", record, selected_id, now, cx));
+            band = band.child(self.activity_pending_row(record, selected_id, cx));
         }
 
         // The "Needs you" band label reads in AMBER — the human-attention signal (DESIGN §the
@@ -520,6 +533,172 @@ impl Shell {
                     .child(gpui::SharedString::from("NEEDS YOU")),
             )
             .child(band)
+    }
+
+    /// One **NEEDS YOU** inbox row — a still-`Pending` request from the uncapped inbox (#216),
+    /// rendered as the proposed two-actor chain: the actor mark + subject + payload summary, the
+    /// "→ You waiting" human link (for an agent/dapp request), then the trailing over-cap cite
+    /// chip (the ACTUAL breached fence, never hardcoded) with the `⌘⏎ approve · x deny` hint on the
+    /// SELECTED row plus a hover-only "Review →" for the mouse. A pending row is ALWAYS the waiting
+    /// state, so it reads only `.payload`/`.origin`/`.reason` — never a lifecycle/tx_hash/auto-
+    /// allowed (those live on the settled LOG's `ActivityRecord`). Click opens the inline review;
+    /// the keyboard j/k/Enter also reach it. This mirrors the proposed path of the log's
+    /// `activity_row` pixel-for-pixel, just sourced from a `&PendingRecord`.
+    fn activity_pending_row(
+        &self,
+        record: &PendingRecord,
+        selected_id: Option<RequestId>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme();
+        let fg = theme.foreground;
+        let muted = theme.muted_foreground;
+        let lift = theme.secondary;
+        let hairline = theme.border;
+        let is_dark = theme.is_dark();
+        let agent = theme::agent(is_dark);
+        let agent_tint = theme::agent_tint(is_dark);
+        let amber = theme::amber(is_dark);
+
+        let is_agent = record.origin == ProposalOrigin::Agent;
+        // An agent OR a dapp (#198) initiated — the "→ You waiting" human link applies to both:
+        // when a card is raised, YOU are the second actor in the chain regardless of who asked.
+        let third_party = !matches!(record.origin, ProposalOrigin::App);
+        let agent_handle = self.agent_handle();
+        let selected = selected_id == Some(record.request_id);
+        let summary = payload_summary(&record.payload, self.mask);
+
+        // The lead glyph: the cyan agent mark (handle-seeded) for an agent, a neutral identity
+        // square for an app action — both static.
+        let lead = if is_agent {
+            agent_mark(
+                &agent_handle,
+                crate::tokens::MARK_MD,
+                crate::tokens::RADIUS_ROW,
+                agent,
+                agent_tint,
+            )
+        } else {
+            div()
+                .size(crate::tokens::MARK_MD)
+                .rounded(crate::tokens::RADIUS_ROW)
+                .bg(theme::identity_square(is_dark))
+                .into_any_element()
+        };
+
+        let mut chain = h_flex()
+            .items_center()
+            .gap_2p5()
+            .min_w_0()
+            .flex_1()
+            .child(lead)
+            .child(
+                // A dapp subject is a verbatim origin string (#198) and can be long — let it
+                // shrink + ellipsize so it can never push the trailing rail off the pane.
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_sm()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(fg)
+                    .child(origin_subject(&record.origin, &agent_handle).to_string()),
+            )
+            .child(div().flex_shrink_0().text_sm().text_color(muted).child("·"))
+            // The verb + object grows and clamps: it takes the flex space and ellipsizes so a long
+            // summary can never push the trailing rail off the pane.
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .truncate()
+                    .text_sm()
+                    .text_color(fg)
+                    .child(summary),
+            );
+
+        // A pending row is by definition waiting on you, so a third-party request always shows the
+        // "→ You waiting" link (an App-origin pending request stays neutral — no human-link claim).
+        if third_party {
+            chain = chain
+                .child(div().flex_shrink_0().text_sm().text_color(muted).child("→"))
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(fg)
+                        .child("You"),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_sm()
+                        .text_color(muted)
+                        .child("waiting"),
+                );
+        }
+
+        // The trailing outcome cluster: the amber breached-fence cite (the real cap, never
+        // hardcoded) + the `⌘⏎ · x` hint on the SELECTED row (the others stay quiet), matching the
+        // log's `activity_outcome` Proposed arm exactly.
+        let cite = cite_phrase(record.reason).unwrap_or("held for approval");
+        let mut outcome = h_flex().items_center().gap_2p5().flex_shrink_0().child(
+            h_flex()
+                .items_center()
+                .gap_1()
+                .child(Icon::new(IconName::TriangleAlert).text_color(amber).small())
+                .child(div().text_xs().text_color(fg).child(cite)),
+        );
+        if selected {
+            outcome = outcome.child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child("⌘⏎ approve · x deny"),
+            );
+        }
+
+        // The trailing side: the outcome cluster, plus a hover-revealed "Review →" so a MOUSE user
+        // discovers the review card (the keyboard path is unchanged). Key the row element id +
+        // hover group on the request_id (unique), so rows never collide.
+        let group = format!("needs-you-row-{:x}", record.request_id);
+        let trailing = h_flex()
+            .items_center()
+            .gap_3()
+            .flex_shrink_0()
+            .child(outcome)
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .opacity(0.0)
+                    .group_hover(group.clone(), |s| s.opacity(1.0))
+                    .child("Review →"),
+            );
+
+        // Editorial row: hairline-separated and dense (DESIGN §Visual language). A click opens its
+        // inline review (the queue's keyboard-first j/k/Enter also reach it); the selected row lifts
+        // with a subtle fill.
+        let id = record.request_id;
+        let mut row = h_flex()
+            .id(gpui::SharedString::from(group.clone()))
+            .group(group)
+            .w_full()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .px_1()
+            .py_2p5()
+            .border_b_1()
+            .border_color(hairline)
+            .child(chain)
+            .child(trailing)
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| this.review_activity_row(id, cx)));
+        if selected {
+            row = row.bg(lift).rounded(crate::tokens::RADIUS_ROW);
+        }
+        row
     }
 
     /// One day-band of the settled LOG: a quiet uppercase header over its dense (passive) rows.
@@ -837,7 +1016,7 @@ impl Shell {
         }
     }
 
-    /// The clear-signing review for a single proposed feed row — the ONE shared Review (DESIGN
+    /// The clear-signing review for a single still-`Pending` inbox row (#216) — the ONE shared Review (DESIGN
     /// §Clear-signing), NOT a divergent boxed card. Only the request-origin rail changes: an agent
     /// proposal shows the cyan `<handle> proposes`, a dapp message its neutral `<domain> requests`,
     /// otherwise `You are …`. A Tx renders the same transaction-as-hero (amount + full `To`) as the
@@ -849,7 +1028,7 @@ impl Shell {
     /// the still-pending record this card renders.
     pub fn render_activity_review(
         &self,
-        record: &ActivityRecord,
+        record: &PendingRecord,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
@@ -1010,7 +1189,7 @@ impl Shell {
     /// fence (the real cap from the record).
     fn activity_review_detail_rows(
         &self,
-        record: &ActivityRecord,
+        record: &PendingRecord,
         cx: &mut Context<Self>,
     ) -> Vec<gpui::AnyElement> {
         let theme = cx.theme();
@@ -1521,12 +1700,13 @@ fn activity_shell(inner: gpui::AnyElement) -> impl IntoElement {
 impl Shell {
     /// The Activity rail's title + body, contextual to what's in focus: the selected pending
     /// request's compact clear-signing, else the most-recent broadcast transaction's receipt, else a
-    /// quiet empty state. `activity_selected` indexes the pending subset ([`activity_pending`]), so a
-    /// highlighted row is always the one detailed — never "Nothing selected." while a row is selected.
+    /// quiet empty state. `activity_selected` indexes the uncapped inbox subset ([`inbox_pending`],
+    /// #216), so a highlighted row is always the one detailed — never "Nothing selected." while a
+    /// row is selected, and never a phantom miss for a request shed from the 200-capped feed.
     pub(crate) fn activity_rail(&self, cx: &mut Context<Self>) -> (&'static str, AnyElement) {
         let theme = cx.theme();
         let handle = self.agent_handle();
-        let pending = activity_pending(&self.activity);
+        let pending = inbox_pending(&self.inbox);
         // The rail matches the on-screen review: when one is open (`activity_reviewing`) and its
         // record is still pending, detail THAT request; otherwise the highlighted pending row. So an
         // open review of X never shows a different row's clear-signing beside it.
@@ -1584,9 +1764,10 @@ fn action_word(payload: &PendingPayloadView) -> &'static str {
 /// The selected pending request as **compact clear-signing** (DESIGN §The request-origin model): the
 /// origin header (agent = cyan, you = amber) + the verb/amount + the fence that's holding it + the
 /// irreversible caution. A read-only echo of the feed's review — the arm-delay confirm + resolve
-/// stay on the feed, so the rail can never blind-approve.
+/// stay on the feed, so the rail can never blind-approve. Reads a `&PendingRecord` from the uncapped
+/// inbox (#216): only `.origin`/`.payload`/`.reason`, all present on a pending row.
 fn request_rail_body(
-    rec: &ActivityRecord,
+    rec: &PendingRecord,
     agent_handle: &str,
     mask: bool,
     theme: &Theme,
@@ -1838,6 +2019,20 @@ mod tests {
         })
     }
 
+    /// An inbox `PendingRecord` (the NEEDS YOU source, #216) — the sibling of `record` for the
+    /// approvable-subset tests. A pending row carries no lifecycle/tx_hash/auto_allowed.
+    fn pending_rec(id: u8, status: ApprovalStatus) -> PendingRecord {
+        PendingRecord {
+            request_id: B256::repeat_byte(id),
+            status,
+            payload: tx_payload(),
+            remaining_ms: 90_000,
+            origin: ProposalOrigin::Agent,
+            reason: BreachedLimit::None,
+            timestamp_ms: 1_700_000_000_000,
+        }
+    }
+
     /// #198 trust invariant: a Dapp-origin Tx renders the origin string VERBATIM on the review
     /// rail — never the "You are sending" treatment, and no prettifying (the bridge's literal
     /// `unknown-origin` fallback reads as exactly that).
@@ -1962,31 +2157,25 @@ mod tests {
     }
 
     #[test]
-    fn activity_pending_keeps_only_proposed() {
+    fn inbox_pending_keeps_only_pending() {
+        // The NEEDS YOU band reads the uncapped inbox (#216): only still-`Pending` rows are
+        // approvable; an `Allowed`/`Denied` row has left the human's hands and drops out.
         let records = vec![
-            record(
-                0x01,
-                ActivityLifecycle::Proposed,
-                BreachedLimit::PerTxCap,
-                false,
-            ),
-            record(0x02, ActivityLifecycle::Executed, BreachedLimit::None, true),
-            record(
+            pending_rec(0x01, ApprovalStatus::Pending),
+            pending_rec(0x02, ApprovalStatus::Allowed),
+            pending_rec(
                 0x03,
-                ActivityLifecycle::Decided { approved: true },
-                BreachedLimit::None,
-                true,
+                ApprovalStatus::Denied {
+                    reason: "user_denied".into(),
+                },
             ),
-            record(
-                0x04,
-                ActivityLifecycle::Proposed,
-                BreachedLimit::DailyCap,
-                false,
-            ),
+            pending_rec(0x04, ApprovalStatus::Pending),
         ];
-        let pending = activity_pending(&records);
-        assert_eq!(pending.len(), 2, "only proposed rows are approvable");
-        assert!(pending.iter().all(|r| is_proposed(r)));
+        let inbox = inbox_pending(&records);
+        assert_eq!(inbox.len(), 2, "only still-Pending rows are approvable");
+        assert!(inbox
+            .iter()
+            .all(|r| matches!(r.status, ApprovalStatus::Pending)));
     }
 
     #[test]
@@ -2073,20 +2262,11 @@ mod tests {
 
     #[test]
     fn approve_target_never_falls_back_to_the_highlighted_row() {
-        // The no-blind-approve guarantee: approve may resolve ONLY a still-pending reviewed record.
-        let a = record(
-            0x0A,
-            ActivityLifecycle::Proposed,
-            BreachedLimit::PerTxCap,
-            false,
-        );
-        let b = record(
-            0x0B,
-            ActivityLifecycle::Proposed,
-            BreachedLimit::PerTxCap,
-            false,
-        );
-        let both: Vec<&ActivityRecord> = vec![&a, &b];
+        // The no-blind-approve guarantee: approve may resolve ONLY a still-Pending reviewed record.
+        // The subset is now the uncapped inbox (#216), but the invariant is verbatim.
+        let a = pending_rec(0x0A, ApprovalStatus::Pending);
+        let b = pending_rec(0x0B, ApprovalStatus::Pending);
+        let both: Vec<&PendingRecord> = vec![&a, &b];
 
         // Reviewing a still-pending row → resolve exactly it.
         assert_eq!(
@@ -2097,7 +2277,7 @@ mod tests {
         // Reviewing a row that has LEFT the pending set (settled/expired, or a stale click) → None.
         // It must NOT fall back to the other highlighted pending row B — that would blind-approve a
         // spend whose clear-signing card was never shown.
-        let only_b: Vec<&ActivityRecord> = vec![&b];
+        let only_b: Vec<&PendingRecord> = vec![&b];
         assert_eq!(
             approve_target(Some(a.request_id), &only_b),
             None,
@@ -2111,30 +2291,20 @@ mod tests {
     #[test]
     fn routed_agent_review_still_cannot_blind_approve_a_settled_record() {
         // #185 regression: the agent-approval now renders through the ONE shared Review, but the
-        // no-blind-approve guard is UNCHANGED — approve resolves ONLY a still-pending reviewed
+        // no-blind-approve guard is UNCHANGED — approve resolves ONLY a still-Pending reviewed
         // record. If the reviewed agent Tx settles under a background poll while its review is open,
-        // it leaves the pending set, so `approve_target` returns None and ⌘Enter re-opens a review
-        // rather than resolving blind. `record()` builds Agent-origin Tx records — exactly the
-        // payload now routed through the shared review.
+        // it leaves the inbox's Pending set, so `approve_target` returns None and ⌘Enter re-opens a
+        // review rather than resolving blind. `pending_rec()` builds Agent-origin Tx inbox records
+        // — exactly the payload now routed through the shared review (#216).
         let reviewed_id = B256::repeat_byte(0x0A);
         let other_id = B256::repeat_byte(0x0B);
-        // The feed after a poll settled the reviewed row: 0x0A still EXISTS but as a settled row,
-        // while a different row 0x0B is still pending.
-        let feed = vec![
-            record(
-                0x0A,
-                ActivityLifecycle::Decided { approved: true },
-                BreachedLimit::PerTxCap,
-                true,
-            ),
-            record(
-                0x0B,
-                ActivityLifecycle::Proposed,
-                BreachedLimit::DailyCap,
-                false,
-            ),
+        // The inbox after a poll settled the reviewed row: 0x0A still EXISTS but as an Allowed
+        // (settled) record that `inbox_pending` drops, while a different row 0x0B is still Pending.
+        let inbox = vec![
+            pending_rec(0x0A, ApprovalStatus::Allowed),
+            pending_rec(0x0B, ApprovalStatus::Pending),
         ];
-        let pending = activity_pending(&feed);
+        let pending = inbox_pending(&inbox);
         // Reviewing the now-settled 0x0A → resolve NOTHING, and never the still-pending 0x0B.
         assert_eq!(
             approve_target(Some(reviewed_id), &pending),
@@ -2210,8 +2380,10 @@ mod tests {
     }
 
     #[test]
-    fn pending_and_settled_partition_the_feed() {
-        // A proposed row appears ONLY in NEEDS YOU (pending); never duplicated into the LOG.
+    fn settled_excludes_proposed_from_the_log() {
+        // The feed (the LOG source) still RETAINS proposed rows daemon-side (capped at 200), so
+        // `activity_settled` must exclude them: a proposed row is triaged in the NEEDS YOU band,
+        // sourced from the UNCAPPED inbox (#216), and never duplicated into the day-grouped log.
         let records = vec![
             record(
                 0x01,
@@ -2227,17 +2399,12 @@ mod tests {
                 false,
             ),
         ];
-        let pending = activity_pending(&records);
         let settled = activity_settled(&records);
-        assert_eq!(pending.len(), 1, "only the proposed row needs you");
-        assert_eq!(settled.len(), 2, "the rest fall to the log");
-        // No request_id appears in both subsets.
-        for p in &pending {
-            assert!(
-                !settled.iter().any(|s| s.request_id == p.request_id),
-                "a pending row must never duplicate into the log"
-            );
-        }
+        assert_eq!(settled.len(), 2, "the proposed row is not in the log");
+        assert!(
+            settled.iter().all(|r| !is_proposed(r)),
+            "a proposed feed row must never fall into the settled log"
+        );
     }
 
     #[test]

@@ -205,10 +205,17 @@ pub struct Shell {
     // --- activity feed (#60: the see-and-stop ledger) ---
     /// The latest `ActivityFeed` snapshot — every tracked action (auto-allowed, pending, denied,
     /// executed), newest-first, with `tx_hash`/`timestamp_ms`/breached-cap. The Activity surface
-    /// renders this; refreshed by `refresh_activity` + the poller. It is the feed's sole source —
-    /// the still-proposed rows form the "NEEDS YOU" band (the inline triage queue), and the feed
-    /// also retains executed/auto-allowed rows the pending-only view would drop.
+    /// renders this as the settled LOG; refreshed by `refresh_activity` + the poller. The feed
+    /// retains executed/auto-allowed rows a pending-only view would drop — but it is capped at the
+    /// newest 200 rows daemon-side, so it is NO LONGER the source for the "NEEDS YOU" band (that is
+    /// the uncapped `inbox` below, #216); `activity_settled` filters the still-proposed rows out.
     pub activity: Vec<deckard_contract::ActivityRecord>,
+    /// The latest uncapped `PendingList` snapshot — the sibling of `activity`, fetched in the SAME
+    /// `refresh_activity` cycle. This is the SOLE source for the "NEEDS YOU" triage band (#216): the
+    /// still-`Pending` rows here form the inbox the operator approves/denies, and the on-Activity
+    /// `waiting_count` counts them. Uncapped, so an old approval shed from the 200-capped feed stays
+    /// counted, selectable, and approvable on the very surface built to triage it.
+    pub inbox: Vec<PendingRecord>,
     /// The highlighted feed row, 0-based into the APPROVABLE (still-proposed) subset of
     /// `activity` — clamped on every refresh so it never points past a now-shorter list. j/k move
     /// it; the feed renders all rows but only proposed ones are selectable/approvable.
@@ -700,6 +707,7 @@ impl Shell {
             mask,
             agent_policy: None,
             activity: Vec::new(),
+            inbox: Vec::new(),
             activity_selected: 0,
             activity_reviewing: None,
             activity_loading: false,
@@ -967,10 +975,10 @@ impl Shell {
         self.pending_poll_task = None;
         self.polled_pending = None;
         self.pending_poll_inflight = false;
-        // Supersede any in-flight `ActivityFeed` reply: without this, a fetch started just before
-        // the lock could land afterwards and re-install a dead session's feed snapshot into
-        // `self.activity` — which off-surface `waiting_count` falls back to while `polled_pending`
-        // is None, resurrecting the count this lock just cleared.
+        // Supersede any in-flight `refresh_activity` reply: without this, a fetch started just
+        // before the lock could land afterwards and re-install a dead session's snapshot into
+        // `self.activity` / `self.inbox` (#216) — and off-surface `waiting_count` falls back to the
+        // inbox while `polled_pending` is None, resurrecting the count this lock just cleared.
         self.activity_epoch = self.activity_epoch.wrapping_add(1);
         // Dropping the handle closes its channel → the sync worker thread exits.
         self.shielded = None;
@@ -996,14 +1004,16 @@ impl Shell {
         self.activity_stopped = false;
         self.activity_stop_arming = false;
         self.activity_reviewing = None;
-        // Drop the feed snapshot too (#200): off-Activity `waiting_count` falls back to this list
-        // when `polled_pending` is None (the window before a session's first background poll). If
-        // it survived the lock, re-unlocking a wallet that had pending rows last session would
-        // flash a phantom amber "N waiting for you" until the first poll lands. Cleared here, the
-        // fallback reads 0 (caught up) — the safe direction. This path never renders the feed (a
-        // plain lock returns to the unlock gate; the STOP feed goes through `stop_revoke_all`, not
-        // `lock`), so clearing it has no visible downside.
+        // Drop BOTH snapshots too (#200, #216): the LOG feed AND the uncapped inbox, which is now
+        // the source off-Activity `waiting_count` falls back to when `polled_pending` is None (the
+        // window before a session's first background poll). If the inbox survived the lock, re-
+        // unlocking a wallet that had pending rows last session would flash a phantom amber "N
+        // waiting for you" until the first poll lands. Cleared here, the fallback reads 0 (caught
+        // up) — the safe direction. This path never renders the feed (a plain lock returns to the
+        // unlock gate; the STOP feed goes through `stop_revoke_all`, not `lock`), so clearing has no
+        // visible downside.
         self.activity = Vec::new();
+        self.inbox = Vec::new();
         self.activity_selected = 0;
         self.auth = AuthStep::Unlock;
         self.palette_open = false;
@@ -2646,49 +2656,59 @@ impl Shell {
         self.start_activity_poller(cx);
     }
 
-    /// Fetch the latest `ActivityFeed` off the UI thread and fold it into `self.activity`,
-    /// epoch-guarded (a slow reply for a superseded fetch can't clobber a newer snapshot) and
-    /// clamping `activity_selected` to the new approvable-row count. This is the feed's sole
-    /// source — the "NEEDS YOU" band derives its rows from `activity`, never a separate list.
+    /// Fetch the settled `ActivityFeed` (the LOG) **and** the uncapped `PendingList` (the NEEDS YOU
+    /// inbox) off the UI thread in ONE cycle, folding them into `self.activity` and `self.inbox`
+    /// under the same epoch guard (a slow reply for a superseded fetch can't clobber a newer
+    /// snapshot) and clamping `activity_selected` to the new approvable-row count. The two sources
+    /// split cleanly (#216): the LOG reads the 200-capped feed (a log is bounded, correctly), the
+    /// INBOX reads the uncapped pending list — so an old still-`Pending` approval shed from the feed
+    /// stays counted, selectable, and approvable on the very surface built to triage it.
     pub fn refresh_activity(&mut self, cx: &mut Context<Self>) {
         self.activity_epoch = self.activity_epoch.wrapping_add(1);
         let epoch = self.activity_epoch;
         self.activity_loading = true;
         cx.notify();
         let client = self.signer.client();
-        let task = cx.background_spawn(async move { client.activity_feed_blocking() });
+        // One background round-trip fetches BOTH the settled feed (LOG) and the uncapped pending
+        // list (INBOX) — sequential on the same client — so the band + log always install together.
+        let task = cx.background_spawn(async move {
+            let feed = client.activity_feed_blocking();
+            let inbox = client.pending_list_blocking();
+            (feed, inbox)
+        });
         cx.spawn(async move |this, cx| {
-            let res = task.await;
+            let (feed_res, inbox_res) = task.await;
             this.update(cx, |this, cx| {
                 if this.activity_epoch != epoch {
                     return;
                 }
                 this.activity_loading = false;
-                match res {
-                    Ok(records) => {
+                match (feed_res, inbox_res) {
+                    (Ok(feed_records), Ok(pending_records)) => {
                         this.activity_error = None;
                         // Preserve the highlight by request_id, NOT by raw index. The ~2s poller
-                        // can insert/remove proposed rows between renders, so a stale numeric index
+                        // can insert/remove pending rows between renders, so a stale numeric index
                         // could point at a DIFFERENT record than the operator sees selected — and
                         // `x`/deny + the palette deny-selected resolve the SELECTED record. Capture
-                        // the id from the old snapshot, then re-key to it in the new pending subset;
-                        // if it's gone (settled/expired), clamp. This closes a wrong-deny race.
-                        let selected_id = crate::activity_view::activity_pending(&this.activity)
+                        // the id from the OLD inbox snapshot, then re-key to it in the new pending
+                        // subset; if it's gone (settled/expired), clamp. This closes a wrong-deny
+                        // race. The selected/reviewed row lives in the INBOX now (#216), so the
+                        // reconcile keys against `inbox_pending(&self.inbox)`, not the feed.
+                        let selected_id = crate::activity_view::inbox_pending(&this.inbox)
                             .get(this.activity_selected)
                             .map(|r| r.request_id);
-                        this.activity = records;
-                        let pending = crate::activity_view::activity_pending(&this.activity);
-                        // NOTE (#200): deliberately do NOT reconcile `polled_pending` from this
-                        // feed. The daemon caps `ActivityFeed` at the newest 200 rows while
-                        // `PendingList` is uncapped, so a pending row older than 200 newer records
-                        // is absent here — writing `pending.len()` could undercount to 0 and hide a
-                        // real waiting request (a wrong-direction cue). `polled_pending` therefore
-                        // has ONE source: the uncapped `PendingList` in `kick_pending_refresh`.
-                        // Freshness on leaving the feed (so an approve/deny here doesn't leave a
-                        // stale home cue) comes from a `kick_pending_refresh` fired on the
-                        // Activity→elsewhere nav transition (see `open`/`select`), not from here.
-                        // On the Activity surface `waiting_count` reads this same feed count, so the
-                        // badge still equals the NEEDS YOU band beside it (both inherit the cap).
+                        this.activity = feed_records;
+                        this.inbox = pending_records;
+                        let pending = crate::activity_view::inbox_pending(&this.inbox);
+                        // NOTE (#216): the NEEDS YOU band, the selection, and the on-Activity
+                        // `waiting_count` input all read the UNCAPPED inbox — so an old still-
+                        // `Pending` approval shed from the 200-capped feed stays counted AND
+                        // approvable on this surface. The feed is the LOG only (settled rows). The
+                        // off-surface cue keeps its own honest source: `polled_pending` is still
+                        // sourced ONLY from the uncapped `PendingList` in `kick_pending_refresh`,
+                        // never reconciled from this feed. Freshness on leaving the feed (so an
+                        // approve/deny here doesn't leave a stale home cue) comes from a
+                        // `kick_pending_refresh` fired on the Activity→elsewhere nav transition.
                         this.activity_selected = selected_id
                             .and_then(|id| pending.iter().position(|r| r.request_id == id))
                             .unwrap_or_else(|| {
@@ -2707,7 +2727,9 @@ impl Shell {
                             }
                         }
                     }
-                    Err(e) => this.activity_error = Some(short_err(e)),
+                    // Either half failing fails the surface loud (never a silent empty inbox/log);
+                    // the previous `activity`/`inbox` snapshots are left intact for continuity.
+                    (Err(e), _) | (_, Err(e)) => this.activity_error = Some(short_err(e)),
                 }
                 cx.notify();
             })
@@ -2719,7 +2741,7 @@ impl Shell {
     /// Move the feed highlight down one approvable (still-proposed) row, clamped (no wrap, no
     /// panic on an all-terminal feed). j / ↓ route here.
     pub fn activity_select_next(&mut self) {
-        let len = crate::activity_view::activity_pending(&self.activity).len();
+        let len = crate::activity_view::inbox_pending(&self.inbox).len();
         if len > 0 {
             self.activity_selected = (self.activity_selected + 1).min(len - 1);
         }
@@ -2733,7 +2755,7 @@ impl Shell {
     /// Open the inline clear-signing review for the highlighted approvable feed row. No-op when
     /// there are no proposed rows / the selection points past them (guarded via `.get`).
     pub fn open_selected_activity_review(&mut self, cx: &mut Context<Self>) {
-        let pending = crate::activity_view::activity_pending(&self.activity);
+        let pending = crate::activity_view::inbox_pending(&self.inbox);
         if let Some(rec) = pending.get(self.activity_selected) {
             self.activity_reviewing = Some(rec.request_id);
             cx.notify();
@@ -2750,7 +2772,7 @@ impl Shell {
         request_id: deckard_contract::RequestId,
         cx: &mut Context<Self>,
     ) {
-        if let Some(i) = crate::activity_view::activity_pending(&self.activity)
+        if let Some(i) = crate::activity_view::inbox_pending(&self.inbox)
             .iter()
             .position(|r| r.request_id == request_id)
         {
@@ -2775,7 +2797,7 @@ impl Shell {
     /// came to be stale. The agent executes its own write once the record flips to `Allowed` — the
     /// app never broadcasts.
     pub fn approve_activity(&mut self, cx: &mut Context<Self>) {
-        let pending = crate::activity_view::activity_pending(&self.activity);
+        let pending = crate::activity_view::inbox_pending(&self.inbox);
         match crate::activity_view::approve_target(self.activity_reviewing, &pending) {
             // The reviewed record is still pending → its clear-signing card is exactly what the
             // render shows (it keys the same id), so approving it is never blind.
@@ -2793,7 +2815,7 @@ impl Shell {
     /// proposed row. Unlike approve, deny is one-key by design (it only REFUSES — the fail-safe
     /// direction), so it MAY fall back to the highlighted, on-screen row.
     pub fn deny_activity(&mut self, cx: &mut Context<Self>) {
-        let pending = crate::activity_view::activity_pending(&self.activity);
+        let pending = crate::activity_view::inbox_pending(&self.inbox);
         let target = self
             .activity_reviewing
             .filter(|id| pending.iter().any(|r| r.request_id == *id))
@@ -2967,9 +2989,10 @@ impl Shell {
     /// Home/Settings/a wallet view can't silently expire unseen (approval TTL ~120s). Mirrors
     /// `start_balance_poll`: stored in `pending_poll_task` (dropped on lock cancels it) and
     /// epoch-fenced against a fast re-unlock. Each tick is decided by the pure
-    /// [`pending_poll_tick`]: while Activity is open its own ~2s feed poller already refreshes
-    /// (and `refresh_activity` reconciles `polled_pending`), so this loop skips the wire call
-    /// there — the two pollers never double-fetch.
+    /// [`pending_poll_tick`]: while Activity is open its own ~2s poller (`refresh_activity`)
+    /// already refreshes the uncapped `inbox` the on-Activity count reads, so this loop skips the
+    /// wire call there — the two pollers never double-fetch. (`refresh_activity` deliberately does
+    /// NOT write `polled_pending`; that field has one source — this loop.)
     fn start_pending_poll(&mut self, cx: &mut Context<Self>) {
         let epoch = self.auth_epoch;
         // Fetch once immediately: a request parked before this unlock should light the cue the
@@ -3048,15 +3071,16 @@ impl Shell {
     }
 
     /// The "waiting on you" count behind the everywhere-cues — the home waiting strip and the
-    /// sidebar Activity badge (#200). Dispatch is the pure [`waiting_count`] (unit-tested): on
-    /// the Activity surface the feed itself is the source, so the badge always equals the NEEDS
-    /// YOU band it sits beside; everywhere else the uncapped `PendingList` snapshot wins (the
-    /// feed only refreshes while Activity is open, so off-surface it can be stale in either
-    /// direction), falling back to the last feed snapshot until the first poll lands.
+    /// sidebar Activity badge (#200). Dispatch is the pure [`waiting_count`] (unit-tested): on the
+    /// Activity surface the UNCAPPED inbox is the source (#216), so the badge always equals the
+    /// NEEDS YOU band it sits beside AND never undercounts a request shed from the 200-capped feed;
+    /// everywhere else the uncapped `PendingList` snapshot wins (the inbox only refreshes while
+    /// Activity is open, so off-surface it can be stale in either direction), falling back to the
+    /// last inbox snapshot until the first poll lands.
     pub(crate) fn waiting_count(&self) -> usize {
         waiting_count(
             self.surface == Surface::Activity,
-            crate::activity_view::activity_pending(&self.activity).len(),
+            crate::activity_view::inbox_pending(&self.inbox).len(),
             self.polled_pending,
         )
     }
@@ -3574,11 +3598,12 @@ fn pending_waiting(records: &[PendingRecord]) -> usize {
 }
 
 /// Which source feeds the "waiting on you" cues (the home strip + the sidebar Activity badge).
-/// On the Activity surface the feed count wins — the badge sits beside the NEEDS YOU band and
-/// must equal it exactly (the ~2s feed poller keeps it fresh). Everywhere else the background
-/// `PendingList` snapshot wins — off-surface the feed is stale in either direction (missing a
-/// new arrival, or still showing a row that has since settled) — with the last feed snapshot as
-/// the fallback until the first poll lands.
+/// On the Activity surface the on-screen count wins — the caller now supplies the UNCAPPED inbox
+/// count (#216), so the badge sits beside the NEEDS YOU band, equals it exactly (the ~2s refresh
+/// keeps it fresh), and can't undercount a request shed from the 200-capped feed. Everywhere else
+/// the background `PendingList` snapshot wins — off-surface the inbox is stale in either direction
+/// (missing a new arrival, or still showing a row that has since settled) — with the last inbox
+/// snapshot (`feed_pending`) as the fallback until the first poll lands.
 fn waiting_count(on_activity: bool, feed_pending: usize, polled: Option<usize>) -> usize {
     if on_activity {
         feed_pending
@@ -3601,7 +3626,7 @@ fn should_kick_pending_on_nav(from: Surface, to: Surface) -> bool {
 mod pending_poll_tests {
     use super::*;
     use alloy_primitives::{Address, Bytes, B256, U256};
-    use deckard_contract::{IntentKind, PendingPayloadView, ProposalOrigin};
+    use deckard_contract::{BreachedLimit, IntentKind, PendingPayloadView, ProposalOrigin};
 
     fn rec(id: u8, status: ApprovalStatus) -> PendingRecord {
         PendingRecord {
@@ -3617,6 +3642,8 @@ mod pending_poll_tests {
             }),
             remaining_ms: 90_000,
             origin: ProposalOrigin::Agent,
+            reason: BreachedLimit::None,
+            timestamp_ms: 0,
         }
     }
 
@@ -3650,11 +3677,12 @@ mod pending_poll_tests {
         assert_eq!(pending_waiting(&[]), 0);
     }
 
-    /// On the Activity surface the badge must equal the NEEDS YOU band beside it — the feed
-    /// count wins even when the background snapshot disagrees (it can lag one interval), and
-    /// approving the last row hides the badge in the same refresh.
+    /// On the Activity surface the badge must equal the NEEDS YOU band beside it — the UNCAPPED
+    /// inbox count wins (#216) even when the background snapshot disagrees (it can lag one
+    /// interval), and approving the last row hides the badge in the same refresh. The first arg is
+    /// the inbox count now, so a request shed from the 200-capped feed can never undercount it.
     #[test]
-    fn badge_matches_feed_on_activity_surface() {
+    fn badge_matches_inbox_on_activity_surface() {
         assert_eq!(waiting_count(true, 2, Some(5)), 2);
         assert_eq!(waiting_count(true, 0, Some(3)), 0);
         assert_eq!(waiting_count(true, 1, None), 1);
