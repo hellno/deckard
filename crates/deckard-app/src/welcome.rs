@@ -676,7 +676,15 @@ impl Shell {
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(amber)
                         .child("Review →")
-                        .on_click(cx.listener(|this, _, _, cx| this.open(Surface::Activity, cx))),
+                        // Route through `open_activity` — NOT a raw surface flip. The raw flip
+                        // landed on a stale feed with the feed poller stopped, and (#200) the
+                        // background pending poll SKIPs while Activity is open — so the cue's own
+                        // CTA would bury the very request it announced, with ALL polling halted,
+                        // until it silently expired. `open_activity` refreshes + restarts the
+                        // feed poller, like every other path onto the feed (sidebar, ⌘⇧A, ⌘K).
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.open_activity(window, cx)),
+                        ),
                 )
                 .into_any_element()
         }

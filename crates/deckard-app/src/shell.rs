@@ -967,6 +967,10 @@ impl Shell {
         self.pending_poll_task = None;
         self.polled_pending = None;
         self.pending_poll_inflight = false;
+        // Supersede any in-flight `ActivityFeed` reply: without this, a fetch started just
+        // before the lock could land afterwards and re-install a dead session's feed snapshot
+        // AND its `polled_pending` reconcile — resurrecting the count this lock just cleared.
+        self.activity_epoch = self.activity_epoch.wrapping_add(1);
         // Dropping the handle closes its channel → the sync worker thread exits.
         self.shielded = None;
         self.railgun_address = None;
@@ -991,6 +995,15 @@ impl Shell {
         self.activity_stopped = false;
         self.activity_stop_arming = false;
         self.activity_reviewing = None;
+        // Drop the feed snapshot too (#200): off-Activity `waiting_count` falls back to this list
+        // when `polled_pending` is None (the window before a session's first background poll). If
+        // it survived the lock, re-unlocking a wallet that had pending rows last session would
+        // flash a phantom amber "N waiting for you" until the first poll lands. Cleared here, the
+        // fallback reads 0 (caught up) — the safe direction. This path never renders the feed (a
+        // plain lock returns to the unlock gate; the STOP feed goes through `stop_revoke_all`, not
+        // `lock`), so clearing it has no visible downside.
+        self.activity = Vec::new();
+        self.activity_selected = 0;
         self.auth = AuthStep::Unlock;
         self.palette_open = false;
         cx.notify();
@@ -2983,6 +2996,13 @@ impl Shell {
                     return;
                 }
                 this.pending_poll_inflight = false;
+                // While Activity is open the feed's own refresh reconciles `polled_pending` —
+                // a background reply that raced the surface switch carries an OLDER daemon
+                // snapshot (fetched pre-approve/deny), so writing it here could briefly revive
+                // a count the operator just settled. Drop it; the reconcile owns this state.
+                if this.surface == Surface::Activity {
+                    return;
+                }
                 if let Ok(records) = res {
                     let waiting = Some(pending_waiting(&records));
                     if this.polled_pending != waiting {
