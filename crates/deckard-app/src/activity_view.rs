@@ -62,11 +62,44 @@ use crate::widgets::{
 };
 
 /// The displayed subject for an action's origin: the agent's handle when an agent acted, "You"
-/// when the foreground app did (E2, #182 — one agent in demo scope, named via `Shell::agent_handle`).
-fn origin_subject(origin: ProposalOrigin, agent_handle: &str) -> &str {
+/// when the foreground app did (E2, #182 — one agent in demo scope, named via `Shell::agent_handle`),
+/// and the requesting site's origin string VERBATIM for a dapp (#198 — no prettifying, so the
+/// bridge's `unknown-origin` fallback reads as exactly that; a dapp never gets the "You" treatment).
+fn origin_subject<'a>(origin: &'a ProposalOrigin, agent_handle: &'a str) -> &'a str {
     match origin {
         ProposalOrigin::Agent => agent_handle,
         ProposalOrigin::App => "You",
+        ProposalOrigin::Dapp { origin } => origin,
+    }
+}
+
+/// Map a record's wire origin to the shared Review's origin-rail identity (pure — unit-tested).
+/// The #198 trust invariant: a `Dapp`-origin request NEVER renders as "You"; its origin string is
+/// shown verbatim. An App-origin MESSAGE still falls back to the payload's display-only
+/// `SignMessage.origin` (records from a pre-#198 bridge are tagged `App`); every other App-origin
+/// payload is a foreground action → You. Trust badge stays `None` at every call site — we have no
+/// site reputation (DESIGN: no speculative site-trust).
+fn review_origin<'a>(
+    origin: &'a ProposalOrigin,
+    payload: &'a PendingPayloadView,
+    agent_handle: &'a str,
+    wallet_name: &'a str,
+    verb: &'a str,
+) -> Origin<'a> {
+    match origin {
+        ProposalOrigin::Agent => Origin::Agent {
+            handle: agent_handle,
+        },
+        ProposalOrigin::Dapp { origin } => Origin::Dapp { domain: origin },
+        ProposalOrigin::App => match payload {
+            PendingPayloadView::Message(m) if !m.origin.is_empty() => {
+                Origin::Dapp { domain: &m.origin }
+            }
+            _ => Origin::You {
+                account: wallet_name,
+                verb,
+            },
+        },
     }
 }
 
@@ -550,6 +583,9 @@ impl Shell {
         let amber = theme::amber(is_dark);
 
         let is_agent = record.origin == ProposalOrigin::Agent;
+        // An agent OR a dapp (#198) initiated — the "→ You" human link applies to both: when a
+        // card was raised, YOU are the second actor in the chain regardless of who asked.
+        let third_party = !matches!(record.origin, ProposalOrigin::App);
         let agent_handle = self.agent_handle();
         let proposed = is_proposed(record);
         let selected = proposed && selected_id == Some(record.request_id);
@@ -587,12 +623,15 @@ impl Shell {
             .flex_1()
             .child(lead)
             .child(
+                // A dapp subject is a verbatim origin string (#198) and can be long — let it
+                // shrink + ellipsize so it can never push the trailing rail off the pane.
                 div()
-                    .flex_shrink_0()
+                    .min_w_0()
+                    .truncate()
                     .text_sm()
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(fg)
-                    .child(origin_subject(record.origin, &agent_handle).to_string()),
+                    .child(origin_subject(&record.origin, &agent_handle).to_string()),
             )
             .child(div().flex_shrink_0().text_sm().text_color(muted).child("·"))
             // The verb + object is the part that grows and clamps: it gets the flex space and
@@ -610,7 +649,7 @@ impl Shell {
 
         // The human only enters the chain when a human was actually needed (a card was raised).
         // An auto-allowed within-cap action has NO "→ You" — the daemon decided it hands-free.
-        if is_agent && needed_human {
+        if third_party && needed_human {
             let human_verb = match record.lifecycle {
                 ActivityLifecycle::Proposed => "waiting",
                 ActivityLifecycle::Decided { approved: true } | ActivityLifecycle::Executed => {
@@ -827,25 +866,15 @@ impl Shell {
         let wallet_name = self.wallet_name();
         let verb = you_verb(&record.payload);
 
-        // The request-origin rail — the ONLY thing that changes across origins. An agent proposal
-        // is the cyan handle; an App-origin dapp MESSAGE carries its domain in the payload, so it
-        // gets the neutral dapp rail (the one dapp attribution available without the deferred
-        // tx-origin wire plumbing, ADR-0001); anything else is You. Trust badge is `None` — we
-        // don't have site reputation (DESIGN: no speculative site-trust).
-        let origin = match record.origin {
-            ProposalOrigin::Agent => crate::widgets::Origin::Agent {
-                handle: &agent_handle,
-            },
-            ProposalOrigin::App => match &record.payload {
-                PendingPayloadView::Message(m) if !m.origin.is_empty() => {
-                    crate::widgets::Origin::Dapp { domain: &m.origin }
-                }
-                _ => crate::widgets::Origin::You {
-                    account: &wallet_name,
-                    verb,
-                },
-            },
-        };
+        // The request-origin rail — the ONLY thing that changes across origins (#198: the wire
+        // now carries the dapp origin for transactions too, so the mapper is pure + unit-tested).
+        let origin = review_origin(
+            &record.origin,
+            &record.payload,
+            &agent_handle,
+            &wallet_name,
+            verb,
+        );
         let origin_rail = crate::widgets::origin_header(origin, None, theme);
         // `theme` is not borrowed past this point — the `self.*(cx)` calls below re-borrow it.
 
@@ -1293,7 +1322,10 @@ fn human_acted(record: &ActivityRecord) -> bool {
 /// (`reason == None`) yet still required a human, so it must read "you approved", not
 /// "auto-approved within cap".
 fn settled_label(record: &ActivityRecord) -> &'static str {
-    let is_agent = record.origin == ProposalOrigin::Agent;
+    // An agent OR a dapp asked (#198) — someone other than you initiated, so the settled copy
+    // must say what happened to THEIR request ("you approved" / "auto-approved within cap"),
+    // never the first-person "sent" of your own foreground action.
+    let third_party = !matches!(record.origin, ProposalOrigin::App);
     match record.lifecycle {
         ActivityLifecycle::Decided { approved: false } => "not approved",
         // The approval window lapsed — nobody acted. Read it as such (not "not approved", which
@@ -1301,12 +1333,12 @@ fn settled_label(record: &ActivityRecord) -> &'static str {
         ActivityLifecycle::Expired => "expired",
         ActivityLifecycle::Decided { approved: true } | ActivityLifecycle::Executed => {
             if record.auto_allowed {
-                if is_agent {
+                if third_party {
                     "auto-approved within cap"
                 } else {
                     "sent"
                 }
-            } else if is_agent {
+            } else if third_party {
                 "you approved"
             } else {
                 "sent"
@@ -1566,12 +1598,12 @@ fn request_rail_body(
     let mono = theme.mono_font_family.clone();
     let amber = theme::amber(theme.is_dark());
 
-    // An agent proposes → the cyan origin header. An `App`-origin pending request is ambiguous —
-    // a foreground action OR a browser/dapp request the daemon always cards (`daemon.rs`) — and
-    // carries no domain on the record, so the rail stays NEUTRAL rather than claim a false amber
-    // human origin (two signal colors only). A precise dapp identity + trust badge lands when the
-    // bridge carries its origin (ADR-0001 / #44).
-    let header = match rec.origin {
+    // An agent proposes → the cyan origin header; a dapp request carries its origin on the wire
+    // (#198) → the neutral dapp identity, verbatim. An `App`-origin pending request stays
+    // ambiguous — a foreground action OR a browser request from a pre-#198 bridge — and carries
+    // no domain on the record, so that rail stays NEUTRAL rather than claim a false amber human
+    // origin (two signal colors only). A trust badge is still deferred (#48 — no site reputation).
+    let header = match &rec.origin {
         ProposalOrigin::Agent => origin_header(
             Origin::Agent {
                 handle: agent_handle,
@@ -1579,6 +1611,9 @@ fn request_rail_body(
             None,
             theme,
         ),
+        ProposalOrigin::Dapp { origin } => {
+            origin_header(Origin::Dapp { domain: origin }, None, theme)
+        }
         ProposalOrigin::App => neutral_request_header(theme),
     };
 
@@ -1652,7 +1687,7 @@ fn tx_rail_body(rec: &ActivityRecord, agent_handle: &str, mask: bool, theme: &Th
     let mono = theme.mono_font_family.clone();
     let is_dark = theme.is_dark();
 
-    let actor = origin_subject(rec.origin, agent_handle);
+    let actor = origin_subject(&rec.origin, agent_handle);
     let mark = if rec.origin == ProposalOrigin::Agent {
         agent_mark(
             actor,
@@ -1790,6 +1825,140 @@ mod tests {
             reason,
             auto_allowed,
         }
+    }
+
+    fn tx_payload() -> PendingPayloadView {
+        PendingPayloadView::Tx(Intent {
+            chain_id: 1,
+            to: Address::repeat_byte(0x22),
+            token: None,
+            value: U256::from(1_u64),
+            calldata: Bytes::new(),
+            kind: IntentKind::Send,
+        })
+    }
+
+    /// #198 trust invariant: a Dapp-origin Tx renders the origin string VERBATIM on the review
+    /// rail — never the "You are sending" treatment, and no prettifying (the bridge's literal
+    /// `unknown-origin` fallback reads as exactly that).
+    #[test]
+    fn review_origin_maps_a_dapp_tx_to_the_dapp_rail() {
+        let tx = tx_payload();
+        let dapp = ProposalOrigin::Dapp {
+            origin: "https://app.example.org".into(),
+        };
+        assert!(matches!(
+            review_origin(&dapp, &tx, "Kyoto", "Osaka", "sending"),
+            Origin::Dapp {
+                domain: "https://app.example.org"
+            }
+        ));
+        let unknown = ProposalOrigin::Dapp {
+            origin: "unknown-origin".into(),
+        };
+        assert!(matches!(
+            review_origin(&unknown, &tx, "Kyoto", "Osaka", "sending"),
+            Origin::Dapp {
+                domain: "unknown-origin"
+            }
+        ));
+    }
+
+    /// The other two origins are untouched by #198: a foreground App Tx is still You (amber),
+    /// an agent proposal is still the cyan handle.
+    #[test]
+    fn review_origin_keeps_you_and_agent_unchanged() {
+        let tx = tx_payload();
+        assert!(matches!(
+            review_origin(&ProposalOrigin::App, &tx, "Kyoto", "Osaka", "sending"),
+            Origin::You {
+                account: "Osaka",
+                verb: "sending"
+            }
+        ));
+        assert!(matches!(
+            review_origin(&ProposalOrigin::Agent, &tx, "Kyoto", "Osaka", "sending"),
+            Origin::Agent { handle: "Kyoto" }
+        ));
+    }
+
+    /// Back-compat + precedence: an App-origin MESSAGE from a pre-#198 bridge still renders the
+    /// payload's display-only origin, and a Dapp-origin message reads the WIRE origin (the
+    /// bridge writes both from the same session, so they agree — the wire wins on the card).
+    #[test]
+    fn review_origin_message_fallback_and_wire_precedence() {
+        let msg = PendingPayloadView::Message(SignMessage {
+            chain_id: 1,
+            origin: "https://payload.example.org".into(),
+            kind: SignMessageKind::PersonalSign {
+                message: Bytes::new(),
+            },
+        });
+        // Pre-#198 record: App-tagged, domain only in the payload → still the dapp rail.
+        assert!(matches!(
+            review_origin(&ProposalOrigin::App, &msg, "Kyoto", "Osaka", "signing"),
+            Origin::Dapp {
+                domain: "https://payload.example.org"
+            }
+        ));
+        // #198 record: the wire origin is authoritative.
+        let wire = ProposalOrigin::Dapp {
+            origin: "https://wire.example.org".into(),
+        };
+        assert!(matches!(
+            review_origin(&wire, &msg, "Kyoto", "Osaka", "signing"),
+            Origin::Dapp {
+                domain: "https://wire.example.org"
+            }
+        ));
+    }
+
+    /// The feed-row/receipt subject: "You" for the app, the handle for an agent, and the
+    /// verbatim origin string for a dapp (#198 — `unknown-origin` shows as `unknown-origin`).
+    #[test]
+    fn origin_subject_renders_a_dapp_origin_verbatim() {
+        assert_eq!(origin_subject(&ProposalOrigin::App, "Kyoto"), "You");
+        assert_eq!(origin_subject(&ProposalOrigin::Agent, "Kyoto"), "Kyoto");
+        assert_eq!(
+            origin_subject(
+                &ProposalOrigin::Dapp {
+                    origin: "https://app.example.org".into()
+                },
+                "Kyoto"
+            ),
+            "https://app.example.org"
+        );
+        assert_eq!(
+            origin_subject(
+                &ProposalOrigin::Dapp {
+                    origin: "unknown-origin".into()
+                },
+                "Kyoto"
+            ),
+            "unknown-origin"
+        );
+    }
+
+    /// #198: a settled dapp record reads like a third-party request ("you approved" /
+    /// "auto-approved within cap"), never the first-person "sent" of your own action.
+    #[test]
+    fn settled_label_treats_a_dapp_as_a_third_party() {
+        let mut human = record(
+            0x0A,
+            ActivityLifecycle::Executed,
+            BreachedLimit::PerTxCap,
+            false,
+        );
+        human.origin = ProposalOrigin::Dapp {
+            origin: "https://app.example.org".into(),
+        };
+        assert_eq!(settled_label(&human), "you approved");
+
+        let mut auto = record(0x0B, ActivityLifecycle::Executed, BreachedLimit::None, true);
+        auto.origin = ProposalOrigin::Dapp {
+            origin: "unknown-origin".into(),
+        };
+        assert_eq!(settled_label(&auto), "auto-approved within cap");
     }
 
     #[test]

@@ -108,6 +108,41 @@ async fn pending_list_reports_agent_origin() {
     );
 }
 
+/// #198 (dapp half): a browser-bridge proposal is tagged `Dapp` with the requesting site's
+/// origin string, and BOTH read surfaces — the inbox and the activity feed — carry it back
+/// VERBATIM (no prettifying; the attribution the review card renders is exactly what the bridge
+/// session sent, `unknown-origin` included).
+#[tokio::test]
+async fn pending_list_and_feed_report_dapp_origin_verbatim() {
+    let dir = TempDir::new("pending-list-dapp");
+    let (_wallet, to) = seal_account0(dir.path());
+    let d = spawn_daemon(dir.path(), DUMMY_RPC, CHAIN, &[]);
+    let client = SignerClient::new(d.socket_path.clone());
+    client.unlock(PASS).await.unwrap();
+
+    let origin = ProposalOrigin::Dapp {
+        origin: "https://app.example.org".into(),
+    };
+    let id = pending_id(&client, to, PER_TX_CAP + 1, origin.clone()).await;
+
+    let records = client.pending_list().await.unwrap();
+    let rec = records
+        .iter()
+        .find(|r| r.request_id == id)
+        .expect("the proposed record must appear in the inbox");
+    assert_eq!(
+        rec.origin, origin,
+        "a dapp-proposed record must carry the site's origin string verbatim"
+    );
+
+    let feed = client.activity_feed().await.unwrap();
+    let rec = feed
+        .iter()
+        .find(|r| r.request_id == id)
+        .expect("the proposed record must appear in the feed");
+    assert_eq!(rec.origin, origin, "the feed carries the same attribution");
+}
+
 /// A2: expire-BEFORE-list. With a 1s TTL, a `Pending` record left to go stale is surfaced as
 /// `Expired` (NOT Pending) with `remaining_ms == 0` — proving `pending_list` runs `expire_stale`
 /// first, so the inbox never shows a row past its TTL as still pending.

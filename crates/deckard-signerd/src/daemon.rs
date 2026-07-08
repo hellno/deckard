@@ -547,14 +547,16 @@ impl Daemon {
         // the normal Send caps path below (the broadcast carries `intent.calldata` as-is).
         if intent.kind == IntentKind::ContractCall && intent.token.is_none() {
             if let Some((spender, amount)) = deckard_core::decode_approve(&intent.calldata) {
-                if matches!(origin, ProposalOrigin::App) {
+                if matches!(origin, ProposalOrigin::App | ProposalOrigin::Dapp { .. }) {
                     if intent.value != U256::ZERO {
                         return Decision::Deny {
                             reason: deny_reasons::APPROVE_WITH_VALUE.into(),
                         };
                     }
                     // Browser/dapp approvals are clear-signable as an exact approve tuple and
-                    // must always raise a human card. Agent-origin swap approvals keep the
+                    // must always raise a human card — `Dapp` (#198) rides this branch so a
+                    // dapp approve gets the SAME decision as an in-app one (origin is
+                    // attribution, never authorization). Agent-origin swap approvals keep the
                     // stricter shaped-approve gate below.
                     return self.finish_propose(intent, true, origin);
                 }
@@ -1519,7 +1521,7 @@ impl Daemon {
                     status: req.status.clone(),
                     payload: payload_view(&req.payload),
                     remaining_ms,
-                    origin: req.origin,
+                    origin: req.origin.clone(),
                 }
             })
             .collect()
@@ -1551,7 +1553,7 @@ impl Daemon {
             .take(ACTIVITY_FEED_CAP)
             .map(|(id, req)| ActivityRecord {
                 request_id: *id,
-                origin: req.origin,
+                origin: req.origin.clone(),
                 payload: payload_view(&req.payload),
                 timestamp_ms: req.created_ms,
                 tx_hash: if req.cancelled { None } else { req.broadcast },

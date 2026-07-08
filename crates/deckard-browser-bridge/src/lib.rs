@@ -137,10 +137,13 @@ impl BridgeBackend {
         }
     }
 
-    async fn send_transaction(&self, intent: Intent) -> Result<B256, BridgeError> {
+    /// `origin` is the requesting site's session origin (#198): the daemon records the
+    /// transaction as `ProposalOrigin::Dapp`, so the review card and feed attribute it to the
+    /// site instead of falsely claiming "You are sending".
+    async fn send_transaction(&self, origin: &str, intent: Intent) -> Result<B256, BridgeError> {
         match self {
             Self::DevMock { .. } => Ok(dev_tx_hash_for_intent(&intent)),
-            Self::WalletClient(wallet) => execute_intent_with_daemon(wallet, intent).await,
+            Self::WalletClient(wallet) => execute_intent_with_daemon(wallet, intent, origin).await,
         }
     }
 }
@@ -264,7 +267,7 @@ impl BrowserBridge {
         let session = self.require_session(origin)?;
         let (from, intent) = parse_send_transaction_params(params, self.chain_id)?;
         ensure_same_account(&session.account, &from)?;
-        self.backend.send_transaction(intent).await
+        self.backend.send_transaction(origin, intent).await
     }
 
     fn wallet_get_capabilities(&self, params: Value) -> Result<Value, BridgeError> {
@@ -298,7 +301,11 @@ impl BrowserBridge {
         ensure_same_account(&session.account, &batch.from)?;
         let mut tx_hashes = Vec::with_capacity(batch.intents.len());
         for intent in &batch.intents {
-            tx_hashes.push(self.backend.send_transaction(intent.clone()).await?);
+            tx_hashes.push(
+                self.backend
+                    .send_transaction(origin, intent.clone())
+                    .await?,
+            );
         }
         let id = batch
             .id
@@ -417,9 +424,16 @@ async fn sign_message_with_daemon(
     message: SignMessage,
 ) -> Result<Bytes, BridgeError> {
     let request_id = deckard_wallet_client::SignerClient::request_id_for_message(&message);
+    // #198: attribute the proposal to the requesting site. The wire origin and the payload's
+    // display-only `SignMessage.origin` are the same session string, so they can never diverge.
     let decision = wallet
         .signer_client()
-        .propose_message(&message, ProposalOrigin::App)
+        .propose_message(
+            &message,
+            ProposalOrigin::Dapp {
+                origin: message.origin.clone(),
+            },
+        )
         .await
         .map_err(bridge_daemon_error)?;
     match decision {
@@ -443,11 +457,20 @@ async fn sign_message_with_daemon(
 async fn execute_intent_with_daemon(
     wallet: &WalletClient,
     intent: Intent,
+    origin: &str,
 ) -> Result<B256, BridgeError> {
     let request_id = deckard_wallet_client::SignerClient::request_id_for_intent(&intent);
+    // #198: attribute the transaction to the requesting site — the daemon stores the origin on
+    // the pending record (display-only; the policy verdict is origin-blind, and a dapp's exact
+    // ERC-20 approve keeps the same always-raise-a-human-card admission as an in-app one).
     let decision = wallet
         .signer_client()
-        .propose(&intent, ProposalOrigin::App)
+        .propose(
+            &intent,
+            ProposalOrigin::Dapp {
+                origin: origin.to_string(),
+            },
+        )
         .await
         .map_err(bridge_daemon_error)?;
     match decision {
@@ -1159,10 +1182,9 @@ async fn handle_http_connection(
 
     let headers = std::str::from_utf8(&buf[..header_end])?.to_string();
     let (method, path) = request_line(&headers)?;
-    let origin = header_value(&headers, "x-deckard-origin")
-        .or_else(|| header_value(&headers, "origin"))
-        .unwrap_or("unknown-origin")
-        .to_string();
+    let origin = session_origin(
+        header_value(&headers, "x-deckard-origin").or_else(|| header_value(&headers, "origin")),
+    );
 
     if method == "OPTIONS" {
         return write_http(&mut stream, 204, "text/plain", "").await;
@@ -1249,6 +1271,40 @@ fn header_value<'a>(headers: &'a str, name: &str) -> Option<&'a str> {
     })
 }
 
+/// The longest origin the bridge will attribute a session to. A real web origin
+/// (`scheme://host[:port]`) fits comfortably; anything longer is hostile or broken.
+const MAX_ORIGIN_LEN: usize = 255;
+
+/// Resolve the attribution origin for a session (#198). The header value is ATTACKER-SUPPLIED
+/// text that becomes the review card / feed subject, so anything that does not look like a web
+/// origin collapses to the honest `unknown-origin` fallback: it must be `http(s)://` + a
+/// non-empty printable host with no path (a browser `Origin` header never carries one), within
+/// [`MAX_ORIGIN_LEN`]. This is shape hygiene, NOT origin verification (#48 — deferred): it stops
+/// a crafted header (the literal `You`, control characters, `https://good.site/evil-path`, a
+/// paragraph of text) from masquerading as a human subject or garbling the trust surface, while
+/// every real origin still renders verbatim. `x-deckard-origin` stays the preferred source
+/// because the extension's own POST carries the extension's `origin`, not the page's.
+fn session_origin(header: Option<&str>) -> String {
+    let fallback = || "unknown-origin".to_string();
+    let Some(raw) = header else {
+        return fallback();
+    };
+    let host = match raw.split_once("://") {
+        Some(("http" | "https", host)) => host,
+        _ => return fallback(),
+    };
+    let shaped = raw.len() <= MAX_ORIGIN_LEN
+        && !host.is_empty()
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_graphic() && b != b'/' && b != b'\\');
+    if shaped {
+        raw.to_string()
+    } else {
+        fallback()
+    }
+}
+
 fn host_is_loopback(headers: &str) -> bool {
     header_value(headers, "host")
         .map(|host| host.starts_with("127.0.0.1:") || host.starts_with("localhost:"))
@@ -1268,6 +1324,55 @@ mod tests {
                 account: DEFAULT_DEV_ACCOUNT.to_string(),
             },
         )
+    }
+
+    /// #198 shape hygiene: a real web origin passes VERBATIM; anything that could masquerade as
+    /// a human subject on the review card / feed (the literal "You", control bytes, a smuggled
+    /// path, an over-long string, an empty header) collapses to the honest `unknown-origin`.
+    #[test]
+    fn session_origin_keeps_real_origins_and_collapses_crafted_ones() {
+        // Real origins render verbatim — including port, IPv6, and the extension's degenerate
+        // page-origin fallback.
+        for good in [
+            "https://app.example.org",
+            "http://127.0.0.1:8765",
+            "http://[::1]:8545",
+            "http://unknown.invalid",
+        ] {
+            assert_eq!(
+                session_origin(Some(good)),
+                good,
+                "{good} must pass verbatim"
+            );
+        }
+        // Crafted or broken values collapse to the fallback instead of reaching the trust
+        // surface: no scheme (the "You" masquerade), embedded spaces, an empty value, control
+        // characters, a path after the host (a browser Origin never has one), a non-web scheme,
+        // and an over-long string.
+        for bad in [
+            "You",
+            "You are sending",
+            "",
+            "https://",
+            "https://app.example.org/evil-path",
+            "https://app.example.org\\evil",
+            "https://app.example.org evil",
+            "https://app.\texample.org",
+            "chrome-extension://abcdef",
+            "javascript://alert(1)",
+        ] {
+            assert_eq!(
+                session_origin(Some(bad)),
+                "unknown-origin",
+                "{bad:?} must collapse"
+            );
+        }
+        assert_eq!(
+            session_origin(Some(&format!("https://{}.example.org", "a".repeat(300)))),
+            "unknown-origin",
+            "an over-long origin must collapse"
+        );
+        assert_eq!(session_origin(None), "unknown-origin");
     }
 
     #[test]
