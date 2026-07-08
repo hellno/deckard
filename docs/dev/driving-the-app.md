@@ -190,6 +190,26 @@ Other gotchas:
 - Clicks are in **logical points** (Retina-safe): `CGWindowBounds` and `cliclick` agree, so a
   fraction of the window maps correctly on any display scale.
 
+## Attaching a screenshot to a PR
+
+`gh` **cannot** upload an image into GitHub markdown — that path is the web UI's private upload
+endpoint, so a comment/PR body built from the CLI can only *reference* an image by URL. GitHub
+renders `![](url)` for any URL that returns image bytes, and this is a **public** repo, so it
+serves its own files at `raw.githubusercontent.com`. [`scripts/pr-image.sh`](../../scripts/pr-image.sh)
+parks the PNG on a dedicated orphan **`assets`** branch (never merged, never in a PR diff, never in
+your working tree — it is built with git plumbing) and prints paste-ready markdown:
+
+```bash
+scripts/pr-image.sh --prefix 198 .context/shots/BEFORE-you-are-sending.png \
+                                 .context/shots/AFTER-dapp-requests.png
+# → ![198-BEFORE…](https://raw.githubusercontent.com/<owner>/<repo>/assets/198-BEFORE….png)
+#   ![198-AFTER…](https://raw.githubusercontent.com/<owner>/<repo>/assets/198-AFTER….png)
+```
+
+It **appends** to the `assets` branch (old images survive) and replaces any same-named file. It
+refuses to run against a private repo, whose raw URLs won't render for viewers — drag-drop into the
+web UI instead there.
+
 ## Linux / CI
 
 For a headless Linux or Claude-on-the-web session, the mechanics are different (virtual X display
