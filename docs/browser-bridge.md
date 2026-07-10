@@ -83,9 +83,15 @@ The injected provider supports EIP-6963 multi-wallet discovery in addition to th
 - re-announces when the dapp dispatches `eip6963:requestProvider`
 - uses `name: "Deckard"`, `rdns: "com.deckard.wallet"`, and a self-contained SVG data URI icon
 
-`personal_sign`, `eth_sendTransaction`, broad signing, hardware wallets, native messaging, and store
-distribution are intentionally not implemented in this bridge slice. Kohaku remains useful for
-wallet-internal provider/backend integration, not as the browser-facing dapp provider.
+The bridge forwards the full signing set through the daemon's clear-signing approval: `personal_sign`
+and `eth_signTypedData_v4` (message signing, #139), native `eth_sendTransaction` (#141) with ERC-20
+`transfer`/`approve` classified onto the review card (#146), and EIP-5792
+`wallet_getCapabilities`/`wallet_sendCalls`/`wallet_getCallsStatus` (#148). Every request is attributed
+to the calling origin as `ProposalOrigin::Dapp` (#198). Deliberately refused: `eth_sign` (raw hash
+signing is not clear-signable). Still out of scope for this slice: hardware wallets, the
+native-messaging transport (the shipped wire is hardened localhost — see ADR-0001 / the #202 decision),
+and store distribution. Kohaku remains useful for wallet-internal provider/backend integration, not as
+the browser-facing dapp provider.
 
 ## Dapp sessions
 
@@ -173,8 +179,10 @@ Chromium/Chrome/Brave:
 3. Click **Load unpacked**.
 4. Select the repository's `extension/` directory.
 
-The extension injects `window.ethereum` and forwards only `eth_chainId`, `eth_accounts`, and
-`eth_requestAccounts` to `http://127.0.0.1:8765/rpc`.
+The extension injects `window.ethereum` and forwards the full EIP-1193 method set to
+`http://127.0.0.1:8765/rpc`: `eth_chainId`, `eth_accounts`, `eth_requestAccounts`, `personal_sign`,
+`eth_signTypedData_v4`, `eth_sendTransaction`, and the EIP-5792 `wallet_*` calls. `eth_sign` is
+forwarded but the bridge refuses it; unknown methods return `4200`.
 
 ## Open the local test dapp
 
