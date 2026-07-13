@@ -172,6 +172,24 @@ pub const COMMANDS: &[Command] = &[
         icon: None,
     },
     Command {
+        // Disconnect a connected dapp site (#199). Session-scoped disconnect, not a ban (ADR 0006).
+        // The live label (palette.rs `display_label`) names the single site's host, or "all N", so
+        // the operator always sees exactly what Enter will disconnect. Per-site precision at N>1 is
+        // on the sidebar row's ✕. No bundled unlink glyph, so no icon. Kept BEFORE `revoke-all` so
+        // the panic brake stays the registry's last entry.
+        id: "revoke-site",
+        title: "Revoke connected site",
+        aliases: &[
+            "disconnect",
+            "revoke site",
+            "unlink",
+            "connections",
+            "sites",
+        ],
+        shortcut: None,
+        icon: None,
+    },
+    Command {
         // The panic brake: zeroize the key, lock the daemon, deny every in-flight request. Its
         // OWN id — never overloads the demo `agent` toggle (whose "stop" means "stop the demo
         // animation"). "stop"/"panic"/"kill" all land here so the operator reaches it fast.
@@ -443,5 +461,43 @@ mod tests {
         let usage = empty_usage();
         let results = rank("zzzz", COMMANDS, &usage, 0, &mut m);
         assert!(results.is_empty());
+    }
+
+    /// The Connections revoke command (#199) sits immediately BEFORE the STOP `revoke-all` panic
+    /// brake, which must stay the registry's last entry (`frecency_orders_empty_query` asserts it).
+    #[test]
+    fn revoke_site_precedes_revoke_all() {
+        let site = COMMANDS
+            .iter()
+            .position(|c| c.id == "revoke-site")
+            .expect("revoke-site must be in the registry");
+        let all = COMMANDS
+            .iter()
+            .position(|c| c.id == "revoke-all")
+            .expect("revoke-all must be in the registry");
+        assert_eq!(
+            site + 1,
+            all,
+            "revoke-site must sit right before revoke-all"
+        );
+        assert_eq!(all, COMMANDS.len() - 1, "revoke-all must stay last");
+    }
+
+    /// Reflective registry↔handler check: EVERY registry `id` must have a handler arm in
+    /// `run_palette_command` (shell.rs). A command that ranks + displays but does nothing on Enter
+    /// is invisible-failure slop. Asserts the EXACT quoted match token `"<id>" =>` is in shell.rs's
+    /// source (not a substring of some identifier), so a new registry entry can never ship without
+    /// its handler.
+    #[test]
+    fn every_command_id_has_a_handler_arm() {
+        let shell_src = include_str!("shell.rs");
+        for cmd in COMMANDS {
+            let token = format!("\"{}\" =>", cmd.id);
+            assert!(
+                shell_src.contains(&token),
+                "command id {:?} has no handler arm ({token}) in shell.rs's run_palette_command",
+                cmd.id
+            );
+        }
     }
 }

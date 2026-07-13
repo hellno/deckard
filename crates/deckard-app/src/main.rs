@@ -7,6 +7,7 @@
 
 mod activity_view;
 mod agent_view;
+mod bridge_admin;
 mod capture;
 mod commit_flow;
 mod commit_view;

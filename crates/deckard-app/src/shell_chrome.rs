@@ -11,8 +11,8 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, Context, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
-    Styled,
+    div, px, Context, InteractiveElement, IntoElement, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled,
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
@@ -184,19 +184,16 @@ impl Shell {
                     )
                     .on_click(cx.listener(|this, _, _, cx| this.select(Selection::Agent, cx))),
             )
-            // Connections group — dapp origins (DESIGN §IA). A reserved, list-only slot: the
-            // request-origin model exists, but deep connection management is deferred (ADR-0001 /
-            // #44), so the group announces itself with a quiet empty state until a bridged dapp
-            // origin appears. Non-interactive on purpose — nothing to select here yet.
+            // Connections group — dapp origins (DESIGN §IA). One row per live browser-bridge
+            // session: a neutral Globe + the origin host + a ghost ✕ that disconnects it (#199).
+            // Now interactive (the old "nothing to select" note is stale). Revoke is a session-
+            // scoped disconnect, not a ban (ADR 0006) — a disconnected site can reconnect. DESIGN
+            // names "favicon + domain + a trust dot" here, but favicons and the trust model are
+            // #48's; we render the NEUTRAL Globe and NO trust dot rather than fabricate a trust
+            // signal we don't have (DESIGN §the request-origin model). A quiet empty state until a
+            // dapp connects.
             .child(group_label("Connections"))
-            .child(
-                div().mx_2().px_2().py_1p5().child(
-                    div()
-                        .text_sm()
-                        .text_color(muted)
-                        .child("No connected sites yet"),
-                ),
-            )
+            .child(self.render_connections(fg, muted, cx))
             // Spacer pushes the footer rows to the bottom.
             .child(div().flex_1())
             // Activity ledger — a sibling of Settings (bottom): the full cross-agent record AND
@@ -252,6 +249,80 @@ impl Shell {
                     )
                     .on_click(cx.listener(|this, _, _, cx| this.open(Surface::Settings, cx))),
             )
+    }
+
+    /// The Connections group body (#199): the quiet empty-state line when no dapp is connected,
+    /// else one [`Shell::connection_row`] per live browser-bridge session. Split out of
+    /// `render_sidebar` so the per-row loop (each row carries its own revoke listener) reads cleanly.
+    fn render_connections(
+        &self,
+        fg: gpui::Hsla,
+        muted: gpui::Hsla,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        if self.connections.is_empty() {
+            return div().mx_2().px_2().py_1p5().child(
+                div()
+                    .text_sm()
+                    .text_color(muted)
+                    .child("No connected sites yet"),
+            );
+        }
+        let mut list = v_flex().w_full();
+        for site in self.connections.iter() {
+            list = list.child(self.connection_row(site, fg, muted, cx));
+        }
+        list
+    }
+
+    /// One Connections row (#199): a neutral Globe, the origin host (truncating), and a right-
+    /// aligned ghost ✕ that disconnects THIS origin (session-scoped, not a ban — ADR 0006). Matches
+    /// the sibling nav rows' geometry (`mx_2 px_2 py_1p5 rounded_md`). NO trust dot — the trust
+    /// model is #48's, and we never fabricate a trust signal (DESIGN §the request-origin model).
+    /// Dynamic ids off the origin so each row + button keeps a stable identity across poll churn.
+    fn connection_row(
+        &self,
+        site: &crate::bridge_admin::ConnectedSite,
+        fg: gpui::Hsla,
+        muted: gpui::Hsla,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let origin = site.origin.clone();
+        let host = crate::bridge_admin::origin_host(&origin).to_string();
+        let row_id = SharedString::from(format!("conn-{origin}"));
+        let btn_id = SharedString::from(format!("conn-x-{origin}"));
+        div().id(row_id).mx_2().px_2().py_1p5().rounded_md().child(
+            h_flex()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(
+                    // Left cluster clamps (`min_w_0` + truncate) so a long origin never runs
+                    // off the sidebar edge (DESIGN §cockpit row anatomy).
+                    h_flex()
+                        .items_center()
+                        .gap_2()
+                        .min_w_0()
+                        .child(Icon::new(IconName::Globe).text_color(muted).small())
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_sm()
+                                .text_color(fg)
+                                .child(host),
+                        ),
+                )
+                .child(
+                    Button::new(btn_id)
+                        .ghost()
+                        .icon(IconName::CircleX)
+                        .small()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.revoke_connected_site(origin.clone(), cx);
+                        })),
+                ),
+        )
     }
 
     /// The 44px breadcrumb bar: `[mark] <entity>` on the left — the entity the current view is

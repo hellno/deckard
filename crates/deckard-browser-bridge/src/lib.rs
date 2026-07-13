@@ -88,7 +88,6 @@ impl DappSessionStore {
         session.clone()
     }
 
-    #[allow(dead_code)]
     pub fn revoke(&mut self, origin: &str) -> bool {
         match self.sessions.get_mut(origin) {
             Some(session) => {
@@ -98,6 +97,33 @@ impl DappSessionStore {
             }
             None => false,
         }
+    }
+
+    /// The live (non-revoked) sessions in stable origin order (`BTreeMap` iterates its keys
+    /// sorted). Feeds the app's Connections list over `/admin` (#199) — the app renders exactly
+    /// what the bridge still honors, so a revoked session never lingers on screen.
+    pub fn list(&self) -> Vec<DappSession> {
+        self.sessions
+            .values()
+            .filter(|session| !session.revoked)
+            .cloned()
+            .collect()
+    }
+
+    /// Tombstone every live session and report how many were live. The authority-reducing side of
+    /// the app's Lock / Lockdown (#199): each site must reconnect fresh afterward (disconnect, not
+    /// ban — ADR 0006). Idempotent — an already-revoked session isn't re-counted.
+    pub fn revoke_all(&mut self) -> usize {
+        let now = unix_now();
+        let mut revoked = 0;
+        for session in self.sessions.values_mut() {
+            if !session.revoked {
+                session.revoked = true;
+                session.last_seen = now;
+                revoked += 1;
+            }
+        }
+        revoked
     }
 }
 
@@ -373,6 +399,39 @@ impl BrowserBridge {
             message: "Deckard requires eth_requestAccounts before signing".into(),
         })
     }
+
+    /// Handle one app→bridge `/admin` request (#199). `list` returns the live sessions; `revoke`
+    /// disconnects one origin; `clear` disconnects all. Every op replies with the SAME shape — the
+    /// post-op live list — so the app refreshes its whole Connections view in one round-trip.
+    /// Revoke is a session-scoped DISCONNECT, not a ban (ADR 0006): a revoked site's next signing
+    /// request fails `4100` and it may reconnect fresh. Revoking an unknown/already-revoked origin
+    /// is a silent no-op — disconnect is idempotent and fail-safe. A `revoke` missing `origin`, or
+    /// an unknown `op`, is a client error (`Err`) the HTTP layer answers with `400`.
+    pub fn handle_admin(&self, request: AdminRequest) -> Result<AdminResponse, String> {
+        let mut store = self
+            .sessions
+            .lock()
+            .map_err(|_| "Deckard browser bridge session store is unavailable".to_string())?;
+        match request.op.as_str() {
+            "list" => {}
+            "revoke" => {
+                let origin = request
+                    .origin
+                    .as_deref()
+                    .ok_or_else(|| "admin revoke requires an origin".to_string())?;
+                // Idempotent no-op if the origin has no live session — it simply won't appear in
+                // the returned list. Never an error: disconnect is fail-safe.
+                store.revoke(origin);
+            }
+            "clear" => {
+                store.revoke_all();
+            }
+            other => return Err(format!("unknown admin op {other}")),
+        }
+        Ok(AdminResponse {
+            sessions: store.list(),
+        })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -417,6 +476,23 @@ impl BridgeResponse {
 pub struct BridgeError {
     pub code: i64,
     pub message: String,
+}
+
+/// An app→bridge admin request over `/admin` (#199). The local Deckard app is the only caller — a
+/// web page cannot reach `/admin` (see [`admin_authorized`]). `op` is `list` | `revoke` | `clear`;
+/// `origin` names the site to disconnect for a `revoke` (ignored by `list`/`clear`).
+#[derive(Clone, Debug, Deserialize)]
+pub struct AdminRequest {
+    pub op: String,
+    #[serde(default)]
+    pub origin: Option<String>,
+}
+
+/// The uniform `/admin` reply: the live session list AFTER the op ran, so the app refreshes its
+/// Connections view in a single round-trip regardless of which op it sent.
+#[derive(Clone, Debug, Serialize)]
+pub struct AdminResponse {
+    pub sessions: Vec<DappSession>,
 }
 
 async fn sign_message_with_daemon(
@@ -1189,11 +1265,29 @@ async fn handle_http_connection(
     if method == "OPTIONS" {
         return write_http(&mut stream, 204, "text/plain", "").await;
     }
-    if method != "POST" || path != "/rpc" {
+    // Two POST-only, loopback-only endpoints share this connection handler: `/rpc` is the EIP-1193
+    // dapp path; `/admin` is the local Deckard app's session-management path (#199 — list + revoke
+    // dapp sessions). The Host check and the body read below are shared by both.
+    let is_rpc = method == "POST" && path == "/rpc";
+    let is_admin = method == "POST" && path == "/admin";
+    if !is_rpc && !is_admin {
         return write_http(&mut stream, 404, "text/plain", "not found").await;
     }
     if !host_is_loopback(&headers) {
         return write_http(&mut stream, 403, "text/plain", "host must be localhost").await;
+    }
+    // `/admin` additionally requires the `x-deckard-admin` marker header (see `admin_authorized`):
+    // a web page cannot set it — the CORS preflight does not allow it — so only a local process
+    // (the Deckard app) reaches admin. This is the ADR-0006 "minimal loopback check" posture; we
+    // deliberately do NOT add token auth on a wire we intend to retire.
+    if is_admin && !admin_authorized(&headers) {
+        return write_http(
+            &mut stream,
+            403,
+            "text/plain",
+            "admin requires x-deckard-admin",
+        )
+        .await;
     }
 
     let content_length = header_value(&headers, "content-length")
@@ -1211,13 +1305,36 @@ async fn handle_http_connection(
         }
         read += n;
     }
+    let body = &buf[body_start..body_start + content_length];
 
-    let request: BridgeRequest =
-        serde_json::from_slice(&buf[body_start..body_start + content_length])?;
+    if is_admin {
+        // The app owns both ends of `/admin`, so a bad request is a client bug, not hostile input:
+        // a valid op maps to its 200 JSON reply (the post-op live list); a client error (missing
+        // origin / unknown op) maps to 400. A body that won't even parse propagates like `/rpc`'s.
+        let request: AdminRequest = serde_json::from_slice(body)?;
+        return match bridge.handle_admin(request) {
+            Ok(response) => {
+                let response_body = serde_json::to_string(&response)?;
+                write_http(&mut stream, 200, "application/json", &response_body).await
+            }
+            Err(message) => write_http(&mut stream, 400, "text/plain", &message).await,
+        };
+    }
+
+    let request: BridgeRequest = serde_json::from_slice(body)?;
     let response = bridge.handle_request(&origin, request).await;
     let response_body = serde_json::to_string(&response)?;
     write_http(&mut stream, 200, "application/json", &response_body).await
 }
+
+/// The exact `access-control-allow-headers` value the bridge advertises. Broken out as a const so a
+/// unit test can pin the load-bearing invariant (#199): `x-deckard-admin` MUST NEVER appear here.
+/// That custom header gates `/admin` (see [`admin_authorized`]); because a browser must clear a
+/// CORS preflight before it may send ANY custom request header, and this allow-list omits
+/// `x-deckard-admin`, no web page can call `/admin` — only a local, preflight-free process (the
+/// Deckard app) can. Adding it here would hand a malicious page the power to enumerate connected
+/// origins or disconnect sessions. Do not add it; do not add token auth either (ADR 0006).
+const CORS_ALLOW_HEADERS: &str = "content-type,x-deckard-origin";
 
 async fn write_http(
     stream: &mut TcpStream,
@@ -1228,13 +1345,14 @@ async fn write_http(
     let reason = match status {
         200 => "OK",
         204 => "No Content",
+        400 => "Bad Request",
         403 => "Forbidden",
         404 => "Not Found",
         413 => "Payload Too Large",
         _ => "Error",
     };
     let response = format!(
-        "HTTP/1.1 {status} {reason}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\naccess-control-allow-origin: *\r\naccess-control-allow-headers: content-type,x-deckard-origin\r\naccess-control-allow-methods: POST,OPTIONS\r\nconnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status} {reason}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\naccess-control-allow-origin: *\r\naccess-control-allow-headers: {CORS_ALLOW_HEADERS}\r\naccess-control-allow-methods: POST,OPTIONS\r\nconnection: close\r\n\r\n{body}",
         body.len()
     );
     stream.write_all(response.as_bytes()).await?;
@@ -1309,6 +1427,16 @@ fn host_is_loopback(headers: &str) -> bool {
     header_value(headers, "host")
         .map(|host| host.starts_with("127.0.0.1:") || host.starts_with("localhost:"))
         .unwrap_or(false)
+}
+
+/// Whether an `/admin` request carries the loopback admin marker header (#199). The gate is
+/// deliberately minimal (ADR 0006 accepts the localhost wire as-is): the header's PRESENCE — any
+/// value — is the whole check. Its security rests entirely on the CORS invariant documented on
+/// [`CORS_ALLOW_HEADERS`]: a web page cannot set `x-deckard-admin` (the preflight will not allow
+/// it), so only a local process can reach `/admin`. This is header-shape hygiene, NOT authentication
+/// — extracted as a pure function so it is unit-testable without a TCP round-trip.
+fn admin_authorized(headers: &str) -> bool {
+    header_value(headers, "x-deckard-admin").is_some()
 }
 
 #[cfg(test)]
@@ -1970,5 +2098,176 @@ mod tests {
             )
             .await;
         assert_eq!(response.error.expect("wrong-account error").code, 4100);
+    }
+
+    /// #199 disconnect-not-ban (ADR 0006): revoking a session via the admin dispatch drops it from
+    /// the live list, its next `eth_sendTransaction` fails 4100 and `eth_accounts` goes empty — but
+    /// the site can `eth_requestAccounts` again for a FRESH session. Revoke is a session-scoped
+    /// disconnect, never a persistent block.
+    #[tokio::test]
+    async fn admin_revoke_disconnects_but_allows_reconnect() {
+        let bridge = bridge();
+        let _ = bridge
+            .handle_request(
+                ORIGIN,
+                BridgeRequest {
+                    id: json!(1),
+                    method: "eth_requestAccounts".into(),
+                    params: Value::Null,
+                },
+            )
+            .await;
+        assert_eq!(
+            bridge.accounts_for_origin(ORIGIN),
+            vec![DEFAULT_DEV_ACCOUNT]
+        );
+
+        // Revoke via the admin dispatch — the returned list no longer carries this origin.
+        let after = bridge
+            .handle_admin(AdminRequest {
+                op: "revoke".into(),
+                origin: Some(ORIGIN.to_string()),
+            })
+            .expect("revoke ok");
+        assert!(
+            after.sessions.is_empty(),
+            "a revoked session must drop out of the live list"
+        );
+
+        // A revoked origin is unauthorized again: the next signing request fails 4100 …
+        let send = bridge
+            .handle_request(
+                ORIGIN,
+                BridgeRequest {
+                    id: json!(2),
+                    method: "eth_sendTransaction".into(),
+                    params: json!([{ "from": DEFAULT_DEV_ACCOUNT, "to": "0x0000000000000000000000000000000000000001", "value": "0x1" }]),
+                },
+            )
+            .await;
+        assert_eq!(send.error.expect("unauthorized after revoke").code, 4100);
+        // … and `eth_accounts` discloses nothing.
+        assert!(bridge.accounts_for_origin(ORIGIN).is_empty());
+
+        // Disconnect, not ban: the site may reconnect for a fresh session.
+        let reconnect = bridge
+            .handle_request(
+                ORIGIN,
+                BridgeRequest {
+                    id: json!(3),
+                    method: "eth_requestAccounts".into(),
+                    params: Value::Null,
+                },
+            )
+            .await;
+        assert_eq!(reconnect.result, Some(json!([DEFAULT_DEV_ACCOUNT])));
+        assert_eq!(
+            bridge.accounts_for_origin(ORIGIN),
+            vec![DEFAULT_DEV_ACCOUNT]
+        );
+    }
+
+    /// #199 admin dispatch semantics: `list` excludes revoked and keeps stable origin order,
+    /// `revoke` of an unknown origin is a no-op returning the unchanged list, revoking a live origin
+    /// removes it, `clear` empties everything, and a `revoke` without `origin` (or an unknown op) is
+    /// a client error.
+    #[tokio::test]
+    async fn admin_dispatch_list_revoke_and_clear() {
+        let bridge = bridge();
+        for origin in ["https://a.example", "https://b.example"] {
+            let _ = bridge
+                .handle_request(
+                    origin,
+                    BridgeRequest {
+                        id: json!(1),
+                        method: "eth_requestAccounts".into(),
+                        params: Value::Null,
+                    },
+                )
+                .await;
+        }
+
+        // list: both, in stable (BTreeMap) origin order.
+        let listed = bridge
+            .handle_admin(AdminRequest {
+                op: "list".into(),
+                origin: None,
+            })
+            .expect("list ok");
+        let origins: Vec<&str> = listed.sessions.iter().map(|s| s.origin.as_str()).collect();
+        assert_eq!(origins, vec!["https://a.example", "https://b.example"]);
+
+        // revoke of an unknown origin is a no-op that returns the unchanged list.
+        let after_unknown = bridge
+            .handle_admin(AdminRequest {
+                op: "revoke".into(),
+                origin: Some("https://not-connected.example".into()),
+            })
+            .expect("revoke unknown ok");
+        assert_eq!(after_unknown.sessions.len(), 2);
+
+        // revoke one → list excludes it.
+        let after_one = bridge
+            .handle_admin(AdminRequest {
+                op: "revoke".into(),
+                origin: Some("https://a.example".into()),
+            })
+            .expect("revoke ok");
+        let origins: Vec<&str> = after_one
+            .sessions
+            .iter()
+            .map(|s| s.origin.as_str())
+            .collect();
+        assert_eq!(origins, vec!["https://b.example"]);
+
+        // clear empties everything.
+        let after_clear = bridge
+            .handle_admin(AdminRequest {
+                op: "clear".into(),
+                origin: None,
+            })
+            .expect("clear ok");
+        assert!(after_clear.sessions.is_empty());
+
+        // a revoke without an origin, or an unknown op, is a client error.
+        assert!(bridge
+            .handle_admin(AdminRequest {
+                op: "revoke".into(),
+                origin: None,
+            })
+            .is_err());
+        assert!(bridge
+            .handle_admin(AdminRequest {
+                op: "explode".into(),
+                origin: None,
+            })
+            .is_err());
+    }
+
+    /// #199 admin gate: the `x-deckard-admin` marker header must be PRESENT (any value); its absence
+    /// forbids the request. Presence is the whole check — its safety comes from the CORS invariant
+    /// below, not from the value.
+    #[test]
+    fn admin_authorized_requires_the_marker_header() {
+        assert!(!admin_authorized(
+            "POST /admin HTTP/1.1\r\nhost: 127.0.0.1:8765\r\ncontent-type: application/json"
+        ));
+        assert!(admin_authorized(
+            "POST /admin HTTP/1.1\r\nhost: 127.0.0.1:8765\r\nx-deckard-admin: 1"
+        ));
+        // Any value counts — the header's presence is the check, not its contents.
+        assert!(admin_authorized("x-deckard-admin: anything-here"));
+    }
+
+    /// #199 load-bearing CORS invariant: the admin gate header must NEVER be in the allow-list, or a
+    /// web page could clear a preflight and call `/admin` to enumerate or disconnect dapp sessions.
+    /// Enforced at the const level so a careless edit to the allow-list fails this test.
+    #[test]
+    fn cors_allow_headers_never_exposes_the_admin_gate() {
+        assert!(
+            !CORS_ALLOW_HEADERS.contains("x-deckard-admin"),
+            "the /admin gate header must never be CORS-allowed"
+        );
+        assert!(CORS_ALLOW_HEADERS.contains("content-type"));
     }
 }

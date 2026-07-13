@@ -108,6 +108,38 @@ The bridge stores sessions in memory only, keyed by origin:
 This is deliberately minimal. Restarting the bridge clears sessions. Future work should move this into a
 reviewed permissions registry with explicit approval UI, anti-phishing copy, revocation UX, and persistence.
 
+## Connections in the app, and per-site revoke (#199)
+
+The Deckard desktop app lists the bridge's live sessions under **Connections** in the sidebar and lets
+you disconnect a site with the ✕ on its row (or the ⌘K command "Revoke connected site"). This talks to
+a second endpoint on the same loopback HTTP server:
+
+- `POST /admin` with a JSON body: `{"op":"list"}`, `{"op":"revoke","origin":"https://…"}`, or
+  `{"op":"clear"}`. **Every op replies with the same shape** — the live session list *after* the op ran
+  (`{"sessions":[…]}`) — so the app refreshes its whole view in one round-trip.
+- **Revoke is a session-scoped disconnect, not a ban** (ADR 0006 / #202). A revoked site's next request
+  fails `4100 Unauthorized`; it may reconnect with `eth_requestAccounts` for a fresh session. There is no
+  blocklist and nothing persisted — sessions live only in the bridge's RAM, so a bridge restart clears
+  them all too. The richer per-origin permission model (and any persistence) is #48's territory.
+- **`clear` is the authority-reducing side of the app's Lock / Lockdown**: locking the wallet, or the
+  Activity STOP brake, best-effort-disconnects every live dapp session too.
+
+### Why a web page can't call `/admin`
+
+`/admin` requires the request header `x-deckard-admin` (any value) — else `403`. That single check is
+load-bearing, and it works *because* `x-deckard-admin` is a **custom** header that is deliberately **never**
+listed in the bridge's `access-control-allow-headers`. A browser must win a CORS preflight before it may
+send any custom request header, and the preflight does not allow `x-deckard-admin`, so the browser blocks
+a malicious page's request before it is ever sent. A local process (the Deckard app) makes a plain,
+preflight-free socket request and sets the header freely. Net: only local processes can enumerate connected
+origins or disconnect sessions. This is the same minimal-loopback posture ADR 0006 accepts for the alpha —
+there is no token auth, on purpose (it is a wire we intend to retire).
+
+The app finds the bridge at `127.0.0.1:8765` by default; set `DECKARD_BRIDGE_ADDR` to override (it must
+stay on loopback — the bridge rejects a non-loopback Host). If no bridge is running, the connect fails
+instantly and Connections simply shows nothing — an unreachable bridge holds no sessions, so an empty list
+is the honest answer.
+
 ## Run in dev/mock mode
 
 This is the smallest way to test the browser bridge without an unlocked wallet:

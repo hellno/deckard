@@ -29,6 +29,7 @@ use zeroize::Zeroizing;
 
 use deckard_signerd::SignerClient;
 
+use crate::bridge_admin;
 use crate::commit_flow::CommitFlow;
 use crate::errors::{humanize_deny, humanize_swap_deny, is_session_ended, short_err};
 use crate::settings::{Settings, ThemeModePref};
@@ -49,6 +50,12 @@ const BALANCE_POLL_SECS: u64 = 20;
 /// request raised while the operator is on Home/Settings/a wallet view is seen long before it
 /// silently expires.
 const PENDING_POLL_SECS: u64 = 5;
+
+/// Background Connections poll cadence (#199): how often the app asks the browser bridge's `/admin`
+/// endpoint for its live dapp sessions, so the Connections sidebar stays current while the operator
+/// works. Unlike the pending poll there is NO surface skip — the sidebar is visible everywhere. A
+/// dead bridge fails instantly (`ECONNREFUSED`), so this loop is cheap when no bridge is running.
+const CONNECTIONS_POLL_SECS: u64 = 5;
 
 /// The confirm arm-delay: a clear-signing review must be on screen this long before ⌘↵ / a
 /// click can confirm, so a keypress or click carried over from the previous screen can't approve
@@ -394,6 +401,21 @@ pub struct Shell {
     /// True while a background `PendingList` round-trip is in flight, so a slow daemon can't
     /// stack fetches (the same role `portfolio_loading` plays for the balance poll).
     pending_poll_inflight: bool,
+    /// The browser bridge's live dapp sessions from the last `/admin` list poll (#199) — the
+    /// Connections sidebar's data. Empty when the bridge is unreachable (sessions live in the
+    /// bridge's RAM, so no bridge means no live sessions — the honest answer, never a phantom row).
+    /// `pub(crate)` so the sidebar (`shell_chrome`) and the palette label (`palette`) can read it;
+    /// refreshed by [`Shell::start_connections_poll`].
+    pub(crate) connections: Vec<bridge_admin::ConnectedSite>,
+    /// Handle to the background Connections poll loop (#199); dropped on lock to cancel it.
+    connections_poll_task: Option<gpui::Task<()>>,
+    /// True while a `/admin` list round-trip is in flight, so a slow bridge can't stack fetches.
+    connections_inflight: bool,
+    /// Bumped by every disconnect (per-site revoke, ⌘K revoke-all-sites, Lock, Lockdown) so a list
+    /// poll reply that was already in flight — a snapshot from BEFORE the disconnect — is dropped
+    /// instead of folded in. Without this fence the stale reply could land last and resurrect the
+    /// just-revoked row for one poll interval, and "the row is gone" is the trust surface's promise.
+    connections_epoch: u64,
     /// Bumped on every `retarget`; a slow ENS resolution checks it before applying so a
     /// stale reply for a since-changed target can't clobber the current view.
     view_epoch: u64,
@@ -769,6 +791,10 @@ impl Shell {
             pending_poll_task: None,
             polled_pending: None,
             pending_poll_inflight: false,
+            connections: Vec::new(),
+            connections_poll_task: None,
+            connections_inflight: false,
+            connections_epoch: 0,
             view_epoch: 0,
             current_rpc,
             chain_id,
@@ -975,6 +1001,18 @@ impl Shell {
         self.pending_poll_task = None;
         self.polled_pending = None;
         self.pending_poll_inflight = false;
+        // Dapp sessions are authority too, and a Lock reduces ALL of it (#199): cancel the
+        // Connections poll, drop the local list, and best-effort-disconnect every live bridge
+        // session (detached, result ignored — the bridge is a separate process that may not even be
+        // running). Session-scoped disconnect, not a ban (ADR 0006).
+        self.connections_poll_task = None;
+        self.connections_inflight = false;
+        self.connections.clear();
+        self.connections_epoch = self.connections_epoch.wrapping_add(1);
+        cx.background_spawn(async move {
+            let _ = bridge_admin::clear_sites();
+        })
+        .detach();
         // Supersede any in-flight `refresh_activity` reply: without this, a fetch started just
         // before the lock could land afterwards and re-install a dead session's snapshot into
         // `self.activity` / `self.inbox` (#216) — and off-surface `waiting_count` falls back to the
@@ -1330,6 +1368,7 @@ impl Shell {
         self.kick_agent_policy(cx);
         self.start_balance_poll(cx);
         self.start_pending_poll(cx);
+        self.start_connections_poll(cx);
     }
 
     /// Fetch the daemon's live policy for the wallet home's "what the agent may do" fence (off
@@ -2880,6 +2919,15 @@ impl Shell {
     /// kill is visible — #60 acceptance 3.
     pub fn stop_revoke_all(&mut self, cx: &mut Context<Self>) {
         self.activity_stop_arming = false;
+        // Lockdown reduces ALL authority, dapp sessions included (#199): best-effort-disconnect
+        // every live bridge session and clear the local list. Detached + ignored — the bridge is a
+        // separate process that may not be running, and the key-zeroize below is the real brake.
+        self.connections.clear();
+        self.connections_epoch = self.connections_epoch.wrapping_add(1);
+        cx.background_spawn(async move {
+            let _ = bridge_admin::clear_sites();
+        })
+        .detach();
         let client = self.signer.client();
         self.activity_loading = true;
         cx.notify();
@@ -3070,6 +3118,123 @@ impl Shell {
         .detach();
     }
 
+    /// Start the background Connections poll (#199): a low-cadence, whole-session loop that keeps
+    /// the Connections sidebar current with the browser bridge's live dapp sessions. Mirrors
+    /// [`start_pending_poll`], minus the Activity-surface skip — the sidebar is visible on every
+    /// surface, so this poll never pauses. Stored in `connections_poll_task` (dropped on lock
+    /// cancels it) and epoch-fenced against a fast re-unlock. A first fetch fires immediately so a
+    /// site connected before this unlock shows up the moment the shell renders.
+    fn start_connections_poll(&mut self, cx: &mut Context<Self>) {
+        let epoch = self.auth_epoch;
+        self.kick_connections_refresh(cx);
+        self.connections_poll_task = Some(cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(Duration::from_secs(CONNECTIONS_POLL_SECS))
+                .await;
+            let keep = this.update(cx, |this, cx| {
+                // End the loop once this unlocked session is over (lock / re-unlock bumps the epoch).
+                if this.auth != AuthStep::Ready || this.auth_epoch != epoch {
+                    return false;
+                }
+                this.kick_connections_refresh(cx);
+                true
+            });
+            if !matches!(keep, Ok(true)) {
+                break;
+            }
+        }));
+    }
+
+    /// Fetch the bridge's live dapp sessions off the UI thread and fold them into `self.connections`
+    /// (#199). In-flight-guarded so a slow bridge can't stack round-trips; epoch-fenced so a reply
+    /// landing after lock/re-unlock is dropped. Notifies only when the list actually changed (the
+    /// poll is ambient — no needless repaints). On ERROR it sets the list empty: bridge sessions
+    /// live in the bridge's RAM, so an unreachable bridge genuinely means no live sessions — the
+    /// honest answer, never a stale phantom row.
+    fn kick_connections_refresh(&mut self, cx: &mut Context<Self>) {
+        if self.auth != AuthStep::Ready || self.connections_inflight {
+            return;
+        }
+        self.connections_inflight = true;
+        let epoch = self.auth_epoch;
+        let cepoch = self.connections_epoch;
+        let task = cx.background_spawn(async move { bridge_admin::list_sites() });
+        cx.spawn(async move |this, cx| {
+            let res = task.await;
+            this.update(cx, |this, cx| {
+                if this.auth_epoch != epoch {
+                    // Lock/re-unlock already reset the in-flight guard — this reply belongs to a
+                    // dead session; clearing the NEW session's guard here could stack fetches.
+                    return;
+                }
+                this.connections_inflight = false;
+                // A disconnect fired while this list fetch was in flight: the snapshot predates it,
+                // so folding it in could resurrect the just-revoked row for one poll interval. Drop
+                // it — the disconnect's own reply (or the next tick) carries the current truth. The
+                // guard above IS cleared: same live session, and the next tick must be able to fetch.
+                if this.connections_epoch != cepoch {
+                    return;
+                }
+                let next = res.unwrap_or_default();
+                if this.connections != next {
+                    this.connections = next;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Disconnect one connected site (#199): a session-scoped revoke, NOT a persistent ban
+    /// (ADR 0006) — the site's next request fails `4100 Unauthorized` and it may reconnect fresh.
+    /// The bridge returns the remaining live list, which we fold in immediately (epoch-fenced) so
+    /// the row disappears without waiting for the next poll tick. A bridge error clears the list
+    /// (no bridge = no live sessions — the honest, fail-safe direction). `pub(crate)` so the
+    /// Connections sidebar row's ✕ (`shell_chrome`) can call it.
+    pub(crate) fn revoke_connected_site(&mut self, origin: String, cx: &mut Context<Self>) {
+        let epoch = self.auth_epoch;
+        // Bump the connections epoch so an in-flight list poll (a pre-revoke snapshot) is dropped
+        // instead of resurrecting this row; capture AFTER the bump so our own reply still folds.
+        self.connections_epoch = self.connections_epoch.wrapping_add(1);
+        let cepoch = self.connections_epoch;
+        let task = cx.background_spawn(async move { bridge_admin::revoke_site(&origin) });
+        cx.spawn(async move |this, cx| {
+            let res = task.await;
+            this.update(cx, |this, cx| {
+                if this.auth_epoch != epoch || this.connections_epoch != cepoch {
+                    return;
+                }
+                this.connections = res.unwrap_or_default();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Disconnect every connected site (#199): the ⌘K "revoke all connected sites" path. Session-
+    /// scoped like [`revoke_connected_site`]; folds the (now-empty) returned list in immediately.
+    fn disconnect_all_sites(&mut self, cx: &mut Context<Self>) {
+        let epoch = self.auth_epoch;
+        // Same stale-poll fence as `revoke_connected_site`: bump, then capture.
+        self.connections_epoch = self.connections_epoch.wrapping_add(1);
+        let cepoch = self.connections_epoch;
+        let task = cx.background_spawn(async move { bridge_admin::clear_sites() });
+        cx.spawn(async move |this, cx| {
+            let res = task.await;
+            this.update(cx, |this, cx| {
+                if this.auth_epoch != epoch || this.connections_epoch != cepoch {
+                    return;
+                }
+                this.connections = res.unwrap_or_default();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// The "waiting on you" count behind the everywhere-cues — the home waiting strip and the
     /// sidebar Activity badge (#200). Dispatch is the pure [`waiting_count`] (unit-tested): on the
     /// Activity surface the UNCAPPED inbox is the source (#216), so the badge always equals the
@@ -3238,6 +3403,22 @@ impl Shell {
             "revoke-all" => {
                 self.open_activity(window, cx);
                 self.stop_revoke_all(cx);
+            }
+            // Disconnect connected dapp site(s) (#199). The action ALWAYS matches the live label
+            // `display_label` shows: 0 → nothing to do; exactly 1 → disconnect that one site; N>1 →
+            // disconnect all. Per-site precision at N>1 lives on the sidebar row's ✕; from the
+            // palette, revoking MORE than one when the label reads "all N" is the fail-safe direction
+            // (revoking too much only reduces authority). Session-scoped disconnect, not a ban.
+            "revoke-site" => {
+                // Snapshot origins into an owned Vec first so the match doesn't hold an immutable
+                // borrow of `self.connections` across the &mut-self revoke calls below.
+                let origins: Vec<String> =
+                    self.connections.iter().map(|s| s.origin.clone()).collect();
+                match origins.as_slice() {
+                    [] => {}
+                    [only] => self.revoke_connected_site(only.clone(), cx),
+                    _ => self.disconnect_all_sites(cx),
+                }
             }
             "settings" => self.open(Surface::Settings, cx),
             // Rename the wallet / agent (E2, #182): open Settings and focus the field so the ⌘K
