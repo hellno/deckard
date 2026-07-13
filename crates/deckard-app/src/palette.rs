@@ -37,6 +37,17 @@ fn display_label(this: &Shell, id: &str, title: &str) -> String {
                 "Mask balances".to_string()
             }
         }
+        // The Connections revoke command (#199) names exactly what Enter will disconnect. It reads
+        // the SAME `connection_revoke_target` the action reads (shell.rs), so the label and the
+        // action can't disagree: nothing (static title) / the single site's host / "all N".
+        "revoke-site" => match this.connection_revoke_target() {
+            crate::shell::RevokeTarget::Nothing => title.to_string(),
+            crate::shell::RevokeTarget::One(origin) => format!(
+                "Revoke connected site — {}",
+                crate::bridge_admin::origin_host(&origin)
+            ),
+            crate::shell::RevokeTarget::All(n) => format!("Revoke all {n} connected sites"),
+        },
         _ => title.to_string(),
     }
 }

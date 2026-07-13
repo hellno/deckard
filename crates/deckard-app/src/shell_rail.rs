@@ -132,10 +132,15 @@ impl Shell {
         }
 
         // The golden ref's trailing composition metasec — ALWAYS present (independent of whether the
-        // policy has landed). Connections: the reserved/empty state — the browser bridge (dapp
-        // connections) is deferred (ADR-0001 / #44), so we render the honest empty "none", NEVER a
-        // fabricated count. Agents: the app models one agent on this wallet; its state follows the
-        // live policy (idle until it lands, active unless a STOP revoked it).
+        // policy has landed). Connections: the LIVE browser-bridge session count (#199) — the same
+        // `self.connections` the sidebar renders, so the rail and the Connections group can never
+        // disagree; "none" is the honest empty state, never a fabricated count. Agents: the app
+        // models one agent on this wallet; its state follows the live policy (idle until it lands,
+        // active unless a STOP revoked it).
+        let connections = match self.connections.len() {
+            0 => "none".to_string(),
+            n => format!("{n} connected"),
+        };
         let agents = match self.agent_policy.as_ref() {
             Some(p) if p.revoked => "1 stopped",
             Some(_) => "1 active",
@@ -144,7 +149,7 @@ impl Shell {
         let summary = v_flex()
             .w_full()
             .gap_2()
-            .child(kv("Connections", KvValue::Sans("none")))
+            .child(kv("Connections", KvValue::Sans(&connections)))
             .child(kv("Agents", KvValue::Sans(agents)))
             .into_any_element();
         col = col.child(meta_section(None, summary, theme));

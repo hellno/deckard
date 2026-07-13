@@ -30,7 +30,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - id: deny
-        uses: EmbarkStudios/cargo-deny-action@v2
+        # Pinned to the last-good release: v2.1.0 (2026-07-13) drops a positional arg in action.yml
+        # without updating its entrypoint, shifting --log-level into a command slot — every run dies
+        # with `unrecognized subcommand 'warn'`. Unpin to @v2 once upstream ships a fix.
+        uses: EmbarkStudios/cargo-deny-action@v2.0.20
         with:
           command: check advisories
       # Make the daily watch LOUD (#82): if the ADVISORY SCAN itself failed (the `steps.deny.outcome`
