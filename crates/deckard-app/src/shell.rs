@@ -985,7 +985,13 @@ impl Shell {
     pub fn lock(&mut self, cx: &mut Context<Self>) {
         let client = self.signer.client();
         cx.background_spawn(async move {
+            // ORDER MATTERS (#199, codex finding): zeroize the daemon key FIRST, then disconnect
+            // the bridge sessions. Clearing first would open a race — a dapp reconnecting via
+            // `eth_requestAccounts` in the window before the daemon locks would be granted a fresh
+            // session that survives the lock. Locked-first, that reconnect fails at the daemon
+            // (no unlocked account to read) and grants nothing.
             let _ = client.lock_blocking();
+            let _ = bridge_admin::clear_sites();
         })
         .detach();
         self.wallet_address = None;
@@ -1002,17 +1008,14 @@ impl Shell {
         self.polled_pending = None;
         self.pending_poll_inflight = false;
         // Dapp sessions are authority too, and a Lock reduces ALL of it (#199): cancel the
-        // Connections poll, drop the local list, and best-effort-disconnect every live bridge
-        // session (detached, result ignored — the bridge is a separate process that may not even be
-        // running). Session-scoped disconnect, not a ban (ADR 0006).
+        // Connections poll and drop the local list here; the bridge-side disconnect runs in the
+        // task above, sequenced AFTER the daemon lock (best-effort, result ignored — the bridge is
+        // a separate process that may not even be running). Session-scoped disconnect, not a ban
+        // (ADR 0006).
         self.connections_poll_task = None;
         self.connections_inflight = false;
         self.connections.clear();
         self.connections_epoch = self.connections_epoch.wrapping_add(1);
-        cx.background_spawn(async move {
-            let _ = bridge_admin::clear_sites();
-        })
-        .detach();
         // Supersede any in-flight `refresh_activity` reply: without this, a fetch started just
         // before the lock could land afterwards and re-install a dead session's snapshot into
         // `self.activity` / `self.inbox` (#216) — and off-surface `waiting_count` falls back to the
@@ -2919,19 +2922,22 @@ impl Shell {
     /// kill is visible — #60 acceptance 3.
     pub fn stop_revoke_all(&mut self, cx: &mut Context<Self>) {
         self.activity_stop_arming = false;
-        // Lockdown reduces ALL authority, dapp sessions included (#199): best-effort-disconnect
-        // every live bridge session and clear the local list. Detached + ignored — the bridge is a
-        // separate process that may not be running, and the key-zeroize below is the real brake.
+        // Lockdown reduces ALL authority, dapp sessions included (#199): clear the local list
+        // optimistically; the bridge-side disconnect runs in the task below, sequenced AFTER the
+        // daemon revoke (best-effort, ignored — the bridge may not be running, and the key-zeroize
+        // is the real brake). Clearing the bridge FIRST would open a race: a dapp reconnecting in
+        // the window before the daemon revokes would be granted a fresh session that survives the
+        // Lockdown (codex finding); revoked-first, that reconnect gets nothing from the daemon.
         self.connections.clear();
         self.connections_epoch = self.connections_epoch.wrapping_add(1);
-        cx.background_spawn(async move {
-            let _ = bridge_admin::clear_sites();
-        })
-        .detach();
         let client = self.signer.client();
         self.activity_loading = true;
         cx.notify();
-        let task = cx.background_spawn(async move { client.revoke_all_blocking() });
+        let task = cx.background_spawn(async move {
+            let res = client.revoke_all_blocking();
+            let _ = bridge_admin::clear_sites();
+            res
+        });
         cx.spawn(async move |this, cx| {
             let res = task.await;
             this.update(cx, |this, cx| match res {
@@ -3190,8 +3196,11 @@ impl Shell {
     /// (ADR 0006) — the site's next request fails `4100 Unauthorized` and it may reconnect fresh.
     /// The bridge returns the remaining live list, which we fold in immediately (epoch-fenced) so
     /// the row disappears without waiting for the next poll tick. A bridge error clears the list
-    /// (no bridge = no live sessions — the honest, fail-safe direction). `pub(crate)` so the
-    /// Connections sidebar row's ✕ (`shell_chrome`) can call it.
+    /// (no bridge = no live sessions — the honest, fail-safe direction). Known, accepted edge: two
+    /// OVERLAPPING revokes whose loopback replies reorder can leave the slower site's row on
+    /// screen until the next poll tick reconciles (≤5s) — every revoke IS applied on the bridge;
+    /// only the interim display can lag. `pub(crate)` so the Connections sidebar row's ✕
+    /// (`shell_chrome`) can call it.
     pub(crate) fn revoke_connected_site(&mut self, origin: String, cx: &mut Context<Self>) {
         let epoch = self.auth_epoch;
         // Bump the connections epoch so an in-flight list poll (a pre-revoke snapshot) is dropped
