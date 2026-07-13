@@ -57,6 +57,20 @@ const PENDING_POLL_SECS: u64 = 5;
 /// dead bridge fails instantly (`ECONNREFUSED`), so this loop is cheap when no bridge is running.
 const CONNECTIONS_POLL_SECS: u64 = 5;
 
+/// What the ⌘K "Revoke connected site" command will disconnect (#199). Computed ONCE by
+/// [`Shell::connection_revoke_target`] and consumed by BOTH the palette label
+/// (`palette::display_label`) and the action (`Shell::run_palette_command`), so the label can never
+/// promise a different disconnect than Enter performs — a trust-surface invariant that was
+/// previously a hand-maintained partition duplicated across two files.
+pub(crate) enum RevokeTarget {
+    /// No connected sites — the command is a no-op and shows its static title.
+    Nothing,
+    /// Exactly one site: disconnect it; the label names its host.
+    One(String),
+    /// Several sites: disconnect all; the label reads "all N".
+    All(usize),
+}
+
 /// The confirm arm-delay: a clear-signing review must be on screen this long before ⌘↵ / a
 /// click can confirm, so a keypress or click carried over from the previous screen can't approve
 /// a money move (DESIGN §confirm pattern). The ⌘↵ chord plus this delay replace the old hold.
@@ -2928,6 +2942,14 @@ impl Shell {
         // is the real brake). Clearing the bridge FIRST would open a race: a dapp reconnecting in
         // the window before the daemon revokes would be granted a fresh session that survives the
         // Lockdown (codex finding); revoked-first, that reconnect gets nothing from the daemon.
+        //
+        // CANCEL the connections poll here, exactly as `lock` does. Because the bridge clear is
+        // sequenced after the daemon revoke round-trip, a still-running poll tick could fetch the
+        // not-yet-cleared sessions in that window and — capturing the post-bump epoch — fold them
+        // back in, flashing "N connected" onto a locked-down wallet (the panic brake's promise is
+        // the row is gone). Dropping the task stops any tick; the next unlock restarts the poll.
+        self.connections_poll_task = None;
+        self.connections_inflight = false;
         self.connections.clear();
         self.connections_epoch = self.connections_epoch.wrapping_add(1);
         let client = self.signer.client();
@@ -3154,9 +3176,10 @@ impl Shell {
     /// Fetch the bridge's live dapp sessions off the UI thread and fold them into `self.connections`
     /// (#199). In-flight-guarded so a slow bridge can't stack round-trips; epoch-fenced so a reply
     /// landing after lock/re-unlock is dropped. Notifies only when the list actually changed (the
-    /// poll is ambient — no needless repaints). On ERROR it sets the list empty: bridge sessions
-    /// live in the bridge's RAM, so an unreachable bridge genuinely means no live sessions — the
-    /// honest answer, never a stale phantom row.
+    /// poll is ambient — no needless repaints). On ERROR it KEEPS the current list: `bridge_admin`
+    /// already maps "no bridge listening" to an honest empty list, so a genuinely-down bridge
+    /// clears; an error here is a reachable-but-unhealthy bridge (a momentary timeout), where
+    /// blanking would falsely show "no connected sites" for still-live sessions until the next tick.
     fn kick_connections_refresh(&mut self, cx: &mut Context<Self>) {
         if self.auth != AuthStep::Ready || self.connections_inflight {
             return;
@@ -3181,63 +3204,89 @@ impl Shell {
                 if this.connections_epoch != cepoch {
                     return;
                 }
-                let next = res.unwrap_or_default();
-                if this.connections != next {
-                    this.connections = next;
-                    cx.notify();
+                if let Ok(next) = res {
+                    if this.connections != next {
+                        this.connections = next;
+                        cx.notify();
+                    }
                 }
             })
             .ok();
         })
         .detach();
+    }
+
+    /// What the ⌘K "Revoke connected site" command targets right now (#199) — the single source
+    /// both the palette label and its action read, so they can't disagree about what Enter does.
+    /// `pub(crate)` for `palette::display_label`.
+    pub(crate) fn connection_revoke_target(&self) -> RevokeTarget {
+        match self.connections.as_slice() {
+            [] => RevokeTarget::Nothing,
+            [only] => RevokeTarget::One(only.origin.clone()),
+            many => RevokeTarget::All(many.len()),
+        }
     }
 
     /// Disconnect one connected site (#199): a session-scoped revoke, NOT a persistent ban
     /// (ADR 0006) — the site's next request fails `4100 Unauthorized` and it may reconnect fresh.
-    /// The bridge returns the remaining live list, which we fold in immediately (epoch-fenced) so
-    /// the row disappears without waiting for the next poll tick. A bridge error clears the list
-    /// (no bridge = no live sessions — the honest, fail-safe direction). Known, accepted edge: two
-    /// OVERLAPPING revokes whose loopback replies reorder can leave the slower site's row on
-    /// screen until the next poll tick reconciles (≤5s) — every revoke IS applied on the bridge;
-    /// only the interim display can lag. `pub(crate)` so the Connections sidebar row's ✕
-    /// (`shell_chrome`) can call it.
+    /// `pub(crate)` so the Connections sidebar row's ✕ (`shell_chrome`) can call it.
     pub(crate) fn revoke_connected_site(&mut self, origin: String, cx: &mut Context<Self>) {
-        let epoch = self.auth_epoch;
-        // Bump the connections epoch so an in-flight list poll (a pre-revoke snapshot) is dropped
-        // instead of resurrecting this row; capture AFTER the bump so our own reply still folds.
-        self.connections_epoch = self.connections_epoch.wrapping_add(1);
-        let cepoch = self.connections_epoch;
-        let task = cx.background_spawn(async move { bridge_admin::revoke_site(&origin) });
-        cx.spawn(async move |this, cx| {
-            let res = task.await;
-            this.update(cx, |this, cx| {
-                if this.auth_epoch != epoch || this.connections_epoch != cepoch {
-                    return;
-                }
-                this.connections = res.unwrap_or_default();
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+        self.apply_disconnect(move || bridge_admin::revoke_site(&origin), cx);
     }
 
-    /// Disconnect every connected site (#199): the ⌘K "revoke all connected sites" path. Session-
-    /// scoped like [`revoke_connected_site`]; folds the (now-empty) returned list in immediately.
+    /// Disconnect every connected site (#199): the ⌘K "revoke all connected sites" path.
     fn disconnect_all_sites(&mut self, cx: &mut Context<Self>) {
+        self.apply_disconnect(bridge_admin::clear_sites, cx);
+    }
+
+    /// Run a disconnect op against the bridge and fold its returned live list into
+    /// `self.connections` (#199). Shared by per-site revoke and revoke-all so the epoch fence, the
+    /// in-flight guard, and the error handling can never drift between the two paths.
+    ///
+    /// - Bumps `connections_epoch` so an in-flight LIST poll carrying a pre-op snapshot is dropped
+    ///   instead of resurrecting a just-revoked row (capture the value AFTER the bump so this op's
+    ///   own reply still folds).
+    /// - Sets `connections_inflight` so the poll won't START a fresh list fetch under the same
+    ///   post-bump epoch while this op round-trips — closing the poll-vs-revoke fence gap the bare
+    ///   epoch bump left open.
+    /// - On SUCCESS the returned list replaces `self.connections`; on ERROR the current list is
+    ///   KEPT and the next poll reconciles. A failed revoke must NOT blank sibling rows or claim
+    ///   "all disconnected" — a bridge error is not proof the sessions are gone. (`bridge_admin`
+    ///   already turns "no bridge listening" into an honest empty list, so a genuinely-down bridge
+    ///   still clears; only a reachable-but-unhealthy bridge yields the error handled here.)
+    ///
+    /// Accepted edge: two OVERLAPPING revokes whose loopback replies reorder can leave the slower
+    /// site's row on screen until the next poll tick reconciles (≤5s) — every revoke IS applied on
+    /// the bridge; only the interim display can lag.
+    fn apply_disconnect(
+        &mut self,
+        op: impl FnOnce() -> anyhow::Result<Vec<bridge_admin::ConnectedSite>> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
         let epoch = self.auth_epoch;
-        // Same stale-poll fence as `revoke_connected_site`: bump, then capture.
         self.connections_epoch = self.connections_epoch.wrapping_add(1);
         let cepoch = self.connections_epoch;
-        let task = cx.background_spawn(async move { bridge_admin::clear_sites() });
+        self.connections_inflight = true;
+        let task = cx.background_spawn(async move { op() });
         cx.spawn(async move |this, cx| {
             let res = task.await;
             this.update(cx, |this, cx| {
-                if this.auth_epoch != epoch || this.connections_epoch != cepoch {
+                if this.auth_epoch != epoch {
+                    // Reply belongs to a dead session (lock/re-unlock already reset the guard).
                     return;
                 }
-                this.connections = res.unwrap_or_default();
-                cx.notify();
+                this.connections_inflight = false;
+                if this.connections_epoch != cepoch {
+                    // A newer disconnect superseded this one; let its reply carry the truth.
+                    return;
+                }
+                // Keep the current list on error (see the doc): only a successful op reshapes it.
+                if let Ok(next) = res {
+                    if this.connections != next {
+                        this.connections = next;
+                        cx.notify();
+                    }
+                }
             })
             .ok();
         })
@@ -3413,22 +3462,17 @@ impl Shell {
                 self.open_activity(window, cx);
                 self.stop_revoke_all(cx);
             }
-            // Disconnect connected dapp site(s) (#199). The action ALWAYS matches the live label
-            // `display_label` shows: 0 → nothing to do; exactly 1 → disconnect that one site; N>1 →
-            // disconnect all. Per-site precision at N>1 lives on the sidebar row's ✕; from the
-            // palette, revoking MORE than one when the label reads "all N" is the fail-safe direction
-            // (revoking too much only reduces authority). Session-scoped disconnect, not a ban.
-            "revoke-site" => {
-                // Snapshot origins into an owned Vec first so the match doesn't hold an immutable
-                // borrow of `self.connections` across the &mut-self revoke calls below.
-                let origins: Vec<String> =
-                    self.connections.iter().map(|s| s.origin.clone()).collect();
-                match origins.as_slice() {
-                    [] => {}
-                    [only] => self.revoke_connected_site(only.clone(), cx),
-                    _ => self.disconnect_all_sites(cx),
-                }
-            }
+            // Disconnect connected dapp site(s) (#199). The action reads the SAME
+            // `connection_revoke_target` the palette label rendered, so Enter always disconnects
+            // exactly what the label named: nothing / that one site / all of them. Per-site
+            // precision at N>1 lives on the sidebar row's ✕; from the palette, revoking all when the
+            // label reads "all N" is the fail-safe direction (revoking too much only reduces
+            // authority). Session-scoped disconnect, not a ban.
+            "revoke-site" => match self.connection_revoke_target() {
+                RevokeTarget::Nothing => {}
+                RevokeTarget::One(origin) => self.revoke_connected_site(origin, cx),
+                RevokeTarget::All(_) => self.disconnect_all_sites(cx),
+            },
             "settings" => self.open(Surface::Settings, cx),
             // Rename the wallet / agent (E2, #182): open Settings and focus the field so the ⌘K
             // command lands the operator directly on the input it named. Drop the captured

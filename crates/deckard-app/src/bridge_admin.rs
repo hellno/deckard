@@ -10,9 +10,13 @@
 //! listener; a bridge that isn't running fails instantly with `ECONNREFUSED`.
 //!
 //! Revoke is a session-scoped DISCONNECT, not a ban (ADR 0006): a revoked site's next request
-//! fails `4100 Unauthorized`, and it may reconnect for a fresh session. Sessions live only in the
-//! bridge's RAM, so an unreachable bridge genuinely means no live sessions — an error maps to an
-//! empty list, which is the honest answer, never a stale phantom row.
+//! fails `4100 Unauthorized`, and it may reconnect for a fresh session.
+//!
+//! **Error semantics.** Sessions live only in the bridge's RAM, so a bridge that isn't listening
+//! genuinely means no live sessions: a failed CONNECT resolves to an honest empty list. But a
+//! reachable-but-unhealthy bridge (a read/write timeout, a partial response, a non-200) resolves to
+//! `Err` — NOT an empty list — so the caller keeps its current view rather than falsely blanking
+//! live sessions on a momentary hiccup. A transient error is not proof a dapp disconnected.
 
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -52,15 +56,39 @@ fn bridge_addr() -> String {
 /// background-only. Writes a minimal HTTP/1.1 request with the `x-deckard-admin` marker header the
 /// bridge gates on (a web page can't set it — the CORS preflight forbids it), then reads to EOF
 /// (the bridge answers `connection: close`).
-fn admin_request(body: &str) -> anyhow::Result<Vec<ConnectedSite>> {
-    let addr = bridge_addr();
-    // Resolve to a concrete `SocketAddr` so `connect_timeout` can bound the connect. The default is
-    // a literal IP:port (no DNS); a hostname override may resolve here, which is the caller's choice.
+/// Resolve the bridge address to a concrete LOOPBACK socket, or an error. Refuses a non-loopback
+/// target: the bridge only ever binds loopback (`serve` bails otherwise), so a non-loopback
+/// `DECKARD_BRIDGE_ADDR` is a misconfiguration — we must never write the `x-deckard-admin` marker +
+/// a disconnect command to a remote host, nor trust its session list. Mirrors the server's own
+/// loopback guard; the marker header must not leave this machine. Pure w.r.t. env (takes the addr
+/// string) so it's unit-testable without a socket.
+fn resolve_loopback_addr(addr: &str) -> anyhow::Result<std::net::SocketAddr> {
     let socket_addr = addr
         .to_socket_addrs()?
         .next()
         .ok_or_else(|| anyhow::anyhow!("bridge address {addr} did not resolve"))?;
-    let mut stream = TcpStream::connect_timeout(&socket_addr, CONNECT_TIMEOUT)?;
+    if !socket_addr.ip().is_loopback() {
+        anyhow::bail!("refusing admin request to non-loopback bridge address {addr}");
+    }
+    Ok(socket_addr)
+}
+
+fn admin_request(body: &str) -> anyhow::Result<Vec<ConnectedSite>> {
+    let addr = bridge_addr();
+    let socket_addr = resolve_loopback_addr(&addr)?;
+    let mut stream = match TcpStream::connect_timeout(&socket_addr, CONNECT_TIMEOUT) {
+        Ok(stream) => stream,
+        // REFUSED is the one connect failure that proves nothing is listening: there is no bridge,
+        // so there are no live sessions — they live in the bridge's RAM. Report an honest empty
+        // list. Every OTHER failure (a connect timeout on a momentarily-stalled accept loop, an
+        // unreachable error) is NOT proof the bridge is gone, so it propagates as `Err` — same as
+        // a post-connect failure — and the caller keeps its current list instead of falsely
+        // blanking still-live sessions.
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+            return Ok(Vec::new())
+        }
+        Err(error) => return Err(error.into()),
+    };
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
     let request = format!(
@@ -179,6 +207,24 @@ mod tests {
         // A 200 with a non-JSON body is still an error.
         let raw = http("HTTP/1.1 200 OK", "<html>nope</html>");
         assert!(parse_admin_response(&raw).is_err());
+    }
+
+    #[test]
+    fn resolve_loopback_addr_accepts_loopback_and_refuses_the_rest() {
+        // Loopback literals resolve without DNS and pass. Note [::1] passes THIS guard (its job is
+        // only "the admin marker never leaves this machine") but today's bridge can't bind or serve
+        // it (`serve`/`host_is_loopback` accept 127.0.0.1/localhost only), so an IPv6 override
+        // fails CLOSED downstream with a 403 — accepted here for the guard's own honesty, not as
+        // an end-to-end capability claim.
+        assert!(resolve_loopback_addr("127.0.0.1:8765").is_ok());
+        assert!(resolve_loopback_addr("[::1]:8765").is_ok());
+        // A non-loopback literal is refused — the admin marker must never leave this machine, even
+        // if DECKARD_BRIDGE_ADDR is misconfigured to a routable host. Literal IPs, so no DNS.
+        assert!(resolve_loopback_addr("8.8.8.8:80").is_err());
+        assert!(resolve_loopback_addr("93.184.216.34:80").is_err());
+        // Malformed / unresolvable input errors rather than dialing anything.
+        assert!(resolve_loopback_addr("not-an-address").is_err());
+        assert!(resolve_loopback_addr("127.0.0.1").is_err());
     }
 
     #[test]
