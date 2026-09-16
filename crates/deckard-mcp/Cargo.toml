@@ -26,7 +26,7 @@ deckard-core = { path = "../deckard-core", default-features = false, features = 
 
 # The official Rust MCP SDK (approved dep): stdio transport + #[tool] macros. Its `schemars`
 # re-export drives the tool input schemas — no separate direct schemars dependency.
-rmcp = { version = "1.7", features = ["server", "transport-io"] }
+rmcp = { version = "2.0", features = ["server", "transport-io"] }
 # CLI parsing (approved dep).
 clap = { version = "4", features = ["derive"] }
 
